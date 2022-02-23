@@ -1,0 +1,26 @@
+[tool.poetry]
+name = "itps_transcription_model"
+version = "0.1.0"
+description = ""
+authors = ["Your Name <you@example.com>"]
+
+[tool.poetry.dependencies]
+python = "^3.7.1"
+fastai = "^2.5.3"
+pytorch-lightning = "^1.5.0"
+pandas = "^1.0.0"
+lightning-flash = {extras = ["audio"], version = "^0.5.2"}
+transformers = "^4.12.4"
+datasets = "^1.16.1"
+pytorch = "^1.0.2"
+torchaudio = "^0.10.1"
+
+[tool.poetry.dev-dependencies]
+yapf = "^0.31.0"
+pytest = "^6.2.5"
+ipykernel = "^6.5.0"
+ipywidgets = "^7.6.5"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
