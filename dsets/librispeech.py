@@ -12,7 +12,7 @@ TEST_OTHER = "https://www.dropbox.com/s/efskenwqnqu68tf/test-other.tar.gz?dl=1"
 TRAIN_CLEAN = NotImplemented
 TRAIN_OTHER = NotImplemented
 
-dsets = {
+_LIBRISPEECCH_DSETS = {
     "dev-clean": DEV_CLEAN,
     "dev-other": DEV_OTHER,
     "test-clean": TEST_CLEAN,
@@ -53,6 +53,6 @@ Dset_types = Literal["train", "test", "dev"]
 
 def get_librispeech(dset: Dsets, dset_type: Dset_types) -> Tuple[Path, dict]:
     dset_name = dset + "-" + dset_type
-    dset_url = dsets[dset_name]
+    dset_url = _LIBRISPEECCH_DSETS[dset_name]
     path = untar_data(dset_url)
     return path, _assemble_librispeech_dict(path / dset_name)
