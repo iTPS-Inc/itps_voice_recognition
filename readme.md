@@ -5,6 +5,8 @@ There is a single function, `load_dset()`, with which it is possible to access a
 
 | Dataset           | password | language | Supported | Complete | Notes          |
 |-------------------|----------|----------|-----------|----------|----------------|
+| itps-corpus       | no       | jp/en    | Yes       | Yes      | -              |
+| librispeech       | no       | EN       | Yes       | Yes      | -              |
 | J-MAC             | yes      | JP       | x         | x        | No Audio files |
 | J-KAC             | yes      | JP       | x         | -        | -              |
 | LJ_Speech_Dataset | ?        | ?        | x         | -        | -              |
@@ -16,8 +18,6 @@ There is a single function, `load_dset()`, with which it is possible to access a
 | JVS               | ?        | ?        | x         | -        | -              |
 | CENSREC-3         | ?        | ?        | x         | -        | -              |
 | CENSREC-1         | ?        | ?        | x         | -        | -              |
-| itps-corpus       | x        | jp/en    | Yes       | Yes      | -              |
-| librispeech       | x        | en       | Yes       | Yes      | -              |
 
 ## Scripts
 ### Extracting data from excel files to make easy to use dataset.
