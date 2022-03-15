@@ -7,9 +7,9 @@ There is a single function, `load_dset()`, with which it is possible to access a
 |-------------------|----------|----------|-----------|----------|----------------|
 | itps-corpus       | no       | jp/en    | yes       | yes      | -              |
 | librispeech       | no       | en       | yes       | yes      | -              |
-| J-MAC             | yes      | jp       | x         | x        | No audio files |
+| J-MAC             | yes      | jp       | x         | no        | No audio files |
 | J-KAC             | yes      | jp       | x         | -        | -              |
-| LJ_Speech_Dataset | ?        | ?        | x         | -        | -              |
+| LJ_Speech_Dataset | no       | en       | yes       | yes      | -              |
 | JSUT              | ?        | ?        | x         | -        | -              |
 | NICT SPREDS       | ?        | ?        | x         | -        | -              |
 | RWCP              | ?        | ?        | x         | -        | -              |
