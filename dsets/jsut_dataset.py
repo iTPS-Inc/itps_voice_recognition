@@ -28,7 +28,7 @@ def _get_info(text_files, kind="transcript_utf8", colname="text"):
     )
 
 
-def _get_jsut_data():
+def get_jsut_data():
     p = untar_data(JSUT_URL)
     text_files = get_files(p, extensions=[".txt"])
     d = _get_info(text_files, kind="transcript_utf8", colname="text")
