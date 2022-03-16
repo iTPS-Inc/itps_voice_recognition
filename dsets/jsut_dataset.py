@@ -4,7 +4,6 @@ import pandas as pd
 
 JSUT_URL = "https://www.dropbox.com/s/a2z6bklpaphiu1k/jsut_ver1.1.zip?dl=1"
 
-
 def _get_info_file(fn):
     out_dict = {}
     with open(fn, "r") as f:

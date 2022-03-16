@@ -7,9 +7,8 @@ There is a single function, `load_dset()`, with which it is possible to access a
 |-------------------|---------|----------|----------|-----------|----------|----------------|--------|
 | itps-corpus-jp    | yes     | jp/en    | no       | yes       | yes      | -              | -      |
 | librispeech       | yes     | en       | no       | yes       | yes      | -              | -      |
-| J-MAC             | no      | jp       | yes      | x         | no       | No audio files | -      |
-| LJ_Speech_Dataset | no      | en       | no       | yes       | yes      | -              | -      |
-| JSUT              | no      | jp       | no       | yes       | yes      | -              | -      |
+| LJ_Speech_Dataset | yes     | en       | no       | yes       | yes      | -              | -      |
+| JSUT              | yes     | jp       | no       | yes       | yes      | -              | -      |
 | J-KAC             | no      | jp       | yes      | x         | -        | -              | -      |
 | NICT SPREDS       | no      | ?        | ?        | x         | -        | -              | -      |
 | RWCP              | no      | ?        | ?        | x         | -        | -              | -      |
@@ -18,6 +17,7 @@ There is a single function, `load_dset()`, with which it is possible to access a
 | JVS               | no      | ?        | ?        | x         | -        | -              | -      |
 | CENSREC-3         | no      | ?        | ?        | x         | -        | -              | -      |
 | CENSREC-1         | no      | ?        | ?        | x         | -        | -              | -      |
+| J-MAC             | no      | jp       | yes      | x         | no       | No audio files | -      |
 
 ## Scripts
 ### Extracting data from excel files to make easy to use dataset.
