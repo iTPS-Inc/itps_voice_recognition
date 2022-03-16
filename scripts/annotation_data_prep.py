@@ -3,13 +3,18 @@ from fastai.data.all import untar_data, get_files
 import pandas as pd
 import shutil, os
 
-ANNOTATION_DATA_URL_DROPBOX = (
+ANNOTATION_DATA_URL = (
     "https://www.dropbox.com/s/92tbhcdlymk5s0w/annotation_data.tar.gz?dl=1"
 )
 
-
-def __main__():
-    p = untar_data(ANNOTATION_DATA_URL_DROPBOX)
+def main():
+    p = untar_data(ANNOTATION_DATA_URL, force_download=True)
+    print("Finished download")
+    jp_path = p / "アノテーションデータ/20210511_アノテーションデータ_full/20210511_Japanese_Delivery_Fin"
+    en_path = p / "アノテーションデータ/20210511_アノテーションデータ_full/20210511_English_Delivery_Fin"
+    shutil.move(str(jp_path), p/"jp/")
+    shutil.move(str(en_path), p/"en/")
+    print("Prepared directories")
     dfs = []
     for lang in ["en", "jp"]:
         wav_files = get_files(p / lang, extensions=[".wav"])
@@ -50,6 +55,7 @@ def __main__():
                     continue
                 shutil.move(src, new_dir)
         dfs = dfs + [df]
+        print(f"Finished moving {lang} files")
 
     df = pd.concat(dfs).drop("index", axis="columns").reset_index(drop=True)
     df["dataset"] = df["train"].apply(lambda x: "train" if x else "test")
@@ -58,3 +64,6 @@ def __main__():
         axis=1,
     )
     df.to_csv(p / "annotation_data.csv")
+
+if __name__ == '__main__':
+    main()
