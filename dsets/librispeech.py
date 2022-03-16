@@ -10,16 +10,21 @@ DEV_CLEAN = "https://www.dropbox.com/s/dks1ym745vyn9l4/dev-clean.tar.gz?dl=1"
 DEV_OTHER = "https://www.dropbox.com/s/hkombarzstz7mzv/dev-other.tar.gz?dl=1"
 TEST_CLEAN = "https://www.dropbox.com/s/dgetfxs2pc3jeb2/test-clean.tar.gz?dl=1"
 TEST_OTHER = "https://www.dropbox.com/s/efskenwqnqu68tf/test-other.tar.gz?dl=1"
-TRAIN_CLEAN = NotImplemented
-TRAIN_OTHER = NotImplemented
+TRAIN_CLEAN = "https://www.dropbox.com/s/gy1op05nv17k8ur/train-clean-360.tar.gz?dl=1"
+TRAIN_OTHER = "https://www.dropbox.com/s/o1ooj5zwbgs4mwv/train-other-500.tar.gz?dl=1"
 
 LIBRISPEECH_DSETS = {
     "dev-clean": DEV_CLEAN,
     "dev-other": DEV_OTHER,
     "test-clean": TEST_CLEAN,
     "test-other": TEST_OTHER,
+    "train-clean": TRAIN_CLEAN,
+    "train-other": TRAIN_OTHER,
 }
 
+
+Dsets = Literal["clean", "other"]
+Dset_types = Literal["train", "test", "dev"]
 
 def _get_answers_single_file(fn):
     out_dict = {}
@@ -45,11 +50,6 @@ def _assemble_librispeech_dict(folder):
     for f in text_files:
         files.update(_get_answers_single_file(f))
     return files
-
-
-Dsets = Literal["clean", "other"]
-Dset_types = Literal["train", "test", "dev"]
-
 
 def get_librispeech(dset: Dsets, dset_type: Dset_types) -> Tuple[Path, dict]:
     dset_name = dset + "-" + dset_type
