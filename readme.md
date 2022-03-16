@@ -30,6 +30,15 @@ p, df = get_datasets(
 The `DatasetConfig` only required argument for the DatasetConfig is the `name` argument.
 If `split` is not passed, it defaults to the `train` datset.
 
+For ease of usage, The Datasets are also bundled together in the `ENGLISH_DATASETS` and `JAPANESE_DATASETS` variables, making it possible to use the datasets like this.
+
+```{python}
+from dsets import get_datasets, DatasetConfig, JAPANESE_DATASETS
+p, df = get_datasets(JAPANESE_DATASETS)
+assert df["filename"].apply(os.path.exists).all()
+assert len(df["original_dset"].unique()) == 2
+assert set(df["original_dset"].unique()) == {"itps", "jsut"}
+```
 
 ### Data
 The `dsets` contains a helper python module for getting the datasets and getting them into an acceptable format.
