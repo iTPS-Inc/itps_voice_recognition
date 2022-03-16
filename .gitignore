@@ -2,3 +2,5 @@
 /notebooks/.ipynb_checkpoints/
 /scripts/local.py
 *.pyc
+*.pc
+*.pyc
