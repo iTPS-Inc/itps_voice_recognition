@@ -23,15 +23,12 @@ def main():
         df[["st", "text", "et"]] = df["Transcription"].str.extract(
             r"(\[.*\])(.*)(\[.*\])"
         )
-        # df["filename"] = df["filename"].apply(lambda x: "/".join(str(x).split("/train/")))
-        # df["exists"] = df["filename"].apply(os.path.exists)
-        # wav_files = get_files(p, extensions=[".wav"])
         a = {}
         for i in wav_files:
             a[i.name] = i
         df["filename"] = df["Segmented audio file name"].apply(lambda x: a[x])
         df["lang"] = lang
-        train = df.sample(frac=0.8).index
+        train = df.sample(frac=0.8, random_state=123).index
         df.loc[:, "train"] = False
         df.loc[train, "train"] = True
         df["test"] = ~df["train"]
