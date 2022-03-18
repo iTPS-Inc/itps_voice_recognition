@@ -70,3 +70,9 @@ def test_get_ljspeech():
     p, df = get_datasets([DatasetConfig(name="ljl", split="both")])
     assert df.shape == (13100, 5)
     assert dset_ok(df)
+
+
+def test_get_jsut_data():
+    p, df = get_datasets([DatasetConfig(name="jsut", split="both")])
+    assert df.shape == (7670, 5)
+    assert dset_ok(df)
