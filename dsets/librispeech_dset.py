@@ -49,12 +49,12 @@ def _assemble_librispeech_dict(folder):
         files.update(_get_answers_single_file(f))
     return files
 
-def get_librispeech(dset: DatasetConfig) -> Tuple[Path, dict]:
+def get_librispeech(dset: DatasetConfig, force_download=False) -> Tuple[Path, dict]:
     if dset.kind is None:
         raise AttributeError("Please pass one kind of ['other', 'clean', 'dev'] when requesting librispeech dataset")
     dset_name = dset.split + "-" + dset.kind
     dset_url = LIBRISPEECH_DSETS[dset_name]
-    path = untar_data(dset_url)
+    path = untar_data(dset_url, force_download=force_download)
     p, d = path, _assemble_librispeech_dict(path / dset_name)
     df = (
         pd.DataFrame(pd.Series(d))

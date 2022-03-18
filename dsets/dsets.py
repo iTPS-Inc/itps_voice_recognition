@@ -17,15 +17,15 @@ datasets = {
 }
 
 
-def get_data(dset: DatasetConfig):
-    return datasets[dset.name](dset)
+def get_data(dset: DatasetConfig, **kwargs):
+    return datasets[dset.name](dset, **kwargs)
 
 
-def get_datasets(dset_configs):
+def get_datasets(dset_configs, **kwargs):
     ps = []
     dfs = []
     for dset_config in dset_configs:
-        p, df = get_data(dset_config)
+        p, df = get_data(dset_config,**kwargs)
         ps = ps + [p]
         df["original_dset"] = dset_config.name
         dfs = dfs + [df]

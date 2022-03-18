@@ -33,8 +33,8 @@ def _subset_lang(df: pd.DataFrame, lang=None):
         raise AttributeError("Unsupported language")
 
 
-def get_annotation_data(dset: DatasetConfig) -> Tuple[Path, pd.DataFrame]:
-    p = untar_data(ANNOTATION_DATA_URL)
+def get_annotation_data(dset: DatasetConfig, force_download=False) -> Tuple[Path, pd.DataFrame]:
+    p = untar_data(ANNOTATION_DATA_URL, force_download=force_download)
     if not isinstance(p, Path):
         raise AttributeError(f"Failed to unzip URL dataset under {ANNOTATION_DATA_URL}")
     df = pd.read_csv(p / "annotation_data.csv", index_col=0)
@@ -45,7 +45,5 @@ def get_annotation_data(dset: DatasetConfig) -> Tuple[Path, pd.DataFrame]:
         lang = "both"
     else:
         lang = dset.lang
-
     df = _subset_lang(df, lang)
-    df = df.drop(["ffile"], axis="columns")
     return p, df
