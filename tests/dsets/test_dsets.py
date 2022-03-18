@@ -72,19 +72,19 @@ def test_get_itps_librispeech():
 
 
 def test_get_ljspeech():
-    p, df = get_datasets([DatasetConfig(name="ljl", split="both")])
+    p, df = get_datasets([DatasetConfig(name="ljl", split="both")], force_download=REDOWNLOAD)
     assert df.shape == (13100, 5)
     assert dset_ok(df)
 
 
 def test_get_jsut_data():
-    p, df = get_datasets([DatasetConfig(name="jsut", split="both")])
+    p, df = get_datasets([DatasetConfig(name="jsut", split="both")], force_download=REDOWNLOAD)
     assert df.shape == (7670, 5)
     assert dset_ok(df)
 
 
 def test_get_nict_data():
-    p, df = get_datasets([DatasetConfig(name="nict_spreds", split="both", lang="all")])
+    p, df = get_datasets([DatasetConfig(name="nict_spreds", split="both", lang="all")], force_download=REDOWNLOAD)
     assert not "ja" in set(df.language.unique())
     assert "jp" in set(df.language.unique())
     assert df.shape == (12000,15)
@@ -92,11 +92,11 @@ def test_get_nict_data():
 
 
 def test_get_nict_data_ja():
-    p, df = get_datasets([DatasetConfig(name="nict_spreds", split="both", lang="jp")])
+    p, df = get_datasets([DatasetConfig(name="nict_spreds", split="both", lang="jp")], force_download=REDOWNLOAD)
     assert df.shape == (1000,15)
     assert dset_ok(df)
     assert not "ja" in set(df.language.unique())
     assert "jp" in set(df.language.unique())
-    p, df= get_datasets([DatasetConfig(name="nict_spreds", split="train", lang="jp")])
+    p, df= get_datasets([DatasetConfig(name="nict_spreds", split="train", lang="jp")], force_download=REDOWNLOAD)
     assert df.shape == (800,15)
     assert dset_ok(df)
