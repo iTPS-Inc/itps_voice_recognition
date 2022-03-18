@@ -32,14 +32,15 @@ def get_datasets(dset_configs):
     return ps, pd.concat(dfs).reset_index(drop=True)
 
 
-
 ENGLISH_DATASETS = [
     DatasetConfig(name="itps", lang="en"),
     DatasetConfig(name="librispeech", split="dev", kind="clean"),
-    DatasetConfig(name="ljl"),
+    DatasetConfig(name="ljl", split="train"),
+    DatasetConfig(name="nict_spreds", split="train", lang="en")
 ]
 
 JAPANESE_DATASETS = [
-    DatasetConfig(name="itps", lang="jp"),
-    DatasetConfig(name="jsut"),
+    DatasetConfig(name="itps",split="train", lang="jp"),
+    DatasetConfig(name="jsut", split="train"),
+    DatasetConfig(name="nict_spreds", split="train", lang="jp")
 ]
