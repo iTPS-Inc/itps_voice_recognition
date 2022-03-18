@@ -11,15 +11,15 @@ def dset_ok(df):
 
 def test_get_ENGLISH_DATASETS():
     p, df = get_datasets(ENGLISH_DATASETS)
-    assert len(df["original_dset"].unique()) == 3
-    assert set(df["original_dset"].unique()) == {"itps", "librispeech", "ljl"}
+    assert len(df["original_dset"].unique()) == 4
+    assert set(df["original_dset"].unique()) == {"itps", "librispeech", "ljl", "nict_spreds"}
     assert dset_ok(df)
 
 
 def test_get_JAPANESE_DATASETS():
     p, df = get_datasets(JAPANESE_DATASETS)
-    assert len(df["original_dset"].unique()) == 2
-    assert set(df["original_dset"].unique()) == {"itps", "jsut"}
+    assert len(df["original_dset"].unique()) == 3
+    assert set(df["original_dset"].unique()) == {"itps", "jsut", "nict_spreds"}
     assert dset_ok(df)
 
 
