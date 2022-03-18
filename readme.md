@@ -40,6 +40,9 @@ assert len(df["original_dset"].unique()) == 2
 assert set(df["original_dset"].unique()) == {"itps", "jsut"}
 ```
 
+
+#### Dependencies
+to preprocess the itps datset `ffmpeg` is required.
 ### Data
 The `dsets` contains a helper python module for getting the datasets and getting them into an acceptable format.
 There is a single function, `load_dset()`, with which it is possible to access all the datasets.
