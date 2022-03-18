@@ -10,14 +10,18 @@ def dset_ok(df):
 
 
 def test_get_ENGLISH_DATASETS():
-    p, df = get_datasets(ENGLISH_DATASETS)
+    p, df = get_datasets(ENGLISH_DATASETS,
+                         force_download=REDOWNLOAD
+                         )
     assert len(df["original_dset"].unique()) == 4
     assert set(df["original_dset"].unique()) == {"itps", "librispeech", "ljl", "nict_spreds"}
     assert dset_ok(df)
 
 
 def test_get_JAPANESE_DATASETS():
-    p, df = get_datasets(JAPANESE_DATASETS)
+    p, df = get_datasets(JAPANESE_DATASETS,
+                         force_download=REDOWNLOAD
+                         )
     assert len(df["original_dset"].unique()) == 3
     assert set(df["original_dset"].unique()) == {"itps", "jsut", "nict_spreds"}
     assert dset_ok(df)
@@ -26,27 +30,31 @@ def test_get_JAPANESE_DATASETS():
 def test_get_itps_en():
     p, df = get_datasets(
         [DatasetConfig(name="itps", lang="en", split="both")],
+        force_download=REDOWNLOAD
+
     )
     assert len(p) == 1
-    assert df.shape[0] == 2807
+    assert df.shape[0] >= 2799
     assert dset_ok(df)
 
 
 def test_get_itps_jp():
     p, df = get_datasets(
         [DatasetConfig(name="itps", lang="jp", split="both")],
+        force_download=REDOWNLOAD
     )
     assert len(p) == 1
-    assert df.shape[0] == 3341
+    assert df.shape[0] >= 3329
     assert dset_ok(df)
 
 
 def test_get_itps_both():
     p, df = get_datasets(
         [DatasetConfig(name="itps", lang="both", split="both")],
+        force_download=REDOWNLOAD
     )
     assert len(p) == 1
-    assert df.shape[0] == 6148
+    assert df.shape[0] >= 6128
     assert dset_ok(df)
 
 
@@ -55,10 +63,11 @@ def test_get_itps_librispeech():
         [
             DatasetConfig(name="itps", lang="both", split="both"),
             DatasetConfig(name="librispeech", kind="other", split="dev"),
-        ]
+        ],
+        force_download=REDOWNLOAD
     )
     assert len(p) == 2
-    assert df.shape[0] == 9012
+    assert df.shape[0] >= 8992
     assert dset_ok(df)
 
 
