@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 from .itps_dset import get_annotation_data
 from .librispeech_dset import get_librispeech
-from .simple_dsets import get_jsut_data, get_nictspreads_data, get_ljl_data
+from .simple_dsets import get_jsut_data, get_nictspreds_data, get_ljl_data
 from .dset_config import DatasetConfig
 
 import pandas as pd
@@ -13,6 +13,7 @@ datasets = {
     "itps": get_annotation_data,
     "ljl": get_ljl_data,
     "jsut": get_jsut_data,
+    "nict_spreds": get_nictspreds_data,
 }
 
 

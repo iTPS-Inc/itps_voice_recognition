@@ -60,7 +60,7 @@ There is a single function, `load_dset()`, with which it is possible to access a
 | NICT_ASTREC       | no      | not yet          | jp/en    | no       | no        | no       | No audio files- | -      |
 | J-MAC             | no      | not yet          | jp       | yes      | no        | no       | No audio files  | -      |
 
-#### NICT SPREADS dataset languages 
+#### NICT SPREDS dataset languages 
 
 {'ru', 'zh', 'jp', 'th', 'es', 'br', 'en', 'fr', 'vi', 'ko', 'id', 'my'}
 
