@@ -1,10 +1,6 @@
 #!/usr/bin/env python3
-import requests
 from dsets import get_datasets, DatasetConfig, ENGLISH_DATASETS, JAPANESE_DATASETS
 import os
-
-from dsets.librispeech import LIBRISPEECH_DSETS
-
 
 def dset_ok(df):
     has_filenames = "filename" in df.columns
