@@ -44,21 +44,25 @@ assert set(df["original_dset"].unique()) == {"itps", "jsut"}
 The `dsets` contains a helper python module for getting the datasets and getting them into an acceptable format.
 There is a single function, `load_dset()`, with which it is possible to access all the datasets.
 
-| Dataset           | usable? | train test split | language | password | Supported | Complete | Notes          | length |
-|-------------------|---------|------------------|----------|----------|-----------|----------|----------------|--------|
-| itps              | yes     | yes              | jp/en    | no       | yes       | yes      | -              | -      |
-| librispeech       | yes     | yes              | en       | no       | yes       | yes      | -              | -      |
-| LJ_Speech_Dataset | yes     | yes              | en       | no       | yes       | yes      | -              | -      |
-| JSUT              | yes     | not yet          | jp       | no       | yes       | yes      | -              | -      |
-| J-KAC             | no      | not yet             | jp       | yes      | x         | -        | -              | -      |
-| NICT SPREDS       | no      | not yet          | ?        | ?        | x         | -        | -              | -      |
-| RWCP              | no      | not yet          | ?        | ?        | x         | -        | -              | -      |
-| PASD              | no      | not yet          | ?        | ?        | x         | -        | -              | -      |
-| NICT_ASTREC       | no      | not yet          | ?        | ?        | x         | -        | -              | -      |
-| JVS               | no      | not yet          | ?        | ?        | x         | -        | -              | -      |
-| CENSREC-3         | no      | not yet          | ?        | ?        | x         | -        | -              | -      |
-| CENSREC-1         | no      | not yet          | ?        | ?        | x         | -        | -              | -      |
-| J-MAC             | no      | not yet          | jp       | yes      | x         | no       | No audio files | -      |
+| Dataset           | usable? | train test split | language | password | Supported | Complete | Notes           | length |
+|-------------------|---------|------------------|----------|----------|-----------|----------|-----------------|--------|
+| itps              | yes     | yes              | jp/en    | no       | yes       | yes      | -               | -      |
+| librispeech       | yes     | yes              | en       | no       | yes       | yes      | -               | -      |
+| LJ_Speech_Dataset | yes     | yes              | en       | no       | yes       | yes      | -               | -      |
+| JSUT              | yes     | not yet          | jp       | no       | yes       | yes      | -               | -      |
+| J-KAC             | no      | not yet          | jp       | yes      | x         | -        | -               | -      |
+| NICT SPREDS       | no      | not yet          | ?        | ?        | x         | -        | -               | -      |
+| RWCP              | no      | not yet          | ?        | ?        | x         | -        | -               | -      |
+| PASD              | no      | not yet          | ?        | ?        | x         | -        | -               | -      |
+| JVS               | no      | not yet          | ?        | ?        | x         | -        | -               | -      |
+| CENSREC-3         | no      | not yet          | ?        | ?        | x         | -        | -               | -      |
+| CENSREC-1         | no      | not yet          | ?        | ?        | x         | -        | -               | -      |
+| NICT_ASTREC       | no      | not yet          | jp/en    | no       | no        | no       | No audio files- | -      |
+| J-MAC             | no      | not yet          | jp       | yes      | no        | no       | No audio files  | -      |
+
+#### NICT SPREADS dataset languages 
+
+{'ru', 'zh', 'jp', 'th', 'es', 'br', 'en', 'fr', 'vi', 'ko', 'id', 'my'}
 
 ## Scripts
 ### Extracting data from excel files to make easy to use dataset.
