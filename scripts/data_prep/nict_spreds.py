@@ -67,15 +67,15 @@ def move_files_into_splits(df, p):
             dest = _make_destination(p, r["filename"], False)
             if os.path.exists(src) and not os.path.exists(dest):
                 shutil.copy(src, dest)
-    df["filename"] = df[["filename", "test"]].apply(
-        lambda x: _make_destination(Path("."), x[0], x[1]), axis=1
-    )
     lang = df["language"].iloc[0]
     if df["filename"].apply(os.path.exists).all():
         for d in (p / lang / "WAVE").ls():
             if not d.name in ["train", "test"]:
                 print(d)
                 shutil.rmtree( d )
+    df["filename"] = df[["filename", "test"]].apply(
+        lambda x: _make_destination(Path("."), x[0], x[1]), axis=1
+    )
     return df
 
 def get_nict_data(force_download=False):
@@ -94,6 +94,5 @@ def get_nict_data(force_download=False):
     return p, out_df
 
 p, df = get_nict_data()
-assert df["filename"].apply(os.path.exists).all()
 df.to_csv(p / "metadata.csv")
 make_tarfile(OUTPATH, p)

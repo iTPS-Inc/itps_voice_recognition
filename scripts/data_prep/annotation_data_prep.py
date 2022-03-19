@@ -4,10 +4,10 @@ import shutil
 import subprocess
 
 import pandas as pd
-from fastai.data.all import get_files, untar_data
+from fastai.data.all import get_files, untar_data, Path
 from tqdm import tqdm
 
-from helpers import make_tarfile
+from dsets.helpers.helpers import make_tarfile
 
 
 def is_this_ok():
@@ -124,6 +124,10 @@ def main(force_download=False):
             if not d.name in ["train", "test"]:
                 print(d)
                 shutil.rmtree(d)
+        df["filename"] = df.apply(
+            lambda x: Path(".") / x["lang"] / x["dataset"] / x["filename"].name,
+            axis=1,
+        )
         df.to_csv(p / "annotation_data.csv")
         make_tarfile(OUT_PATH, p)
 

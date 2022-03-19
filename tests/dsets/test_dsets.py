@@ -14,9 +14,13 @@ def dset_ok(df):
     has_filenames = "filename" in df.columns
     has_texts = "text" in df.columns
     has_all_files = df["filename"].apply(os.path.exists).all()
+
     if HAVE_TIME:
         sr = get_sampling_rates(df["filename"], NUM_CORES)
         assert (~(sr.isna())).sum() == df.shape[0]
+    assert has_filenames
+    assert has_texts
+    assert has_all_files
     return has_filenames and has_texts and has_all_files
 
 

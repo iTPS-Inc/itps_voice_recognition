@@ -18,6 +18,7 @@ def get_ljl_data(dset_config: DatasetConfig, force_download=False):
         df = df[~df["test"]].copy()
     elif dset_config.split == "test":
         df = df[df["test"]].copy()
+    df["filename"] = df["filename"].apply(lambda x: p / "wavs" / x)
     return p, df
 
 
@@ -30,12 +31,14 @@ def get_jsut_data(dset_config: DatasetConfig, force_download=False):
         df = df[~df["test"]].copy()
     elif dset_config.split == "test":
         df = df[df["test"]].copy()
+    df["filename"] = df["filename"].apply(lambda x: p / x)
     return p, df
 
 
 def get_nictspreds_data(dset_config: DatasetConfig, force_download=False):
     p = untar_data(SPREDS_URL, force_download=force_download)
     df = pd.read_csv(p / "metadata.csv", index_col=0)
+    df["filename"] = df["filename"].apply(lambda x: p / x)
     if not isinstance(df, pd.DataFrame):
         raise TypeError("Couldn't read dataframe correctly")
     if dset_config.split == "train":
