@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 #!/usr/bin/env python3
-from fastai.data.all import untar_data
+from fastai.data.all import untar_data, Path
 from fastai.data.transforms import RandomSplitter
 import pandas as pd
 import shutil, os
@@ -38,9 +38,9 @@ for i, r in df.iterrows():
 df.apply(print, axis=1)
 
 df["filename"] = df.apply(
-    lambda r: r["filename"].parent / "test" / r["filename"].name
+    lambda r: Path("wavs") / "test" / r["filename"].name
     if r["test"]
-    else r["filename"].parent / "train" / r["filename"].name
+    else Path("wavs") / "train" / r["filename"].name
     ,axis=1
 )
 df.to_csv( p / "metadata.csv")
