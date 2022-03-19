@@ -1,11 +1,24 @@
 #!/usr/bin/env python3
-from dsets import get_datasets, DatasetConfig, ENGLISH_DATASETS, JAPANESE_DATASETS
+from dsets.dsets import get_datasets, DatasetConfig, ENGLISH_DATASETS, JAPANESE_DATASETS, ALL_DATASETS
+from scripts.data_prep.helpers import apply_parallel
+import torchaudio
 import os
+
+HAVE_TIME=True
+REDOWNLOAD=False
+NUM_CORES=8
+
+def get_srs(fn):
+    _, sr = torchaudio.load(fn)
+    return sr
 
 def dset_ok(df):
     has_filenames = "filename" in df.columns
     has_texts = "text" in df.columns
     has_all_files = df["filename"].apply(os.path.exists).all()
+    if HAVE_TIME:
+        sr = apply_parallel(df["filename"], get_srs, num_cores=NUM_CORES)
+        assert (~(sr.isna())).sum() == df.shape[0]
     return has_filenames and has_texts and has_all_files
 
 
@@ -99,4 +112,10 @@ def test_get_nict_data_ja():
     assert "jp" in set(df.language.unique())
     p, df= get_datasets([DatasetConfig(name="nict_spreds", split="train", lang="jp")], force_download=REDOWNLOAD)
     assert df.shape == (800,15)
+    assert dset_ok(df)
+
+
+def test_dataloading():
+    p, df= get_datasets(ALL_DATASETS, force_download=REDOWNLOAD)
+    assert df.shape[0] >= 30000
     assert dset_ok(df)
