@@ -7,7 +7,7 @@ from fastai.data.all import get_files, untar_data
 from fastai.data.transforms import RandomSplitter
 from tqdm import tqdm
 
-from .helpers import make_tarfile, train_test_split
+from dsets.helpers.helpers import make_tarfile, train_test_split
 
 SPREDS_URL_ORIG = (
     "https://www.dropbox.com/s/bqy2g02ijkhj6p8/SPREDS2.ver2.1.all.tar.xz?dl=1"
@@ -72,7 +72,7 @@ def move_files_into_splits(df, p):
             if os.path.exists(src) and not os.path.exists(dest):
                 shutil.copy(src, dest)
     df["filename"] = df[["filename", "test"]].apply(
-        lambda x: _make_destination(p, x[0], x[1]), axis=1
+        lambda x: _make_destination(Path("."), x[0], x[1]), axis=1
     )
     lang = df["language"].iloc[0]
     if df["filename"].apply(os.path.exists).all():
