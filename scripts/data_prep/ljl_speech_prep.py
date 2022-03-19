@@ -4,7 +4,7 @@ from fastai.data.all import untar_data, Path
 from fastai.data.transforms import RandomSplitter
 import pandas as pd
 import shutil, os
-from dsets.helpers.helpers import make_tarfile
+from dsets.helpers.helpers import make_tarfile, train_test_split
 
 LJ_SPEECH_URL_ORIG = "https://www.dropbox.com/s/cwq264n040guqhj/LJSpeech-1.1.tar.bz2?dl=1"
 OUTPATH = "/home/jjs/Dropbox/Share to iTPS AI-Team/train_data_repository/LJSpeech-1.1.tar.gz"
@@ -19,9 +19,7 @@ def get_ljl_data_init(force_download=False):
 
 
 p, df = get_ljl_data_init(force_download=FORCE_DOWNLOAD)
-splits = RandomSplitter(seed=42, valid_pct=0.2)(df)
-df["test"] = False
-df.loc[splits[1], "test"] = True
+df = train_test_split(df)
 
 os.mkdir(p / "wavs" / "train")
 os.mkdir(p / "wavs" / "test")
@@ -36,14 +34,12 @@ for i, r in df.iterrows():
         dest = r["filename"].parent / "train" / r["filename"].name
         shutil.move(src, dest)
 
-df.apply(print, axis=1)
-
 df["filename"] = df.apply(
     lambda r: Path("wavs") / "test" / r["filename"].name
     if r["test"]
     else Path("wavs") / "train" / r["filename"].name
     ,axis=1
 )
-df.to_csv( p / "metadata.csv")
 
+df.to_csv( p / "metadata.csv")
 make_tarfile(OUTPATH, p)

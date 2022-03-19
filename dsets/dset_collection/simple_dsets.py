@@ -18,7 +18,7 @@ def get_ljl_data(dset_config: DatasetConfig, force_download=False):
         df = df[~df["test"]].copy()
     elif dset_config.split == "test":
         df = df[df["test"]].copy()
-    df["filename"] = df["filename"].apply(lambda x: p / "wavs" / x)
+    df["filename"] = df["filename"].apply(lambda x: p / x)
     return p, df
 
 
