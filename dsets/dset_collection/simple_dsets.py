@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 #!/usr/bin/env python3
-from fastai.data.all import untar_data
 import pandas as pd
 from dset_config.dset_config import DatasetConfig
+from fastai.data.all import untar_data
 
 LJ_SPEECH_URL = "https://www.dropbox.com/s/h0d8fa13ylwpssq/LJSpeech-1.1.tar.gz?dl=1"
 JSUT_URL = "https://www.dropbox.com/s/o949otj06b9ucmm/jsut_ver1.1.tar.gz?dl=1"

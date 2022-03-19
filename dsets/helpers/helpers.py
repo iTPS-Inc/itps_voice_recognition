@@ -1,16 +1,14 @@
 #!/usr/bin/env python3
 import os
 import tarfile
+from multiprocessing.pool import Pool, ThreadPool
 from pathlib import Path
 
-import pandas as pd
-from fastai.data.transforms import RandomSplitter
-from multiprocessing.pool import ThreadPool, Pool
 import numpy as np
 import pandas as pd
-from tqdm import tqdm
-from multiprocessing.pool import ThreadPool, Pool
 import torchaudio
+from fastai.data.transforms import RandomSplitter
+from tqdm import tqdm
 
 
 def process_parallel(df_or_ser, fn, num_cores):
@@ -46,9 +44,11 @@ def train_test_split(df: pd.DataFrame) -> pd.DataFrame:
     df.loc[splits[1], "test"] = True
     return df
 
+
 def _get_srs(fn):
     _, sr = torchaudio.load(fn)
     return sr
+
 
 def get_sampling_rates(fns, num_cores):
     sr = apply_parallel(fns, _get_srs, num_cores)

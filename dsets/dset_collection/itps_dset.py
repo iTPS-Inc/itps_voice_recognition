@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-import shutil
-from fastai.data.all import untar_data, Path, get_files, progress_bar
 from typing import Tuple
+
 import pandas as pd
-import os
 from dset_config.dset_config import DatasetConfig
+from fastai.data.all import Path, untar_data
 
 ANNOTATION_DATA_URL = (
     "https://www.dropbox.com/s/92tbhcdlymk5s0w/annotation_data.tar.gz?dl=1"

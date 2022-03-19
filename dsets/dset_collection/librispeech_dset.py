@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-import os
-from fastai.data.all import get_files, untar_data
 from pathlib import Path
 from typing import Tuple
+
 import pandas as pd
 from dset_config.dset_config import DatasetConfig
-import requests
+from fastai.data.all import get_files, untar_data
 
 DEV_CLEAN = "https://www.dropbox.com/s/dks1ym745vyn9l4/dev-clean.tar.gz?dl=1"
 DEV_OTHER = "https://www.dropbox.com/s/hkombarzstz7mzv/dev-other.tar.gz?dl=1"
