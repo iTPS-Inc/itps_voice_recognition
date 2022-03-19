@@ -9,9 +9,9 @@ from multiprocessing.pool import ThreadPool, Pool
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
-
-
 from multiprocessing.pool import ThreadPool, Pool
+
+
 def process_parallel(df_or_ser, fn, num_cores):
     with Pool(num_cores) as p:
         splitted_df = np.array_split(df_or_ser, num_cores)
@@ -21,10 +21,14 @@ def process_parallel(df_or_ser, fn, num_cores):
 
 
 def apply_parallel(df_or_sersr, fn, num_cores):
-    def _inner(df_or_ser): return df_or_ser.apply(fn)
+    def _inner(df_or_ser):
+        return df_or_ser.apply(fn)
+
     with ThreadPool(num_cores) as p:
         splitted_df = np.array_split(df_or_sersr, num_cores)
-        split_df_results =  list(tqdm(p.imap(_inner, splitted_df), total=len(splitted_df)))
+        split_df_results = list(
+            tqdm(p.imap(_inner, splitted_df), total=len(splitted_df))
+        )
     df_or_sersr = pd.concat(split_df_results)
     return df_or_sersr
 

@@ -2,10 +2,9 @@
 import shutil
 from fastai.data.all import untar_data, Path, get_files, progress_bar
 from typing import Tuple
-from fastprogress.fastprogress import ProgressBar
 import pandas as pd
 import os
-from .dset_config import DatasetConfig
+from dset_config.dset_config import DatasetConfig
 
 ANNOTATION_DATA_URL = (
     "https://www.dropbox.com/s/92tbhcdlymk5s0w/annotation_data.tar.gz?dl=1"
@@ -33,7 +32,9 @@ def _subset_lang(df: pd.DataFrame, lang=None):
         raise AttributeError("Unsupported language")
 
 
-def get_annotation_data(dset: DatasetConfig, force_download=False) -> Tuple[Path, pd.DataFrame]:
+def get_annotation_data(
+    dset: DatasetConfig, force_download=False
+) -> Tuple[Path, pd.DataFrame]:
     p = untar_data(ANNOTATION_DATA_URL, force_download=force_download)
     if not isinstance(p, Path):
         raise AttributeError(f"Failed to unzip URL dataset under {ANNOTATION_DATA_URL}")

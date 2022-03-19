@@ -4,7 +4,7 @@ from fastai.data.all import get_files, untar_data
 from pathlib import Path
 from typing import Tuple
 import pandas as pd
-from .dset_config import DatasetConfig
+from dset_config.dset_config import DatasetConfig
 import requests
 
 DEV_CLEAN = "https://www.dropbox.com/s/dks1ym745vyn9l4/dev-clean.tar.gz?dl=1"
@@ -38,6 +38,7 @@ def _get_answers_single_file(fn):
 def _get_audio_files(folder):
     return get_files(folder, extensions=[".flac", ".wav"])
 
+
 def _get_text_files(folder):
     return get_files(folder, extensions=[".txt"])
 
@@ -49,9 +50,12 @@ def _assemble_librispeech_dict(folder):
         files.update(_get_answers_single_file(f))
     return files
 
+
 def get_librispeech(dset: DatasetConfig, force_download=False) -> Tuple[Path, dict]:
     if dset.kind is None:
-        raise AttributeError("Please pass one kind of ['other', 'clean', 'dev'] when requesting librispeech dataset")
+        raise AttributeError(
+            "Please pass one kind of ['other', 'clean', 'dev'] when requesting librispeech dataset"
+        )
     dset_name = dset.split + "-" + dset.kind
     dset_url = LIBRISPEECH_DSETS[dset_name]
     path = untar_data(dset_url, force_download=force_download)

@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-from .itps_dset import get_annotation_data
-from .librispeech_dset import get_librispeech
-from .simple_dsets import get_jsut_data, get_nictspreds_data, get_ljl_data
-from .dset_config import DatasetConfig
+from dset_collection.itps_dset import get_annotation_data
+from dset_collection.librispeech_dset import get_librispeech
+from dset_collection.simple_dsets import (
+    get_jsut_data,
+    get_nictspreds_data,
+    get_ljl_data,
+)
+from dset_config.dset_config import DatasetConfig
 
 import pandas as pd
-
 
 
 datasets = {
@@ -25,7 +28,7 @@ def get_datasets(dset_configs, **kwargs):
     ps = []
     dfs = []
     for dset_config in dset_configs:
-        p, df = get_data(dset_config,**kwargs)
+        p, df = get_data(dset_config, **kwargs)
         ps = ps + [p]
         df["original_dset"] = dset_config.name
         dfs = dfs + [df]
@@ -36,11 +39,19 @@ ENGLISH_DATASETS = [
     DatasetConfig(name="itps", lang="en"),
     DatasetConfig(name="librispeech", split="dev", kind="clean"),
     DatasetConfig(name="ljl", split="train"),
-    DatasetConfig(name="nict_spreds", split="train", lang="en")
+    DatasetConfig(name="nict_spreds", split="train", lang="en"),
 ]
 
 JAPANESE_DATASETS = [
-    DatasetConfig(name="itps",split="train", lang="jp"),
+    DatasetConfig(name="itps", split="train", lang="jp"),
     DatasetConfig(name="jsut", split="train"),
-    DatasetConfig(name="nict_spreds", split="train", lang="jp")
+    DatasetConfig(name="nict_spreds", split="train", lang="jp"),
+]
+
+ALL_DATASETS = [
+    DatasetConfig(name="itps", split="both", lang="both"),
+    DatasetConfig(name="jsut", split="both"),
+    DatasetConfig(name="nict_spreds", split="both", lang="all"),
+    DatasetConfig(name="librispeech", split="dev", kind="clean"),
+    DatasetConfig(name="ljl", split="train"),
 ]
