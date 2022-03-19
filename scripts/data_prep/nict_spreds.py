@@ -18,10 +18,6 @@ OUTPATH = (
 )
 
 
-def _get_lang(s):
-    return s.names.split(".")[1]
-
-
 def _make_destination(p, fn, test):
     if test:
         split = "test"
