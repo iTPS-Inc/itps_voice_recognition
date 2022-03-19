@@ -35,8 +35,8 @@ def _get_info(text_files, kind="transcript_utf8", colname="text"):
     )
 
 
-def get_jsut_data():
-    p = untar_data(JSUT_URL_ORIG)
+def get_jsut_data(force_download=True):
+    p = untar_data(JSUT_URL_ORIG, force_download=force_download)
     text_files = get_files(p, extensions=[".txt"])
     d = _get_info(text_files, kind="transcript_utf8", colname="text")
     df = _get_info(text_files, kind="recording_info", colname="recording_info")
