@@ -44,12 +44,8 @@ def get_jsut_data(force_download=True):
     return p, d
 
 
-p, df = get_jsut_data()
-splits = RandomSplitter(seed=42, valid_pct=0.2)(df)
-df["filename"] = df["filename"].apply(Path)
-
-df["test"] = False
-df.loc[splits[1], "test"] = True
+p, df = get_jsut_data(force_download=FORCE_DOWNLOAD)
+df = train_test_split(df)
 
 for i in p.ls():
     if not os.path.isdir(i): continue
@@ -68,13 +64,13 @@ for i, r in tqdm(df.iterrows()):
         if os.path.exists(src) and not os.path.exists(dest):
             shutil.move(src, dest)
 
+
 df["filename"] = df.apply(
     lambda r: r["filename"].parent / "test" / r["filename"].name
     if r["test"]
     else r["filename"].parent / "train" / r["filename"].name,
     axis=1,
 )
-
 assert df["filename"].apply(os.path.exists).all()
 df.to_csv(p / "metadata.csv")
 make_tarfile(OUTPATH, p)
