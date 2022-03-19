@@ -4,13 +4,13 @@ from pathlib import Path
 
 import pandas as pd
 from fastai.data.all import get_files, untar_data
-from fastai.data.transforms import RandomSplitter
 from tqdm import tqdm
 
-from .helpers import make_tarfile
+from dsets.helpers.helpers import make_tarfile, train_test_split
 
 JSUT_URL_ORIG = "https://www.dropbox.com/s/a2z6bklpaphiu1k/jsut_ver1.1.zip?dl=1"
 OUTPATH = "/home/jjs/Dropbox/Share to iTPS AI-Team/train_data_repository/jsut_ver1.1.tar.gz"
+FORCE_DOWNLOAD=False
 
 def _get_info_file(fn):
     out_dict = {}
