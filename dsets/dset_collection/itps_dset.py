@@ -46,4 +46,5 @@ def get_annotation_data(
     else:
         lang = dset.lang
     df = _subset_lang(df, lang)
+    df["filename"]  = df["filename"].apply(lambda x: p/x)
     return p, df
