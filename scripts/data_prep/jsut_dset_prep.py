@@ -72,5 +72,13 @@ df["filename"] = df.apply(
     axis=1,
 )
 assert df["filename"].apply(os.path.exists).all()
+
+df["filename"] = df.apply(
+    lambda r: Path(".") /r["filename"].parent.parent.parent.name /  r["filename"].parent.parent.name / "test" / r["filename"].name
+    if r["test"]
+    else Path(".") /r["filename"].parent.parent.parent.name / r["filename"].parent.parent.name / "train" / r["filename"].name,
+    axis=1,
+)
+
 df.to_csv(p / "metadata.csv")
 make_tarfile(OUTPATH, p)
