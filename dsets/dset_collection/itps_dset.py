@@ -2,7 +2,7 @@
 from typing import Tuple
 
 import pandas as pd
-from dset_config.dset_config import DatasetConfig
+from dsets.dset_config.dset_config import DatasetConfig
 from fastai.data.all import Path, untar_data
 
 ANNOTATION_DATA_URL = (

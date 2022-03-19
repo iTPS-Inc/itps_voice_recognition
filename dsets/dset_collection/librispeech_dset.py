@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Tuple
 
 import pandas as pd
-from dset_config.dset_config import DatasetConfig
+from dsets.dset_config.dset_config import DatasetConfig
 from fastai.data.all import get_files, untar_data
 
 DEV_CLEAN = "https://www.dropbox.com/s/dks1ym745vyn9l4/dev-clean.tar.gz?dl=1"

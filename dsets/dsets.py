@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-from dset_collection.itps_dset import get_annotation_data
-from dset_collection.librispeech_dset import get_librispeech
-from dset_collection.simple_dsets import (
+from dsets.dset_collection.itps_dset import get_annotation_data
+from dsets.dset_collection.librispeech_dset import get_librispeech
+from dsets.dset_collection.simple_dsets import (
     get_jsut_data,
     get_nictspreds_data,
     get_ljl_data,
 )
-from dset_config.dset_config import DatasetConfig
+from dsets.dset_config.dset_config import DatasetConfig
 
 import pandas as pd
 

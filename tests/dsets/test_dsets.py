@@ -5,7 +5,7 @@ from dsets.dsets import (ALL_DATASETS, ENGLISH_DATASETS, JAPANESE_DATASETS,
                          DatasetConfig, get_datasets)
 from dsets.helpers.helpers import get_sampling_rates
 
-HAVE_TIME = True
+HAVE_TIME = False
 REDOWNLOAD = False
 NUM_CORES = 8
 
