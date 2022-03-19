@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 from multiprocessing.pool import ThreadPool, Pool
+import torchaudio
 
 
 def process_parallel(df_or_ser, fn, num_cores):
@@ -44,3 +45,11 @@ def train_test_split(df: pd.DataFrame) -> pd.DataFrame:
     df["test"] = False
     df.loc[splits[1], "test"] = True
     return df
+
+def _get_srs(fn):
+    _, sr = torchaudio.load(fn)
+    return sr
+
+def get_sampling_rates(fns, num_cores):
+    sr = apply_parallel(fns, _get_srs, num_cores)
+    return sr
