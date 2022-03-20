@@ -1,7 +1,7 @@
 from fastai.data.all import Transform, TitledStr, tensor, ItemTransform, store_attr
 from fastai.text.all import pad_chunk
 import torchaudio
-from itpsaudio import AudioTensor
+from itpsaudio.core import AudioTensor
 
 class LoadAudio(Transform):
   def __init__(self, path): self.path = path
