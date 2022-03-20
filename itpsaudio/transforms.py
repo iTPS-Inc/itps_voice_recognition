@@ -33,15 +33,15 @@ class TargetProcessor(Transform):
 
 
 class TransformersTokenizer(Transform):
-    def __init__(self, processor):
-        self.processor = processor
+    def __init__(self, tokenizer):
+        self.tokenizer = tokenizer
 
     def encodes(self, x):
-        toks = tensor(self.processor.tokenizer(x)["input_ids"])
+        toks = tensor(self.tokenizer(x)["input_ids"])
         return toks
 
     def decodes(self, x):
-        return TitledStr(self.processor.tokenizer.decode(x.cpu().numpy()))
+        return TitledStr(self.tokenizer.decode(x.cpu().numpy()))
 
 
 class Pad_Audio_Chunk(ItemTransform):
