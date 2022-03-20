@@ -10,6 +10,11 @@ class LoadAudio(Transform):
      return t
 
 @Transform
+def extract_first(s: AudioTensor):
+    if s.shape[0] ==1: return s[0]
+    else: return s
+
+@Transform
 def capitalize(s):
     return s.upper()
 
