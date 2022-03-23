@@ -81,6 +81,11 @@ class Pad_Audio_Batch(ItemTransform):
             for i in range(len(b))
         ]
 
-    def decodes(self, o):
-        return o[o != self.pad_idx] if self.decode else o
+    def _decode(self, o):
+      if isinstance(o, AudioTensor):
+        return o[o != self.pad_idx_audio] if self.decode else o
+      else:
+        return o[o != self.pad_idx_text] if self.decode else o
 
+    def decodes(self, o):
+        return [(self._decode(x), self._decode(y)) for x,y in o]
