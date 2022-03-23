@@ -241,11 +241,11 @@ class AudioTensor(TensorBase):
         self = super().__new__(TensorBase, x)
         self.sr = sr
 
-    def show(self):
+    def show(self, ctx=None):
         if self.device.type == "cuda":
-            plot_specgram(self.cpu(), self.sr)
+            plot_specgram(self.cpu(), self.sr, ctx=None)
             return play_audio(self.cpu(), self.sr)
-        plot_specgram(self.cpu(), self.sr)
+        plot_specgram(self.cpu(), self.sr, ctx=None)
         return play_audio(self, self.sr)
 
 
