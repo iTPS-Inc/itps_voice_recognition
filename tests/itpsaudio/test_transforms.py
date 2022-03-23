@@ -42,8 +42,13 @@ def test_pad_decode():
     pad = Pad_Audio_Batch(
         pad_idx_audio=-100, pad_idx_text=-100, decode=True, pad_first=True
     )
-    ((p_x1,p_y1),(p_x2, p_y2)) = pad(b)
-    dec_b = pad.decode(b)
+    padded_b = pad(b)
+    xs,ys = [], []
+    for x,y in padded_b: xs.append(x); ys.append(y[None,:])
+    xs = torch.concat(xs)
+    ys = torch.concat(ys)
+    padded_b= (xs, ys)
+    dec_b = pad.decode(padded_b)
     for (dx,dy),(x, y) in zip(dec_b, b):
         _assert_equal_tensor(dx, x)
         _assert_equal_tensor(dy, y)
