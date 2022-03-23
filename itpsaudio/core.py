@@ -5,8 +5,10 @@ import librosa
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import torchaudio
+from typing import Optional
 import torchaudio.transforms as T
-from fastai.vision.all import TensorImage, array, hasattrs, ifnone
+from fastai.vision.all import TensorBase, array, hasattrs, ifnone, Transform
 from IPython.display import Audio, display
 
 DEFAULT_OFFSET = 201
@@ -213,7 +215,26 @@ def get_sine_sweep(sample_rate, offset=DEFAULT_OFFSET):
     return signal
 
 
-def show_spec(im, ax=None, figsize=None, title=None, ctx=None, **kwargs):
+def plot_waveform(waveform, sample_rate, title="Waveform", xlim=None, ylim=None):
+    waveform = waveform.numpy()
+    num_channels, num_frames = waveform.shape
+    time_axis = torch.arange(0, num_frames) / sample_rate
+    figure, axes = plt.subplots(num_channels, 1)
+    if num_channels == 1:
+        axes = [axes]
+    for c in range(num_channels):
+        axes[c].plot(time_axis, waveform[c], linewidth=1)
+        axes[c].grid(True)
+        if num_channels > 1:
+            axes[c].set_ylabel(f"Channel {c+1}")
+        if xlim:
+            axes[c].set_xlim(xlim)
+        if ylim:
+            axes[c].set_ylim(ylim)
+    figure.suptitle(title)
+    plt.show(block=False)
+
+def show_waveform(im, ax=None, figsize=None, title=None, ctx=None, **kwargs):
     "Show a spectogram or PyTorch image on `ax`."
     # Handle pytorch axis order
     if hasattrs(im, ("data", "cpu", "permute")):
@@ -233,6 +254,18 @@ def show_spec(im, ax=None, figsize=None, title=None, ctx=None, **kwargs):
     return ax
 
 
-class AudioTensor(TensorImage):
-    def show(self, ctx=None, **kwargs):
-        return show_spec(self, ctx=ctx, **{**self._show_args, **kwargs})
+class AudioTensor(TensorBase):
+    sr: Optional[int] = None
+    def __init__(self,x, sr=None):
+        self = super().__new__(TensorBase, x)
+        self.sr = sr
+
+    def show(self):
+        return play_audio(self, self.sr)
+
+
+class LoadAudio(Transform):
+  def __init__(self, path): self.path = path
+  def encodes(self, s) -> AudioTensor:
+     t, sr = torchaudio.load(self.path/s)
+     return AudioTensor(t, sr=sr)

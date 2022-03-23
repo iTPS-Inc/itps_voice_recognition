@@ -3,12 +3,6 @@ from fastai.text.all import pad_chunk
 import torchaudio
 from itpsaudio.core import AudioTensor
 
-class LoadAudio(Transform):
-  def __init__(self, path): self.path = path
-  def encodes(self, s) -> AudioTensor:
-     t, _ = torchaudio.load(self.path/s)
-     return t
-
 @Transform
 def extract_first(s: AudioTensor):
     if s.shape[0] ==1: return s[0]
@@ -85,3 +79,4 @@ class Pad_Audio_Chunk(ItemTransform):
 
     def decodes(self, o):
         return o[o != self.pad_idx] if self.decode else o
+
