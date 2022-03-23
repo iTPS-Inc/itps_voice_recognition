@@ -8,6 +8,7 @@ def extract_first(s: AudioTensor):
     if s.shape[0] ==1: return s[0]
     else: return s
 
+
 @Transform
 def capitalize(s):
     return s.upper()
@@ -38,16 +39,19 @@ class TransformersTokenizer(Transform):
         return TitledStr(self.processor.tokenizer.decode(x.cpu().numpy()))
 
 
-class Pad_Audio_Chunk(ItemTransform):
+class Pad_Audio_Batch(ItemTransform):
     "Pad `samples` by adding padding by chunks of size `seq_len`"
 
-    def __init__(self, pad_idx=1, pad_first=True, seq_len=72, decode=True, **kwargs):
-        store_attr("pad_idx, pad_first, seq_len,seq_len")
+    def __init__(self, pad_idx_text=1,
+                 pad_idx_audio=1,
+                 pad_first=True,
+                 seq_len=72, decode=True, **kwargs):
+        store_attr("pad_idx_text,pad_first,seq_len,seq_len,pad_idx_audio")
         super().__init__(**kwargs)
 
     def before_call(self, b):
         "Set `self.max_len` before encodes"
-        self.lens_x = [x[0].shape[0] for x in b]
+        self.lens_x = [x[0].shape[1] for x in b]
         self.lens_y = [x[1].shape[0] for x in b]
         self.max_len_x = max(self.lens_x)
         self.max_len_y = max(self.lens_y)
@@ -60,15 +64,15 @@ class Pad_Audio_Chunk(ItemTransform):
         return [
             (
                 pad_chunk(
-                    b[i][0],
-                    pad_idx=self.pad_idx,
+                    b[i][0][0],
+                    pad_idx=self.pad_idx_audio,
                     pad_first=self.pad_first,
                     seq_len=self.seq_len,
                     pad_len=self.max_len_x,
-                ),
+                )[None, :],
                 pad_chunk(
                     b[i][1],
-                    pad_idx=-100,
+                    pad_idx=self.pad_idx_text,
                     pad_first=self.pad_first,
                     seq_len=self.seq_len,
                     pad_len=self.max_len_y,
