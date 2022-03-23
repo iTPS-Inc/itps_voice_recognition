@@ -43,3 +43,10 @@ def test_AudioTensor_operates_like_tensor():
     tensor_ones = AudioTensor([1, 1], sr=16000)
     tensor_zeros = torch.zeros_like(tensor_ones)
     assert (tensor_ones - tensor_ones == tensor_zeros).all()
+
+
+def test_LoadAudio():
+    load = LoadAudio(path=Path("_assets"))
+    x = load("speech.wav")
+    assert isinstance(x, AudioTensor)
+    assert x.sr == 16000
