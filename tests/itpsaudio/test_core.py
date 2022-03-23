@@ -10,6 +10,7 @@ from itpsaudio.core import AudioTensor, LoadAudio
 
 _SAMPLE_DIR = "_assets"
 SAMPLE_WAV_PATH = os.path.join(_SAMPLE_DIR, "speech.wav")
+TEST_DIR = Path(os.path.abspath(__file__)).parent
 
 def _get_sample(path, resample=None):
     effects = [["remix", "1"]]
@@ -46,7 +47,7 @@ def test_AudioTensor_operates_like_tensor():
 
 
 def test_LoadAudio():
-    load = LoadAudio(path=Path("_assets"))
+    load = LoadAudio(path=TEST_DIR / "_assets")
     x = load("speech.wav")
     assert isinstance(x, AudioTensor)
     assert x.sr == 16000
