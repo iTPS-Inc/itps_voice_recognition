@@ -1,7 +1,30 @@
 #!/usr/bin/env python3
-from itpsaudio.core import AudioTensor
-from fastai.vision.all import TensorBase
+import os
+
 import torch
+import torchaudio
+from fastai.vision.all import Path, TensorBase
+
+import IPython.display
+from itpsaudio.core import AudioTensor, LoadAudio
+
+_SAMPLE_DIR = "_assets"
+SAMPLE_WAV_PATH = os.path.join(_SAMPLE_DIR, "speech.wav")
+
+def _get_sample(path, resample=None):
+    effects = [["remix", "1"]]
+    if resample:
+        effects.extend(
+            [
+                ["lowpass", f"{resample // 2}"],
+                ["rate", f"{resample}"],
+            ]
+        )
+    return torchaudio.sox_effects.apply_effects_file(path, effects=effects)
+
+
+def get_sample(*, resample=None):
+    return _get_sample(SAMPLE_WAV_PATH, resample=resample)
 
 
 def test_can_create_empty_audiotensor():
