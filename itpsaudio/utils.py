@@ -8,19 +8,9 @@ import librosa
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import torchaudio.backend.sox_io_backend as torchaudio_io
 import torchaudio.transforms as T
-from fastai.vision.all import (
-    L,
-    TensorBase,
-    Transform,
-    array,
-    fastuple,
-    hasattrs,
-    ifnone,
-    typedispatch,
-    get_grid,
-)
+from fastai.vision.all import (L, TensorBase, Transform, array, fastuple,
+                               get_grid, hasattrs, ifnone, typedispatch)
 from IPython.display import Audio, display
 
 DEFAULT_OFFSET = 201
@@ -280,66 +270,6 @@ def show_specgram(im, ax=None, figsize=(4, 4), title=None, ctx=None, **kwargs):
         ax.set_title(title)
     plt.tight_layout()
     return ax
-
-
-class AudioPair(fastuple):
-    def show(self, ctx=None, tok=None, **kwargs):
-        audio, text = self
-        print(audio)
-        print(audio.shape)
-        if tok is not None:
-            text = tok.decode(text)
-        if audio.device.type == "cuda":
-            audio = audio.cpu()
-        if audio.ndim == 1:
-            play_audio(audio[None, :], audio.sr)
-            return show_specgram(audio, title=text, ctx=ctx, **kwargs)
-        if audio.ndim == 2:
-            play_audio(audio[None, :], audio.sr)
-            return show_specgram(audio, title=text, ctx=ctx, **kwargs)
-        play_audio(audio, audio.sr)
-        return show_specgram(audio.squeeze(), title=text, ctx=ctx, **kwargs)
-
-
-@typedispatch
-def show_batch(
-    x: AudioPair,
-    y,
-    samples,
-    ctxs=None,
-    max_n=6,
-    nrows=None,
-    ncols=2,
-    figsize=None,
-    tok=None,
-    **kwargs,
-):
-    if figsize is None:
-        figsize = (ncols * 6, max_n // ncols * 3)
-    if ctxs is None:
-        ctxs = get_grid(
-            min(x[0].shape[0], max_n), nrows=None, ncols=ncols, figsize=figsize
-        )
-    for i, ctx in enumerate(ctxs):
-        AudioPair(x[0][i], x[1][i]).show(ctx=ctx, tok=tok)
-
-
-class AudioBatchTransform(Transform):
-    def __init__(self, df, path):
-        self.df = df
-        self.train_labels = (
-            self.df[["filename", "text"]].set_index("filename").to_dict(orient="index")
-        )
-        self.path = path
-
-    def encodes(self, r):
-        t, sr = torchaudio_io.load(r["filename"])
-        text = r["text"]
-        return AudioPair(AudioTensor(t, sr=sr), text)
-
-    def decodes(self, r: AudioPair):
-        return AudioPair(AudioTensor(r[0], sr=r[0].sr), r[1])
-
 
 def splits_testcol(df):
     test = L(df[df["test"]].index.to_list())

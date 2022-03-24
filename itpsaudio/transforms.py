@@ -1,8 +1,9 @@
-from fastai.data.all import Transform, TitledStr, tensor, ItemTransform, store_attr
-from fastai.text.all import TensorText, pad_chunk
 import torchaudio.backend.sox_io_backend as torchaudio_io
+from fastai.data.all import (ItemTransform, TitledStr, Transform, store_attr,
+                             tensor)
+from fastai.text.all import TensorText, pad_chunk
 
-from itpsaudio.core import TensorAudio, AudioPair
+from itpsaudio.core import AudioPair, TensorAudio
 
 
 @Transform
