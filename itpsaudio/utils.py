@@ -285,6 +285,8 @@ def show_specgram(im, ax=None, figsize=(4, 4), title=None, ctx=None, **kwargs):
 class AudioPair(fastuple):
     def show(self, ctx=None, tok=None, **kwargs):
         audio, text = self
+        print(audio)
+        print(audio.shape)
         if tok is not None:
             text = tok.decode(text)
         if audio.device.type == "cuda":
