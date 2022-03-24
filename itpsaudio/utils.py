@@ -278,7 +278,7 @@ def show_specgram(im, ax=None, figsize=(4, 4), title=None, ctx=None, **kwargs):
     ax.specgram(im, Fs=im.sr, **kwargs)
     if title is not None:
         ax.set_title(title)
-    plt.tightlayout()
+    plt.tight_layout()
     return ax
 
 
@@ -295,9 +295,8 @@ class AudioPair(fastuple):
         if audio.ndim == 2:
             play_audio(audio[None, :], audio.sr)
             return show_specgram(audio, title=text, ctx=ctx, **kwargs)
-        elif audio.ndim == 3:
-            play_audio(audio, audio.sr)
-            return show_specgram(audio.squeeze(), title=text, ctx=ctx, **kwargs)
+        play_audio(audio, audio.sr)
+        return show_specgram(audio.squeeze(), title=text, ctx=ctx, **kwargs)
 
 
 @typedispatch
