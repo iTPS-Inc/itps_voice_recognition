@@ -5,8 +5,7 @@ import torch
 import torchaudio
 from fastai.vision.all import Path, TensorBase
 
-import IPython.display
-from itpsaudio.core import AudioTensor, LoadAudio
+from itpsaudio.core import TensorAudio
 
 _SAMPLE_DIR = "_assets"
 SAMPLE_WAV_PATH = os.path.join(_SAMPLE_DIR, "speech.wav")
@@ -29,25 +28,19 @@ def get_sample(*, resample=None):
 
 
 def test_can_create_empty_audiotensor():
-    empty_tensor = AudioTensor([])
+    empty_tensor = TensorAudio([])
     assert empty_tensor is not None
     assert empty_tensor.sr is None
-    assert isinstance(empty_tensor, AudioTensor)
+    assert isinstance(empty_tensor, TensorAudio)
     assert isinstance(empty_tensor, TensorBase)
 
-    tensor_with_sr = AudioTensor([], sr=16000)
+    tensor_with_sr = TensorAudio([], sr=16000)
     assert tensor_with_sr is not None
-    assert isinstance(tensor_with_sr, AudioTensor)
+    assert isinstance(tensor_with_sr, TensorAudio)
 
 
 def test_AudioTensor_operates_like_tensor():
-    tensor_ones = AudioTensor([1, 1], sr=16000)
+    tensor_ones = TensorAudio([1, 1], sr=16000)
     tensor_zeros = torch.zeros_like(tensor_ones)
     assert (tensor_ones - tensor_ones == tensor_zeros).all()
 
-
-def test_LoadAudio():
-    load = LoadAudio(path=TEST_DIR / "_assets")
-    x = load("speech.wav")
-    assert isinstance(x, AudioTensor)
-    assert x.sr == 16000
