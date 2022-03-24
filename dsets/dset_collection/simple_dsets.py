@@ -8,7 +8,8 @@ from typing import Tuple
 LJ_SPEECH_URL = "https://www.dropbox.com/s/h0d8fa13ylwpssq/LJSpeech-1.1.tar.gz?dl=1"
 JSUT_URL = "https://www.dropbox.com/s/o949otj06b9ucmm/jsut_ver1.1.tar.gz?dl=1"
 SPREDS_URL = "https://www.dropbox.com/s/7325sa83zdgl3le/NICT_SPREDS.tar.gz?dl=1"
-TEST_DATA_URL = "https://www.dropbox.com/s/ff2a9yktslkvg8s/test_data.tar.gz?dl=1"
+TEST_DATA_URL = "https://www.dropbox.com/s/hrfmsjadepupiwu/test_data.tar.gz?dl=1"
+
 
 def get_ljl_data(dset_config: DatasetConfig, force_download=False):
     p = untar_data(LJ_SPEECH_URL, force_download=force_download)
