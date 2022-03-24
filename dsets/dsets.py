@@ -5,6 +5,7 @@ from dsets.dset_collection.simple_dsets import (
     get_jsut_data,
     get_nictspreds_data,
     get_ljl_data,
+    get_test_data,
 )
 from dsets.dset_config.dset_config import DatasetConfig
 
@@ -17,6 +18,7 @@ datasets = {
     "ljl": get_ljl_data,
     "jsut": get_jsut_data,
     "nict_spreds": get_nictspreds_data,
+    "testing_data": get_test_data,
 }
 
 
