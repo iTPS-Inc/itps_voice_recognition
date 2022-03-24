@@ -2,7 +2,8 @@
 #!/usr/bin/env python3
 import pandas as pd
 from dsets.dset_config.dset_config import DatasetConfig
-from fastai.data.all import untar_data
+from fastai.data.all import untar_data, Path
+from typing import Tuple
 
 LJ_SPEECH_URL = "https://www.dropbox.com/s/h0d8fa13ylwpssq/LJSpeech-1.1.tar.gz?dl=1"
 JSUT_URL = "https://www.dropbox.com/s/o949otj06b9ucmm/jsut_ver1.1.tar.gz?dl=1"
@@ -51,10 +52,13 @@ def get_nictspreds_data(dset_config: DatasetConfig, force_download=False):
         df = df[df["language"] == dset_config.lang].copy()
     return p, df
 
-def get_test_data(dset_config: DatasetConfig=DatasetConfig(name="test_data", split="both"), force_download=False):
+
+def get_test_data(
+    dset_config: DatasetConfig = DatasetConfig(name="test_data", split="both"),
+    force_download=False,
+) -> Tuple[Path, pd.DataFrame]:
     p = untar_data(TEST_DATA_URL, force_download=force_download)
     df = pd.read_csv(p / "metadata.csv")
-    print(df)
     if not isinstance(df, pd.DataFrame):
         raise TypeError("Couldn't read dataframe correctly")
     df["filename"] = df["filename"].apply(lambda x: p / x)
