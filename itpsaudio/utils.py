@@ -1,15 +1,26 @@
 #!/usr/bin/env python3
 #!/usr/bin/env python3
 import math
+import textwrap
 from typing import Optional
 
 import librosa
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import torchaudio
+import torchaudio.backend.sox_io_backend as torchaudio_io
 import torchaudio.transforms as T
-from fastai.vision.all import TensorBase, Transform, array, fastuple, hasattrs, ifnone, L
+from fastai.vision.all import (
+    L,
+    TensorBase,
+    Transform,
+    array,
+    fastuple,
+    hasattrs,
+    ifnone,
+    typedispatch,
+    get_grid,
+)
 from IPython.display import Audio, display
 
 DEFAULT_OFFSET = 201
@@ -38,6 +49,10 @@ def plot_waveform(waveform, sample_rate, title="Waveform", xlim=None, ylim=None)
             axes[c].set_ylim(ylim)
     figure.suptitle(title)
     plt.show(block=False)
+
+
+def wrap(s, width=50):
+    return "\n".join(textwrap.wrap(s, width))
 
 
 def plot_specgram(waveform, sample_rate, title="Spectrogram", xlim=None, ctx=None):
@@ -240,12 +255,14 @@ def show_waveform(im, ax=None, figsize=None, title=None, ctx=None, **kwargs):
 class AudioTensor(TensorBase):
     sr: Optional[int] = None
 
-    def __init__(self, x, sr=None):
+    def __init__(self, x: torch.Tensor, sr: int = None):
         self = super().__new__(TensorBase, x)
         self.sr = sr
 
 
 def show_specgram(im, ax=None, figsize=(4, 4), title=None, ctx=None, **kwargs):
+    if title is not None:
+        title = wrap(title)
     if hasattrs(im, ("data", "cpu", "permute")):
         im = im.data.cpu()
         if im.shape[0] < 5:
@@ -255,13 +272,13 @@ def show_specgram(im, ax=None, figsize=(4, 4), title=None, ctx=None, **kwargs):
     # Handle 1-channel images
     if im.shape[-1] == 1:
         im = im[..., 0]
-
     ax = ifnone(ax, ctx)
     if ax is None:
         _, ax = plt.subplots(figsize=figsize)
     ax.specgram(im, Fs=im.sr, **kwargs)
     if title is not None:
         ax.set_title(title)
+    plt.tightlayout()
     return ax
 
 
@@ -272,12 +289,38 @@ class AudioPair(fastuple):
             text = tok.decode(text)
         if audio.device.type == "cuda":
             audio = audio.cpu()
+        if audio.ndim == 1:
+            play_audio(audio[None, :], audio.sr)
+            return show_specgram(audio, title=text, ctx=ctx, **kwargs)
         if audio.ndim == 2:
             play_audio(audio[None, :], audio.sr)
             return show_specgram(audio, title=text, ctx=ctx, **kwargs)
         elif audio.ndim == 3:
             play_audio(audio, audio.sr)
             return show_specgram(audio.squeeze(), title=text, ctx=ctx, **kwargs)
+
+
+@typedispatch
+def show_batch(
+    x: AudioPair,
+    y,
+    samples,
+    ctxs=None,
+    max_n=6,
+    nrows=None,
+    ncols=2,
+    figsize=None,
+    tok=None,
+    **kwargs,
+):
+    if figsize is None:
+        figsize = (ncols * 6, max_n // ncols * 3)
+    if ctxs is None:
+        ctxs = get_grid(
+            min(x[0].shape[0], max_n), nrows=None, ncols=ncols, figsize=figsize
+        )
+    for i, ctx in enumerate(ctxs):
+        AudioPair(x[0][i], x[1][i]).show(ctx=ctx, tok=tok)
 
 
 class AudioBatchTransform(Transform):
@@ -289,27 +332,13 @@ class AudioBatchTransform(Transform):
         self.path = path
 
     def encodes(self, r):
-        t, sr = torchaudio.load(r["filename"])
+        t, sr = torchaudio_io.load(r["filename"])
         text = r["text"]
         return AudioPair(AudioTensor(t, sr=sr), text)
 
-    def decodes(self, r: AudioPair) -> AudioPair:
-        return AudioPair(AudioTensor(r[0], r[0].sr), r[1])
+    def decodes(self, r: AudioPair):
+        return AudioPair(AudioTensor(r[0], sr=r[0].sr), r[1])
 
-
-class AddNoise(Transform):
-    def encodes(self, x: AudioTensor):
-        # Define effects
-        self.effects = [
-            ["lowpass", "-1", "300"],  # apply single-pole lowpass filter
-            ["speed", "0.8"],  # reduce the speed
-            # This only changes sample rate, so it is necessary to
-            # add `rate` effect with original sample rate after this.
-            ["rate", f"{x.sr}"],
-            ["reverb", "-w"],  # Reverbration gives some dramatic feeling
-        ]
-        t, sr = torchaudio.sox_effects.apply_effects_tensor(x, x.sr, self.effects)
-        return AudioTensor(t, sr=sr)
 
 def splits_testcol(df):
     test = L(df[df["test"]].index.to_list())
