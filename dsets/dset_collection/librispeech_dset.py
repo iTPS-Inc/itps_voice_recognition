@@ -22,6 +22,8 @@ LIBRISPEECH_DSETS = {
     "train-other": TRAIN_OTHER,
 }
 
+lib_clean_train = DatasetConfig(name="librispeech", split="train", kind="clean")
+
 
 def _get_answers_single_file(fn):
     out_dict = {}
@@ -50,7 +52,9 @@ def _assemble_librispeech_dict(folder):
     return files
 
 
-def get_librispeech(dset: DatasetConfig, force_download=False) -> Tuple[Path, dict]:
+def get_librispeech(
+    dset: DatasetConfig = lib_clean_train, force_download=False
+) -> Tuple[Path, dict]:
     if dset.kind is None:
         raise AttributeError(
             "Please pass one kind of ['other', 'clean', 'dev'] when requesting librispeech dataset"
@@ -58,6 +62,12 @@ def get_librispeech(dset: DatasetConfig, force_download=False) -> Tuple[Path, di
     dset_name = dset.split + "-" + dset.kind
     dset_url = LIBRISPEECH_DSETS[dset_name]
     path = untar_data(dset_url, force_download=force_download)
+
+    if dset_name == "train-other":
+        dset_name = "train-other-500"
+    elif dset_name == "train-clean":
+        dset_name = "train-clean-360"
+
     p, d = path, _assemble_librispeech_dict(path / dset_name)
     df = (
         pd.DataFrame(pd.Series(d))
