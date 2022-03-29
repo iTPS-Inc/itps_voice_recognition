@@ -15,9 +15,12 @@ def extract_first(s: TensorAudio):
 
 
 @Transform
-def capitalize(s):
+def capitalize(s: str):
     return s.upper()
 
+@Transform
+def squeeze(s):
+    return s.squeeze()
 
 class TargetProcessor(Transform):
     def __init__(self, proc):
