@@ -36,15 +36,15 @@ class TargetProcessor(Transform):
 
 
 class TransformersTokenizer(Transform):
-    def __init__(self, processor):
-        self.processor = processor
+    def __init__(self, tokenizer):
+        self.tokenizer = tokenizer
 
-    def encodes(self, x: str) -> TensorText:
-        toks = tensor(self.processor.tokenizer(x)["input_ids"])
-        return toks
+    def encodes(self, x: str):
+        toks = tensor(self.tokenizer(x)["input_ids"])
+        return TensorText(toks)
 
     def decodes(self, x: TensorText):
-        return TitledStr(self.processor.tokenizer.decode(x.cpu().numpy()))
+        return TitledStr(self.tokenizer.decode(x.cpu().numpy()))
 
 
 class Pad_Audio_Batch(ItemTransform):
