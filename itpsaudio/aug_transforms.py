@@ -43,5 +43,4 @@ class AddNoise(RandTransform):
             scale * speech
             + self.noise[:, noise_sample_start : noise_sample_start + speech_length]
         ) / 2
-        return 0
         return TensorAudio(scale, sr=speech.sr)
