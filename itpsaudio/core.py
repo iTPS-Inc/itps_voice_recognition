@@ -13,6 +13,12 @@ class TensorAudio(TensorBase):
         self = super().__new__(TensorBase, x)
         self.sr = sr
 
+    def show(self, ctx=None, title=None, **kwargs):
+        play_audio(self, self.sr)
+        if title is None:
+            title = "Tensor Audio"
+        return show_specgram(self.squeeze(), title=title, ctx=ctx, **kwargs)
+
 
 class AudioPair(fastuple):
     def show(self, ctx=None, tok=None, **kwargs):
