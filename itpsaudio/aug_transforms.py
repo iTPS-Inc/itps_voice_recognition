@@ -21,12 +21,12 @@ class RandomReverbration(RandTransform):
 class AddNoise(RandTransform):
     def __init__(self, db_range, noise, power=2, **kwargs):
         super().__init__(**kwargs)
-        self.db_range: range = db_range
+        self.db_range = db_range
         self.noise = noise
         self.power = power
         self.noise_power = torch.norm(noise, p=power)
 
-    def encodes(self, speech: TensorAudio):
+    def encodes(self, speech: TensorAudio, for_show=False):
         # If noise is shorted than input audio, concat it onto itself to make it longer:
         while self.noise.shape[-1] < speech.shape[-1]:
             self.noise = torch.concat([self.noise, self.noise], dim=-1)
@@ -35,8 +35,10 @@ class AddNoise(RandTransform):
         noise_sample_start = random.randrange(0, noise_start)
 
         # Randomly determine loudness of the noise
-        db = random.randrange(self.db_range.start, stop=self.db_range.stop)
+        db = random.uniform(self.db_range.start, self.db_range.stop)
         snr = math.exp(db / 10)
+        if for_show:
+            print("Signal Noise Ratio: ", snr)
         speech_power = torch.norm(speech, p=self.power)
         scale = snr * self.noise_power / speech_power
         scale = (
