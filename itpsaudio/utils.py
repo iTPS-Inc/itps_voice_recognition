@@ -255,7 +255,11 @@ def show_specgram(im, ax=None, figsize=(4, 4), title=None, ctx=None, **kwargs):
     if hasattrs(im, ("data", "cpu", "permute")):
         im = im.data.cpu()
         if im.shape[0] < 5:
-            im = im.permute(1, 2, 0)
+            if len(im.shape) == 3:
+                im = im.permute(1, 2, 0)
+            #TODO: Remove this after demoing
+            if len(im.shape) == 2:
+                return None
     elif not isinstance(im, np.ndarray):
         im = array(im)
     # Handle 1-channel images

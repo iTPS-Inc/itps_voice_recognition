@@ -31,8 +31,8 @@ class AudioPair(fastuple):
             play_audio(audio[None, :], audio.sr)
             return show_specgram(audio, title=text, ctx=ctx, **kwargs)
         if audio.ndim == 2:
-            play_audio(audio[None, :], audio.sr)
-            return show_specgram(audio, title=text, ctx=ctx, **kwargs)
+            play_audio(audio, audio.sr)
+            return show_specgram(audio[0], title=text, ctx=ctx, **kwargs)
         play_audio(audio, audio.sr)
         return show_specgram(audio.squeeze(), title=text, ctx=ctx, **kwargs)
 
