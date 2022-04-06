@@ -108,17 +108,10 @@ class Pad_Audio_Batch(ItemTransform):
 
 
 class AudioBatchTransform(Transform):
-    def __init__(self, path, df):
-        self.df = df
-        self.train_labels = (
-            self.df[["filename", "text"]].set_index("filename").to_dict(orient="index")
-        )
-        self.path = path
-
     def encodes(self, r):
         t, sr = torchaudio_io.load(r["filename"])
         text = r["text"]
         return AudioPair(TensorAudio(t, sr=sr), text)
 
-    def decodes(self, r: AudioPair) -> AudioPair:
+    def decodes(self, r: AudioPair):
         return AudioPair(TensorAudio(r[0], sr=r[0].sr), r[1])
