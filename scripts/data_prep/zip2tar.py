@@ -8,8 +8,8 @@ from pathlib import Path
 from fastai.data.all import get_files, progress_bar
 from local import PASSWORD
 
-SHARE_FOLDER_ROOT = Path("/home/jjs/Dropbox/Share to iTPS AI-Team/アノテーションデータ")
-SHARE_FOLDER_OUT = Path("/home/jjs/Dropbox/Share to iTPS AI-Team/train_data_repository")
+SHARE_FOLDER_ROOT = Path(Path.home() / "Dropbox/Share to iTPS AI-Team/アノテーションデータ")
+SHARE_FOLDER_OUT = Path(Path.home() / "Downloads")
 
 
 def zip2tar(inpf, outf):
