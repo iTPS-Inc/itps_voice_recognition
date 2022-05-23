@@ -1,6 +1,5 @@
 import torchaudio.backend.sox_io_backend as torchaudio_io
-from fastai.data.all import (ItemTransform, TitledStr, Transform, store_attr,
-                             tensor)
+from fastai.data.all import ItemTransform, TitledStr, Transform, store_attr, tensor
 from fastai.text.all import TensorText, pad_chunk
 
 from itpsaudio.core import AudioPair, TensorAudio
@@ -18,9 +17,11 @@ def extract_first(s: TensorAudio):
 def capitalize(s: str):
     return s.upper()
 
+
 @Transform
 def squeeze(s):
     return s.squeeze()
+
 
 class TargetProcessor(Transform):
     def __init__(self, proc):
@@ -34,39 +35,47 @@ class TargetProcessor(Transform):
         with self.proc.as_target_processor():
             return self.proc.decode(y)
 
+
 class JPTransformersTokenizer(Transform):
-    hira = "あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほまみむめもやゆよらりるれろわをんがぎぐげござじずぜぞだじづでどばびぶべぼぱぴぷぺぽゃゅょっ "
-    kata = "アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲンガギグゲゴザジズゼゾダジヅデドバビブベボパピプペポャュョッ "
-    trans=str.maketrans(kata, hira)
+    hira = (
+        "あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほまみむめもやゆよらりるれろわをんがぎぐげござじずぜぞだじづでどばびぶべぼぱぴぷぺぽゃゅょっ "
+    )
+    kata = (
+        "アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲンガギグゲゴザジズゼゾダジヅデドバビブベボパピプペポャュョッ "
+    )
+    trans = str.maketrans(kata, hira)
     node_format_csv = r"%f[7]|"
-    eos_format_csv  = r"[EOS]\n"
+    eos_format_csv = r"[EOS]\n"
     unk_format_csv = r"%m|"
 
-    def __init__(self, tok=None,mcb=None):
-      self.tokenizer = tok
-      self.mcb = mcb
+    def __init__(self, tok=None, mcb=None):
+        self.tokenizer = tok
+        self.mcb = mcb
 
     def kata2hira(self, s):
         return s.translate(self.trans).strip()
 
-    def mecab_step(self, s:str):
-      s = self.mcb.parse(s.lower())
-      return "[BOS]"+ self.kata2hira(s)
+    def mecab_step(self, s: str):
+        s = self.mcb.parse(s.lower())
+        return "[BOS]" + self.kata2hira(s)
 
-    def encodes(self, s: str)-> TensorText:
+    def encodes(self, s: str) -> TensorText:
         s = self.mecab_step(s)
         toks = tensor(self.tokenizer(s)["input_ids"])
         return TensorText(toks)
 
     def batch_decode(self, xs, group_tokens=True):
         if len(xs.shape) == 2:
-          no_pads = [x[x != self.tokenizer.pad_token_id] for x in xs]
-          decoded = [self.tokenizer.decode(x, group_tokens=group_tokens) for x in no_pads]
-          return decoded
+            no_pads = [x[x != self.tokenizer.pad_token_id] for x in xs]
+            decoded = [
+                self.tokenizer.decode(x, group_tokens=group_tokens) for x in no_pads
+            ]
+            return decoded
         raise AttributeError
 
     def decodes(self, x):
         return TitledStr(self.tokenizer.decode(x.cpu().numpy()))
+
 
 class TransformersTokenizer(Transform):
     def __init__(self, tokenizer):
