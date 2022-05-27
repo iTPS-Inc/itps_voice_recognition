@@ -35,6 +35,24 @@ class TargetProcessor(Transform):
         with self.proc.as_target_processor():
             return self.proc.decode(y)
 
+class ENTransformersTokenizer(Transform):
+    def __init__(self, tok=None):
+      self.tokenizer = tok
+
+    def encodes(self, s: str)-> TensorText:
+        s = s.upper().replace(" ", "|")
+        toks = tensor(self.tokenizer(s)["input_ids"])
+        return TensorText(toks)
+
+    def batch_decode(self, xs, group_tokens=True):
+        if len(xs.shape) == 2:
+          no_pads = [x[x != self.tokenizer.pad_token_id] for x in xs]
+          decoded = [self.tokenizer.decode(x, group_tokens=group_tokens) for x in no_pads]
+          return decoded
+        raise Exception("xs should be a two dimensional vector if using batch_decode")
+
+    def decodes(self, x, group_tokens=True):
+        return TitledStr(self.tokenizer.decode(x.cpu().numpy(), group_tokens=group_tokens))
 
 class JPTransformersTokenizer(Transform):
     hira = (
