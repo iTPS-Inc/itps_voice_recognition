@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 from fastai.callback.all import MixedPrecision
-from fastai.data.all import to_float, Callback, Recorder, store_attr
+from fastai.data.all import to_float, store_attr
 from fastai.callback.tensorboard import TensorBoardBaseCallback
 import torch
 import neptune
