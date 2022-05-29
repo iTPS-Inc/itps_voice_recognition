@@ -1,6 +1,7 @@
 import torchaudio.backend.sox_io_backend as torchaudio_io
 from fastai.data.all import ItemTransform, TitledStr, Transform, store_attr, tensor
 from fastai.text.all import TensorText, pad_chunk
+import MeCab
 
 from itpsaudio.core import AudioPair, TensorAudio
 
@@ -35,24 +36,30 @@ class TargetProcessor(Transform):
         with self.proc.as_target_processor():
             return self.proc.decode(y)
 
+
 class ENTransformersTokenizer(Transform):
     def __init__(self, tok=None):
-      self.tokenizer = tok
+        self.tokenizer = tok
 
-    def encodes(self, s: str)-> TensorText:
+    def encodes(self, s: str) -> TensorText:
         s = s.upper().replace(" ", "|")
         toks = tensor(self.tokenizer(s)["input_ids"])
         return TensorText(toks)
 
     def batch_decode(self, xs, group_tokens=True):
         if len(xs.shape) == 2:
-          no_pads = [x[x != self.tokenizer.pad_token_id] for x in xs]
-          decoded = [self.tokenizer.decode(x, group_tokens=group_tokens) for x in no_pads]
-          return decoded
+            no_pads = [x[x != self.tokenizer.pad_token_id] for x in xs]
+            decoded = [
+                self.tokenizer.decode(x, group_tokens=group_tokens) for x in no_pads
+            ]
+            return decoded
         raise Exception("xs should be a two dimensional vector if using batch_decode")
 
     def decodes(self, x, group_tokens=True):
-        return TitledStr(self.tokenizer.decode(x.cpu().numpy(), group_tokens=group_tokens))
+        return TitledStr(
+            self.tokenizer.decode(x.cpu().numpy(), group_tokens=group_tokens)
+        )
+
 
 class JPTransformersTokenizer(Transform):
     hira = (
@@ -69,6 +76,12 @@ class JPTransformersTokenizer(Transform):
     def __init__(self, tok=None, mcb=None):
         self.tokenizer = tok
         self.mcb = mcb
+        if not self.mcb:
+            self.mcb = MeCab.Tagger(
+                f" --node-format='{self.node_format_csv}'"
+                + f" --unk-format='{self.unk_format_csv}'"
+                + f" --eos-format='{self.eos_format_csv}'"
+            )
 
     def kata2hira(self, s):
         return s.translate(self.trans).strip()
@@ -117,6 +130,7 @@ class Pad_Audio_Batch(ItemTransform):
         pad_first=True,
         seq_len=72,
         decode=True,
+        with_attention_masks=False,
         **kwargs,
     ):
         store_attr("pad_idx_text,pad_first,seq_len,seq_len,pad_idx_audio")
