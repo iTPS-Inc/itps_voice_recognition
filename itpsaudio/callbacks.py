@@ -2,9 +2,9 @@
 import neptune
 import numpy as np
 import torch
-from fastai.callback.all import MixedPrecision
+from fastai.callback.all import MixedPrecision, Callback
 from fastai.callback.tensorboard import TensorBoardBaseCallback
-from fastai.data.all import store_attr, to_float
+from fastai.data.all import store_attr, to_float, join_path_file
 
 
 class MixedPrecisionTransformers(MixedPrecision):
@@ -66,3 +66,16 @@ class SeePreds(TensorBoardBaseCallback):
 
             for i, (p, y) in enumerate(zip(dec_preds_valid, dec_ys_valid)):
                 self._log_preds_to_path(p, y, f"valid_{i}")
+
+class NeptuneSaveModel(Callback):
+    def __init__(self, n_epochs):
+        super().__init__()
+        store_attr()
+
+    def before_fit(self):
+        self.experiment = neptune.get_experiment()
+
+    def after_epoch(self):
+        if self.iter % self.n_epochs == 0:
+            _file = join_path_file(self.learn.save_model.fname, self.learn.path / self.learn.model_dir, ext=".pth")
+            neptune.log_artifact(str(_file))
