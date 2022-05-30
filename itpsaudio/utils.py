@@ -8,8 +8,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torchaudio.transforms as T
-from fastai.vision.all import (L, TensorBase, Transform, array, fastuple,
-                               get_grid, hasattrs, ifnone, typedispatch)
+from fastai.vision.all import L, TensorBase, array, hasattrs, ifnone
 from IPython.display import Audio, display
 
 DEFAULT_OFFSET = 201
@@ -241,14 +240,6 @@ def show_waveform(im, ax=None, figsize=None, title=None, ctx=None, **kwargs):
     return ax
 
 
-class AudioTensor(TensorBase):
-    sr: Optional[int] = None
-
-    def __init__(self, x: torch.Tensor, sr: int = None):
-        self = super().__new__(TensorBase, x)
-        self.sr = sr
-
-
 def show_specgram(im, ax=None, figsize=(4, 4), title=None, ctx=None, **kwargs):
     if title is not None:
         title = wrap(title)
@@ -257,7 +248,7 @@ def show_specgram(im, ax=None, figsize=(4, 4), title=None, ctx=None, **kwargs):
         if im.shape[0] < 5:
             if len(im.shape) == 3:
                 im = im.permute(1, 2, 0)
-            #TODO: Remove this after demoing
+            # TODO: Remove this after demoing
             if len(im.shape) == 2:
                 return None
     elif not isinstance(im, np.ndarray):
@@ -273,6 +264,7 @@ def show_specgram(im, ax=None, figsize=(4, 4), title=None, ctx=None, **kwargs):
         ax.set_title(title)
     plt.tight_layout()
     return ax
+
 
 def splits_testcol(df):
     test = L(df[df["test"]].index.to_list())
