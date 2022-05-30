@@ -1,10 +1,25 @@
 from typing import Optional
 
-from fastai.data.all import TensorBase, fastuple, typedispatch
-from fastai.vision.all import get_grid
+import torch
+from fastai.data.all import TensorBase, fastuple, typedispatch, cast
+from fastai.learner import Learner
+from fastai.vision.all import get_grid, CancelStepException
 
 from itpsaudio.utils import play_audio, show_specgram
 
+class TransformersLearner(Learner):
+    def _do_one_batch(self):
+        self.pred = self.model(self.xb[0], labels=cast(self.yb[0], torch.Tensor))
+        self('after_pred')
+        self.loss_grad = self.pred["loss"]
+        self.loss = self.loss_grad.clone()
+        self.smooth_loss = self.loss_grad.clone()
+        self('after_loss')
+        if not self.training or not len(self.yb): return
+        self('before_backward')
+        self.loss_grad.backward()
+        self._with_events(self.opt.step, 'step', CancelStepException)
+        self.opt.zero_grad()
 
 class TensorAudio(TensorBase):
     sr: Optional[int] = None
@@ -58,3 +73,4 @@ def show_batch(
         )
     for i, ctx in enumerate(ctxs):
         AudioPair(x[0][i], x[1][i]).show(ctx=ctx, tok=tok)
+
