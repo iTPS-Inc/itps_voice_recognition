@@ -6,10 +6,12 @@ import torchaudio
 from fastai.vision.augment import RandTransform
 
 from itpsaudio.core import TensorAudio
+import torchaudio.transforms as T
 
 
 class RandomReverbration(RandTransform):
     effects = [["reverb", "-w"]]
+
     def encodes(self, x: TensorAudio):
         assert (
             x.sr is not None
@@ -46,3 +48,33 @@ class AddNoise(RandTransform):
             + self.noise[:, noise_sample_start : noise_sample_start + speech_length]
         ) / 2
         return TensorAudio(scale, sr=speech.sr)
+
+
+class StretchAugment(RandTransform):
+    def __init__(self, stretch_rate=1.2, **kwargs):
+        super().__init__(**kwargs)
+        self.stretch_rate = stretch_rate
+        self.stretch = T.TimeStretch()
+
+    def encodes(self, x: TensorAudio):
+        return self.stretch(x, self.stretch_rate)
+
+
+class FrequencyMaskAugment(RandTransform):
+    def __init__(self, freq_mask_param=80, **kwargs):
+        super().__init__(**kwargs)
+        self.freq_mask_param = freq_mask_param
+        self.freq_mask = T.FrequencyMasking(80)
+
+    def encodes(self, x: TensorAudio):
+        return self.freq_mask(x)
+
+
+class TimeMaskAugment(RandTransform):
+    def __init__(self, time_mask_param=80, **kwargs):
+        super().__init__(**kwargs)
+        self.time_mask_param = time_mask_param
+        self.time_mask = T.TimeMasking(80)
+
+    def encodes(self, x: TensorAudio):
+        return self.time_mask(x)
