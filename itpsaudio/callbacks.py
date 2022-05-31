@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import logging as l
 import neptune
 import numpy as np
 import torch
@@ -6,6 +7,7 @@ from fastai.callback.all import MixedPrecision, Callback
 from fastai.callback.tensorboard import TensorBoardBaseCallback
 from fastai.data.all import store_attr, to_float, join_path_file
 
+import os
 
 class MixedPrecisionTransformers(MixedPrecision):
     def after_pred(self):
@@ -82,4 +84,7 @@ class NeptuneSaveModel(Callback):
     def after_epoch(self):
         if self.iter % self.n_epochs == 0:
             _file = join_path_file(self.learn.save_model.fname, self.learn.path / self.learn.model_dir, ext=".pth")
-            neptune.log_artifact(str(_file))
+            if os.path.exists(_file):
+                neptune.log_artifact(str(_file))
+            else:
+                l.log(l.WARNING, "Could find {_file}, thus couldn't upload it to Neptune.")
