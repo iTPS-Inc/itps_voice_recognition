@@ -28,7 +28,11 @@ class SeePreds(TensorBoardBaseCallback):
     def get_valid_preds(self):
         decoded_preds = []
         decoded_ys = []
-        for i, (x, y) in enumerate(iter(self.dls.valid)):
+        for i, b in enumerate(iter(self.dls.valid)):
+            if len(b) == 4: x,y = b[0], b[-1]
+            elif len(b) == 2: x,y = b[0], b[-1]
+            else: assert False, "Don't know how to See these preds"
+
             if i < self.n_vals:
                 with torch.no_grad():
                     preds = np.argmax(self.model(x).logits.detach().cpu(), axis=-1)

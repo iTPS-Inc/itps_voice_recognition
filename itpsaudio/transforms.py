@@ -1,7 +1,8 @@
 import torchaudio.backend.sox_io_backend as torchaudio_io
-from fastai.data.all import ItemTransform, TitledStr, Transform, store_attr, tensor
+from fastai.data.all import ItemTransform, TitledStr, Transform, store_attr, tensor, retain_type
 from fastai.text.all import TensorText, pad_chunk
 import MeCab
+import torch
 
 from itpsaudio.core import AudioPair, TensorAudio
 
@@ -133,7 +134,7 @@ class Pad_Audio_Batch(ItemTransform):
         with_attention_masks=False,
         **kwargs,
     ):
-        store_attr("pad_idx_text,pad_first,seq_len,seq_len,pad_idx_audio")
+        store_attr("pad_idx_text,pad_first,seq_len,seq_len,pad_idx_audio,with_attention_masks")
         super().__init__(**kwargs)
 
     def before_call(self, b):
@@ -147,26 +148,48 @@ class Pad_Audio_Batch(ItemTransform):
         self.before_call(b)
         return super().__call__(tuple(b), **kwargs)
 
+    @staticmethod
+    def pad_chunk(x,pad_idx=1, pad_first=True, seq_len=72, pad_len=10, atts=False):
+        "Pad `x` by adding padding by chunks of size `seq_len`"
+        zeros = torch.zeros_like
+        ones = torch.ones_like
+        l = pad_len - x.shape[0]
+        pad_chunk = x.new_zeros((l//seq_len) * seq_len) + pad_idx
+        pad_res   = x.new_zeros(l % seq_len) + pad_idx
+        x1 = torch.cat([pad_chunk, x, pad_res]) if pad_first else torch.cat([x, pad_chunk, pad_res])
+        if atts:
+            atts = torch.cat([zeros(pad_chunk), ones(x), zeros(pad_res)]) if pad_first else torch.cat([ones(x), zeros(pad_chunk), zeros(pad_res)])
+        else:
+            atts = None
+        return retain_type(x1, x), atts
+
+
     def encodes(self, b):
-        return [
-            (
-                pad_chunk(
-                    b[i][0][0],
-                    pad_idx=self.pad_idx_audio,
-                    pad_first=self.pad_first,
-                    seq_len=self.seq_len,
-                    pad_len=self.max_len_x,
-                )[None, :],
-                pad_chunk(
-                    b[i][1],
-                    pad_idx=self.pad_idx_text,
-                    pad_first=self.pad_first,
-                    seq_len=self.seq_len,
-                    pad_len=self.max_len_y,
-                ),
+        outs = []
+        for i in range(len(b)):
+            x, x_atts = self.pad_chunk(
+                b[i][0][0],
+                pad_idx=self.pad_idx_audio,
+                pad_first=self.pad_first,
+                seq_len=self.seq_len,
+                pad_len=self.max_len_x,
+                atts=self.with_attention_masks,
             )
-            for i in range(len(b))
-        ]
+            x = x[None, :] # This is needed because we want the input to have more directions
+            y, y_atts = self.pad_chunk(
+                b[i][1],
+                pad_idx=self.pad_idx_text,
+                pad_first=self.pad_first,
+                seq_len=self.seq_len,
+                pad_len=self.max_len_y,
+                atts=self.with_attention_masks,
+            )
+            if self.with_attention_masks:
+                # We put y at the end so that it is always the y in the dataloader
+                outs.append((x, x_atts>0, y_atts>0, y))
+            else:
+                outs.append((x, y))
+        return outs
 
     def _decode(self, o):
         if isinstance(o, TensorAudio):
