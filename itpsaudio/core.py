@@ -72,5 +72,5 @@ def show_batch(
             min(x[0].shape[0], max_n), nrows=None, ncols=ncols, figsize=figsize
         )
     for i, ctx in enumerate(ctxs):
-        AudioPair(x[0][i], x[1][i]).show(ctx=ctx, tok=tok)
-
+        print(AudioPair)
+        AudioPair(x[0][i], x[-1][i]).show(ctx=ctx, tok=tok)
