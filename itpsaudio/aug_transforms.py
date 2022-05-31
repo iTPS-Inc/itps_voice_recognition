@@ -61,16 +61,10 @@ class StretchAugment(RandTransform):
         self.stretch_rate_l = stretch_rate_l
         self.stretch = T.TimeStretch()
 
+
     def encodes(self, x: TensorAudio):
         stretch_rate = random.uniform(self.stretch_rate_l, self.stretch_rate_h)
-        if x.sr:
-            final_length = (len(x) / x.sr)*stretch_rate
-        else:
-            final_length = (len(x) / 16_000)*stretch_rate
-        if final_length < self.max_len:
-            return self.stretch(x, stretch_rate)
-        else:
-            return x
+        return self.stretch(x, stretch_rate)
 
 
 class FrequencyMaskAugment(RandTransform):
@@ -108,7 +102,7 @@ class ToSpec(Transform):
 class ToWave(Transform):
     def __init__(self, n_ftt=1024, win_length=None, hop_length=512):
         self.griffin_lim = T.GriffinLim(
-            n_ftt=n_ftt,
+            n_ftt,
             win_length=win_length,
             hop_length=hop_length,
         )
