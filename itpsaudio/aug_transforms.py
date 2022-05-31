@@ -51,13 +51,21 @@ class AddNoise(RandTransform):
 
 
 class StretchAugment(RandTransform):
-    def __init__(self, stretch_rate=1.2, **kwargs):
+    def __init__(self,max_len=15, stretch_rate=1.2, **kwargs):
         super().__init__(**kwargs)
+        self.max_len = max_len
         self.stretch_rate = stretch_rate
         self.stretch = T.TimeStretch()
 
     def encodes(self, x: TensorAudio):
-        return self.stretch(x, self.stretch_rate)
+        if x.sr:
+            final_length = (len(x) / x.sr)*self.stretch_rate
+        else:
+            final_length = (len(x) / 16_000)*self.stretch_rate
+        if final_length < self.max_len:
+            return self.stretch(x, self.stretch_rate)
+        else:
+            return x
 
 
 class FrequencyMaskAugment(RandTransform):
