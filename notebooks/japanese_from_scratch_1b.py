@@ -49,6 +49,7 @@ from dsets.dsets import get_datasets, JAPANESE_DATASETS
 from dsets.dset_config.dset_config import DatasetConfig
 from dsets.helpers.helpers import apply_parallel
 from itpsaudio.transforms import *
+from itpsaudio.aug_transforms import StretchAugment, FrequencyMaskAugment, TimeMaskAugment, ToSpec, ToWave
 from functools import lru_cache
 from itpsaudio.callbacks import SeePreds, NeptuneSaveModel
 from itpsaudio.core import *
@@ -84,6 +85,7 @@ import json
 import pickle
 import neptune as neptune
 import datetime
+import japanize_matplotlib
 from tqdm import tqdm
 
 import pprint
@@ -96,6 +98,7 @@ TEST_RUN = False
 LAST_EPOCH = 0
 NUM_EPOCHS = 50
 FREEZE_FEAT = True
+MAX_LEN=15
 
 pretrained_model_name = "facebook/wav2vec2-xls-r-1b"
 
@@ -180,7 +183,7 @@ df["audio_length"].max()
 
 df["audio_length"].sum() / 60 / 60
 
-df = df[df["audio_length"] < 15].reset_index(drop=True)
+df = df[df["audio_length"] < MAX_LEN].reset_index(drop=True)
 df = df[~df["text"].isna()].reset_index(drop=True)
 
 df["audio_length"].sum() / 60 / 60
@@ -235,9 +238,29 @@ def resample(x: TensorAudio):
 
 # %%
 
+
+n_fft = 1024
+win_length = None
+hop_length = 512
+
+griffin_lim = T.GriffinLim(
+    n_fft=n_fft,
+    win_length=win_length,
+    hop_length=hop_length,
+)
+
 dls = tfms.dataloaders(
     bs=2,
-    after_item=[RandomReverbration(p=0.1), resample, tok],
+    after_item=[
+                ToSpec(),
+                FrequencyMaskAugment(freq_mask_param=80, p=0.1),
+                # StretchAugment(p=1),
+                TimeMaskAugment(time_mask_param=80, p=0.1),
+                ToWave(),
+                RandomReverbration(p=0.1),
+                resample,
+                tok
+                ],
     before_batch=[
         Pad_Audio_Batch(pad_idx_audio=0, pad_idx_text=-100,
          pad_first=True,
@@ -256,8 +279,9 @@ dls.one_batch()
 # %% 
 
 
-# dls.show_batch(tok=tok, unique=False)
+dls.show_batch(tok=tok, unique=False)
 
+# %% 
 
 def wer(pred, labels):
     pred_logits = pred.logits
