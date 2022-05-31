@@ -70,7 +70,7 @@ class JPTransformersTokenizer(Transform):
         "アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲンガギグゲゴザジズゼゾダジヅデドバビブベボパピプペポャュョッ "
     )
     trans = str.maketrans(kata, hira)
-    node_format_csv = r"%f[8]|"
+    node_format_csv = r"%f[7]|"
     eos_format_csv = r"[EOS]\n"
     unk_format_csv = r"%m|"
 
