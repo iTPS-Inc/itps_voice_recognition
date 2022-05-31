@@ -3,7 +3,7 @@ import random
 
 import torch
 import torchaudio
-from fastai.vision.augment import RandTransform
+from fastai.vision.augment import RandTransform, Transform
 
 from itpsaudio.core import TensorAudio
 import torchaudio.transforms as T
@@ -91,3 +91,27 @@ class TimeMaskAugment(RandTransform):
 
     def encodes(self, x: TensorAudio):
         return self.time_mask(x)
+
+
+class ToSpec(Transform):
+    def __init__(self, n_fft=1024, win_length=None, hop_length=512):
+        self.spec = T.Spectrogram(
+            n_fft=n_fft,
+            win_length=win_length,
+            hop_length=hop_length,
+        )
+
+    def encodes(self, x: TensorAudio):
+        return self.spec(x)
+
+
+class ToWave(Transform):
+    def __init__(self, n_ftt=1024, win_length=None, hop_length=512):
+        self.griffin_lim = T.GriffinLim(
+            n_ftt=n_ftt,
+            win_length=win_length,
+            hop_length=hop_length,
+        )
+
+    def encodes(self, x: TensorAudio):
+        return self.griffin_lim(x)
