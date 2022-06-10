@@ -1,7 +1,6 @@
 import torchaudio.backend.sox_io_backend as torchaudio_io
 from fastai.data.all import ItemTransform, TitledStr, Transform, store_attr, tensor, retain_type
 from fastai.text.all import TensorText, pad_chunk
-import MeCab
 import torch
 
 from itpsaudio.core import AudioPair, TensorAudio
@@ -13,6 +12,7 @@ def extract_first(s: TensorAudio):
         return s[0]
     else:
         return s
+
 
 
 @Transform
@@ -75,6 +75,7 @@ class JPTransformersTokenizer(Transform):
     unk_format_csv = r"%m|"
 
     def __init__(self, tok=None, mcb=None):
+        import MeCab
         self.tokenizer = tok
         self.mcb = mcb
         if not self.mcb:
