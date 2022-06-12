@@ -43,7 +43,7 @@ class ENTransformersTokenizer(Transform):
         self.tokenizer = tok
 
     def encodes(self, s: str) -> TensorText:
-        s = s.upper().replace(" ", "|")
+        s = s.replace(" ", "|")
         toks = tensor(self.tokenizer(s)["input_ids"])
         return TensorText(toks)
 
