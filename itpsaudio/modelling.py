@@ -30,6 +30,22 @@ def get_feat_extract_output_lengths(
     return input_lengths
 
 
+class CTCLoss(_Loss):
+    def __init__(self, num_classes, blank=0, weight=0.01,reduction="mean"):
+        super().__init__(reduction=reduction)
+        self.weight = weight
+        self.num_classes = num_classes
+        self.ctc = nn.CTCLoss(reduction=reduction, blank=blank, zero_infinity=True)
+
+    def forward(self, preds, inp_len, labels, modelconf):
+      inp_len=get_feat_extract_output_lengths(modelconf, inp_len, False)
+      flattened_targets = labels.masked_select(labels > 0)
+      labels_mask = labels >= 0
+      target_lengths = labels_mask.sum(-1)
+      flattened_targets = labels.masked_select(labels_mask)
+      log_probs = nn.functional.log_softmax(preds, dim=-1, dtype=torch.float32).transpose(0, 1)
+      ctc_loss = self.ctc(log_probs, flattened_targets, inp_len, target_lengths)
+      return ctc_loss
 
 class SmoothCTCLoss(_Loss):
     def __init__(self, num_classes, blank=0, weight=0.01,reduction="mean"):
@@ -40,7 +56,7 @@ class SmoothCTCLoss(_Loss):
         kldiv_red = "batchmean" if reduction == "mean" else "sum"
         self.kldiv = nn.KLDivLoss(reduction=kldiv_red)
 
-    def forward(self, preds, inp_len, labels, label_lengths, label_attention, modelconf):
+    def forward(self, preds, inp_len, labels, modelconf):
       inp_len=get_feat_extract_output_lengths(modelconf, inp_len, False)
       flattened_targets = labels.masked_select(labels > 0)
       labels_mask = labels >= 0
