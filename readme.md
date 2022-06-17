@@ -47,24 +47,25 @@ to preprocess the itps datset `ffmpeg` is required.
 The `dsets` contains a helper python module for getting the datasets and getting them into an acceptable format.
 There is a single function, `load_dset()`, with which it is possible to access all the datasets.
 
-| Dataset           | usable? | train test split | language     | Complete | Notes          | length |
-|-------------------|---------|------------------|--------------|----------|----------------|--------|
-| itps              | yes     | yes              | jp/en        | yes      | -              | -      |
-| librispeech       | yes     | yes              | en           | yes      | -              | -      |
-| LJ_Speech_Dataset | yes     | yes              | en           | yes      | -              | -      |
-| JSUT              | yes     | yes              | jp           | yes      | -              | -      |
-| NICT SPREDS       | yes     | yes              | jp/en/others | yes      | -              | -      |
-|-------------------|---------|------------------|--------------|----------|----------------|--------|
-| J-KAC             | no      | not yet          | jp           | -        | -              | -      |
-| RWCP              | no      | not yet          | ?            | -        | -              | -      |
-| PASD              | no      | not yet          | ?            | -        | -              | -      |
-| JVS               | no      | not yet          | ?            | -        | -              | -      |
-| CENSREC-3         | no      | not yet          | ?            | -        | -              | -      |
-| CENSREC-1         | no      | not yet          | ?            | -        | -              | -      |
-|-------------------|---------|------------------|--------------|----------|----------------|--------|
-| NICT_ASTREC       | no      | not yet          | jp/en        | no       | No audio files | -      |
-| J-MAC             | no      | not yet          | jp           | no       | No audio files | -      |
-|-------------------|---------|------------------|--------------|----------|----------------|--------|
+| Dataset                  | usable? | train test split | language     | Complete | Notes          | length |
+|--------------------------|---------|------------------|--------------|----------|----------------|--------|
+| itps                     | yes     | yes              | jp/en        | yes      | -              | -      |
+| librispeech              | yes     | yes              | en           | yes      | -              | -      |
+| LJ_Speech_Dataset        | yes     | yes              | en           | yes      | -              | -      |
+| JSUT                     | yes     | yes              | jp           | yes      | -              | -      |
+| NICT SPREDS              | yes     | yes              | jp/en/others | yes      | -              | -      |
+|--------------------------|---------|------------------|--------------|----------|----------------|--------|
+| J-KAC                    | no      | not yet          | jp           | -        | -              | -      |
+| 日本語の話し言葉コーパス | no      | not yet          | jp           | yes      |                |        |
+| RWCP                     | no      | not yet          | ?            | -        | -              | -      |
+| PASD                     | no      | not yet          | ?            | -        | -              | -      |
+| JVS                      | no      | not yet          | ?            | -        | -              | -      |
+| CENSREC-3                | no      | not yet          | ?            | -        | -              | -      |
+| CENSREC-1                | no      | not yet          | ?            | -        | -              | -      |
+|--------------------------|---------|------------------|--------------|----------|----------------|--------|
+| NICT_ASTREC              | no      | not yet          | jp/en        | no       | No audio files | -      |
+| J-MAC                    | no      | not yet          | jp           | no       | No audio files | -      |
+|--------------------------|---------|------------------|--------------|----------|----------------|--------|
 
 #### NICT SPREDS dataset languages 
 
