@@ -50,6 +50,7 @@ class AddNoise(RandTransform):
         return TensorAudio(scale, sr=speech.sr)
 
 
+
 class StretchAugment(RandTransform):
     def __init__(self,max_len=15,
                  stretch_rate_l=0.8,
@@ -59,12 +60,11 @@ class StretchAugment(RandTransform):
         self.max_len = max_len
         self.stretch_rate_h = stretch_rate_h
         self.stretch_rate_l = stretch_rate_l
-        self.stretch = T.TimeStretch()
-
+        self.stretch = T.TimeStretch(n_freq=201)
 
     def encodes(self, x: TensorAudio):
         stretch_rate = random.uniform(self.stretch_rate_l, self.stretch_rate_h)
-        return self.stretch(x, stretch_rate)
+        return self.stretch(x[:, None], stretch_rate).squeeze(dim=0)
 
 
 class FrequencyMaskAugment(RandTransform):
@@ -86,13 +86,13 @@ class TimeMaskAugment(RandTransform):
     def encodes(self, x: TensorAudio):
         return self.time_mask(x)
 
-
 class ToSpec(Transform):
-    def __init__(self, n_fft=1024, win_length=None, hop_length=512):
+    def __init__(self, n_fft=400, win_length=None, hop_length=None):
         self.spec = T.Spectrogram(
             n_fft=n_fft,
             win_length=win_length,
             hop_length=hop_length,
+            power=2,
         )
 
     def encodes(self, x: TensorAudio):
@@ -100,7 +100,7 @@ class ToSpec(Transform):
 
 
 class ToWave(Transform):
-    def __init__(self, n_ftt=1024, win_length=None, hop_length=512):
+    def __init__(self, n_ftt=400, win_length=None, hop_length=None):
         self.griffin_lim = T.GriffinLim(
             n_ftt,
             win_length=win_length,
@@ -108,4 +108,4 @@ class ToWave(Transform):
         )
 
     def encodes(self, x: TensorAudio):
-        return self.griffin_lim(x)
+        return self.griffin_lim(x.abs()).squeeze(dim=1)
