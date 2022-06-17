@@ -39,7 +39,7 @@ class CTCLoss(BaseLoss):
         Small CTCLoss class.
         calculating the ctcloss similarly to how transformers does it "
         """
-        super().__init__(CTCLoss, reduction=reduction)
+        super().__init__(CTCLoss, num_classes, reduction=reduction)
         self.weight = weight
         self.num_classes = num_classes
         self.ctc = nn.CTCLoss(reduction=reduction, blank=blank, zero_infinity=True)
@@ -62,7 +62,7 @@ class SmoothCTCLoss(BaseLoss):
         """
         CTC loss with label smoothing.
         """
-        super().__init__(SmoothCTCLoss, reduction=reduction)
+        super().__init__(SmoothCTCLoss, num_classes, reduction=reduction)
         self.weight = weight
         self.num_classes = num_classes
         self.ctc = nn.CTCLoss(reduction=reduction, blank=blank, zero_infinity=True)
