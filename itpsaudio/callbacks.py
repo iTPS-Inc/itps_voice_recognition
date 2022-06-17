@@ -38,8 +38,8 @@ class SeePreds(TensorBoardBaseCallback):
             if i < self.n_vals:
                 with torch.no_grad():
                     preds = np.argmax(self.model(x).logits.detach().cpu(), axis=-1)
-                decoded_preds += self.tok.batch_decode(preds)
-                decoded_ys += self.tok.batch_decode(y)
+                decoded_preds += self.tok.batch_decode(preds, group_tokens=False)
+                decoded_ys += self.tok.batch_decode(y, group_tokens=False)
             else:
                 break
         return decoded_preds, decoded_ys
@@ -87,4 +87,4 @@ class NeptuneSaveModel(Callback):
             if os.path.exists(_file):
                 neptune.log_artifact(str(_file))
             else:
-                l.log(l.WARNING, "Could find {_file}, thus couldn't upload it to Neptune.")
+                l.log(l.WARNING, f"Could find {_file}, thus couldn't upload it to Neptune.")
