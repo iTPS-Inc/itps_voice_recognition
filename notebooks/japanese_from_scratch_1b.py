@@ -74,6 +74,7 @@ from fastai.vision.all import *
 from fastai.callback.tensorboard import *
 from fastai.callback.neptune import *
 
+import numpy as np
 import torchaudio.transforms as T
 from itpsaudio.aug_transforms import RandomReverbration
 from functools import lru_cache
@@ -83,12 +84,11 @@ from pathlib import Path
 import jiwer
 import json
 import pickle
+import pandas as pd
 import neptune as neptune
 import datetime
 import japanize_matplotlib
 from tqdm import tqdm
-
-import pprint
 # %%
 """## Parameters"""
 
@@ -406,22 +406,52 @@ t_tfms = TfmdLists(tdf, abt)
 
 t_tfms = TfmdLists(tdf, abt)
 
-t_dl = dls.new(t_tfms)
+t_dl = dls.new(t_tfms, shuffle=False, dl_kwargs={"val_res":list(reversed(tdf.index.to_list()))})
 
 learn.validate(dl=t_dl)
 
 
-def get_preds(xs):
+def get_preds(xs, group_tokens=True):
     preds = learn.model(xs)
     pred_logits = preds.logits
     pred_ids = TensorText(np.argmax(pred_logits.detach().cpu().numpy(), axis=-1))
-    pred_str = tok.batch_decode(pred_ids)
+    pred_str = tok.batch_decode(pred_ids, group_tokens=group_tokens)
     return pred_str
 
 
+def get_prediction_dataset(df):
+    print("First we get lengths")
+    df["audio_length"] = apply_parallel(df["filename"], get_audio_length, 16)
+    print("Filter by lengths")
+    df = df[df["audio_length"] < MAX_LEN].reset_index(drop=True)
+    print("Filter by text")
+    df = df[~df["text"].isna()].reset_index(drop=True)
+    print("Lazy transform to correct input format")
+    t_tfms = TfmdLists(df, AudioBatchTransform())
+    print("Make new dls without shuffle")
+    t_dl = dls.new(t_tfms, shuffle=False, val_res=list(reversed(df.index.to_list())))
+    print("Get predictions")
+    print(len(t_dl)*2,df.shape )
+    comp = [(get_preds(xs, group_tokens=True), tok.batch_decode(y, group_tokens=False)) for xs,_,_, y in tqdm(
+      iter(t_dl), total=len(t_dl))]
+    print("Get predictions into better format")
+    xs = []
+    targets = []
+    for (x_0, x_1),(y_0,y_1) in comp:
+      xs += [x_0, x_1]
+      targets += [y_0, y_1]
+    print("Put predictions and targets onto data")
+    df["mecab_targets"] = targets
+    df["predictions"] = xs
+    return df
 
-comp = [(get_preds(xs), tok.batch_decode(y)) for xs, y in tqdm(iter(t_dl))]
+ntdf = get_prediction_dataset(tdf)
+ndf = get_prediction_dataset(df)
+results_df = pd.concat([ndf, ntdf], ignore_index=True)
+results_df.to_pickle("/raid/gdep-guest33/jp_mod/data/wav2vec2output.pkl")
 
+
+comp = [(get_preds(xs), tok.batch_decode(y)) for xs,_,_, y in tqdm(iter(t_dl))]
 if NEPTUNE:
     for i, (x_pair, y_pair) in enumerate(comp):
         experiment=neptune.get_experiment()
@@ -441,7 +471,7 @@ if NEPTUNE:
     neptune.stop()
 
 wers,cers = [], []
-for xs, y in tqdm(iter(t_dl)):
+for xs,_,_, y in tqdm(iter(t_dl)):
     wers.append(wer(learn.model(xs), y))
     cers.append(cer(learn.model(xs), y))
 wers, cers = np.array(wers), np.array(cers)
