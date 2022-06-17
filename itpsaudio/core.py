@@ -21,6 +21,9 @@ class TransformersLearner(Learner):
         self._with_events(self.opt.step, 'step', CancelStepException)
         self.opt.zero_grad()
 
+class TensorAttention(TensorBase):
+    def __init__(self, x): self = super().__new__(TensorBase, x)
+
 class TensorAudio(TensorBase):
     sr: Optional[int] = None
 
