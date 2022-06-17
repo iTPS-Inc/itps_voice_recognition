@@ -10,7 +10,7 @@ from fastai.data.all import (
 from fastai.text.all import TensorText, pad_chunk
 import torch
 
-from itpsaudio.core import AudioPair, TensorAudio
+from itpsaudio.core import AudioPair, TensorAudio, TensorAttention
 
 
 @Transform
