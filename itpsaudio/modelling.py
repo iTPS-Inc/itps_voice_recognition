@@ -1,7 +1,7 @@
-from torch.nn.modules.loss import _Loss
 import torch
 import torch.nn as nn
 from typing import Union, Optional
+from fastai.losses import BaseLoss
 
 
 def torch_int_div(a, b):
@@ -33,13 +33,13 @@ def get_feat_extract_output_lengths(
     return input_lengths
 
 
-class CTCLoss(_Loss):
+class CTCLoss(BaseLoss):
     def __init__(self, num_classes, blank=0, weight=0.01, reduction="mean"):
         """
         Small CTCLoss class.
         calculating the ctcloss similarly to how transformers does it "
         """
-        super().__init__(reduction=reduction)
+        super().__init__(CTCLoss, reduction=reduction)
         self.weight = weight
         self.num_classes = num_classes
         self.ctc = nn.CTCLoss(reduction=reduction, blank=blank, zero_infinity=True)
@@ -57,12 +57,12 @@ class CTCLoss(_Loss):
         return ctc_loss
 
 
-class SmoothCTCLoss(_Loss):
+class SmoothCTCLoss(BaseLoss):
     def __init__(self, num_classes, blank=0, weight=0.01, reduction="mean"):
         """
         CTC loss with label smoothing.
         """
-        super().__init__(reduction=reduction)
+        super().__init__(SmoothCTCLoss, reduction=reduction)
         self.weight = weight
         self.num_classes = num_classes
         self.ctc = nn.CTCLoss(reduction=reduction, blank=blank, zero_infinity=True)
