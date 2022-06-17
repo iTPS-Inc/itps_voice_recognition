@@ -92,7 +92,6 @@ class ToSpec(Transform):
             n_fft=n_fft,
             win_length=win_length,
             hop_length=hop_length,
-            power=2,
         )
 
     def encodes(self, x: TensorAudio):
@@ -108,4 +107,4 @@ class ToWave(Transform):
         )
 
     def encodes(self, x: TensorAudio):
-        return self.griffin_lim(x.abs()).squeeze(dim=1)
+        return self.griffin_lim(x).squeeze(dim=1)
