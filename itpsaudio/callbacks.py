@@ -42,7 +42,7 @@ class SeePreds(TensorBoardBaseCallback):
                 decoded_ys += self.tok.batch_decode(y, group_tokens=False)
             else:
                 break
-        return decoded_preds, decoded_ys # If the predictions are too long, neptune bugs
+        return list(map(lambda x: x[:500], decoded_preds)),list(map(lambda x:x[:500], decoded_ys))
 
     def _log_preds_to_path(self, p, y, path):
         self.writer.add_text(
