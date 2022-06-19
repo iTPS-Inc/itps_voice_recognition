@@ -3,7 +3,7 @@ from typing import Optional
 import torch
 from fastai.data.all import TensorBase, fastuple, typedispatch, cast
 from fastai.learner import Learner
-from fastai.vision.all import get_grid, CancelStepException
+from fastai.vision.all import CancelStepException
 
 from itpsaudio.utils import play_audio, show_specgram
 
