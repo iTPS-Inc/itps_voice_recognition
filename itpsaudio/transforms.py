@@ -54,11 +54,12 @@ class ENTransformersTokenizer(Transform):
 
     def batch_decode(self, xs, group_tokens=True):
         if len(xs.shape) == 2:
-            no_pads = [x[x != self.tokenizer.pad_token_id] for x in xs]
             decoded = [
                 self.tokenizer.decode(x, group_tokens=group_tokens) for x in no_pads
             ]
-            return decoded
+
+            no_pads = [x[x != self.tokenizer.pad_token_id] for x in decoded]
+            return no_pads
         raise Exception("xs should be a two dimensional vector if using batch_decode")
 
     def decodes(self, x, group_tokens=True):
@@ -101,11 +102,11 @@ class JPTransformersTokenizer(Transform):
 
     def batch_decode(self, xs, group_tokens=True):
         if len(xs.shape) == 2:
-            no_pads = [x[x != self.tokenizer.pad_token_id] for x in xs]
             decoded = [
-                self.tokenizer.decode(x, group_tokens=group_tokens) for x in no_pads
+                self.tokenizer.decode(x, group_tokens=group_tokens) for x in xs
             ]
-            return decoded
+            no_pads = [x[x != self.tokenizer.pad_token_id] for x in decoded]
+            return no_pads
         raise AttributeError
 
     def decodes(self, x):
