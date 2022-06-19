@@ -58,7 +58,7 @@ class ENTransformersTokenizer(Transform):
                 self.tokenizer.decode(x, group_tokens=group_tokens) for x in xs
             ]
 
-            no_pads = [x[x != self.tokenizer.pad_token_id] for x in decoded]
+            no_pads = [x.replace(self.tokenizer.pad_token, "") for x in decoded]
             return no_pads
         raise Exception("xs should be a two dimensional vector if using batch_decode")
 
