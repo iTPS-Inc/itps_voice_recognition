@@ -39,8 +39,6 @@ class AudioPair(fastuple):
         play_audio(audio, audio.sr)
         return show_specgram(audio.squeeze(), title=text, ctx=ctx, **kwargs)
 
-def get_grid(**kwargs,)
-
 @typedispatch
 def show_batch(
     x: AudioPair,
