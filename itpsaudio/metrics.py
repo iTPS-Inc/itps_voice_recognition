@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
 import numpy as np
 import jiwer
+from fastai.metrics import Metric
 
-class WER():
+class WER(Metric):
     def __init__(self, tok): self.tok = tok
+
+    @property
+    def name(self): return "wer"
 
     def __call__(self, pred, labels):
         pred_logits = pred.logits
@@ -13,8 +17,10 @@ class WER():
         wer = jiwer.wer(label_str, pred_str)
         return wer
 
-class CER():
+class CER(Metric):
     def __init__(self, tok): self.tok = tok
+    @property
+    def name(self): return "cer"
 
     def __call__(self, pred, labels):
         pred_logits = pred.logits
