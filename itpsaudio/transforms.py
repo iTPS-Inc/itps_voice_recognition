@@ -43,6 +43,7 @@ class TargetProcessor(Transform):
         with self.proc.as_target_processor():
             return self.proc.decode(y)
 
+
 class ENTransformersTokenizer(Transform):
     def __init__(self, tok=None):
         self.tokenizer = tok
@@ -53,13 +54,16 @@ class ENTransformersTokenizer(Transform):
 
     def batch_decode(self, xs, group_tokens=True, **kwargs):
         if len(xs.shape) == 2:
-            decoded = [self.tokenizer.decode(x, group_tokens=group_tokens, **kwargs) for x in xs]
+            decoded = [
+                self.tokenizer.decode(x, group_tokens=group_tokens, **kwargs)
+                for x in xs
+            ]
             return decoded
         raise Exception("xs should be a two dimensional vector if using batch_decode")
 
-    def decodes(self, x, group_tokens=True):
+    def decodes(self, x, group_tokens=True, **kwargs):
         return TitledStr(
-            self.tokenizer.decode(x.cpu().numpy(), group_tokens=group_tokens)
+            self.tokenizer.decode(x.cpu().numpy(), group_tokens=group_tokens, **kwargs)
         )
 
 
@@ -97,12 +101,17 @@ class JPTransformersTokenizer(Transform):
 
     def batch_decode(self, xs, group_tokens=True, **kwargs):
         if len(xs.shape) == 2:
-            decoded = [self.tokenizer.decode(x, group_tokens=group_tokens, **kwargs) for x in xs]
+            decoded = [
+                self.tokenizer.decode(x, group_tokens=group_tokens, **kwargs)
+                for x in xs
+            ]
             return decoded
         raise AttributeError
 
-    def decodes(self, x):
-        return TitledStr(self.tokenizer.decode(x.cpu().numpy()))
+    def decodes(self, x, group_tokens=False, **kwargs):
+        return TitledStr(
+            self.tokenizer.decode(x.cpu().numpy(), group_tokens=group_tokens, **kwargs)
+        )
 
 
 class Pad_Audio_Batch(ItemTransform):

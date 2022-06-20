@@ -42,7 +42,7 @@ class AudioPair(fastuple):
     def show(self, ctx=None, tok=None, **kwargs):
         audio, text = self
         if tok is not None:
-            text = tok.decode(text)
+            text = tok.decode(text, group_tokens=False)
         if audio.device.type == "cuda":
             audio = audio.cpu()
         if audio.ndim == 1:
