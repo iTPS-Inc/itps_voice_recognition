@@ -27,6 +27,8 @@ class WER(Metric):
       self.pred_strs += pred_str
       self.label_strs += label_str
 
+  def reset(self):
+      self.pred_strs, self.label_strs = [], []
 
   @property
   def value(self):
@@ -63,3 +65,6 @@ class CER(Metric):
   def value(self):
       cer = jiwer.cer(self.pred_strs, self.label_strs)
       return cer
+
+  def reset(self):
+      self.pred_strs, self.label_strs = [], []
