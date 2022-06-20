@@ -12,8 +12,8 @@ class WER(Metric):
     def __call__(self, pred, labels):
         pred_logits = pred.logits
         pred_ids = np.argmax(pred_logits.detach().cpu().numpy(), axis=-1)
-        pred_str = self.tok.batch_decode(pred_ids, group_tokens=True)
-        label_str = self.tok.batch_decode(labels, group_tokens=False)
+        pred_str = self.tok.batch_decode(pred_ids, group_tokens=True, skip_special_tokens=True)
+        label_str = self.tok.batch_decode(labels, group_tokens=False, skip_special_tokens=True)
         wer = jiwer.wer(label_str, pred_str)
         return wer
 
@@ -25,7 +25,7 @@ class CER(Metric):
     def __call__(self, pred, labels):
         pred_logits = pred.logits
         pred_ids = np.argmax(pred_logits.detach().cpu().numpy(), axis=-1)
-        pred_str = self.tok.batch_decode(pred_ids, group_tokens=True)
-        label_str = self.tok.batch_decode(labels, group_tokens=False)
+        pred_str = self.tok.batch_decode(pred_ids, group_tokens=True, skip_special_tokens=True)
+        label_str = self.tok.batch_decode(labels, group_tokens=False, skip_special_tokens=True)
         cer = jiwer.cer(label_str, pred_str)
         return cer
