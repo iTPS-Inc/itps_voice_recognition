@@ -7,22 +7,49 @@ from fastai.vision.all import get_grid, CancelStepException
 
 from itpsaudio.utils import play_audio, show_specgram
 
+
+class TransformersLearnerOwnLoss(Learner):
+    def _do_one_batch(self):
+        # TODO: When using spec mask, can't use attention_mask
+        self.pred = self.model(self.xb[0], attention_mask=self.xb[1])
+        self("after_pred")
+        if len(self.yb):
+            self.loss_grad = self.loss_func(
+                preds=cast(self.pred.logits, torch.Tensor),
+                inp_len=self.xb[1].sum(1).long(),
+                labels=cast(self.yb[0], torch.Tensor),
+                modelconf=self.model.config,
+            )
+            self.loss = self.loss_grad.clone()
+        self("after_loss")
+        if not self.training or not len(self.yb):
+            return
+        self("before_backward")
+        self.loss_grad.backward()
+        self._with_events(self.opt.step, "step", CancelStepException)
+        self.opt.zero_grad()
+
+
 class TransformersLearner(Learner):
     def _do_one_batch(self):
         self.pred = self.model(self.xb[0], labels=cast(self.yb[0], torch.Tensor))
-        self('after_pred')
+        self("after_pred")
         self.loss_grad = self.pred["loss"]
         self.loss = self.loss_grad.clone()
         self.smooth_loss = self.loss_grad.clone()
-        self('after_loss')
-        if not self.training or not len(self.yb): return
-        self('before_backward')
+        self("after_loss")
+        if not self.training or not len(self.yb):
+            return
+        self("before_backward")
         self.loss_grad.backward()
-        self._with_events(self.opt.step, 'step', CancelStepException)
+        self._with_events(self.opt.step, "step", CancelStepException)
         self.opt.zero_grad()
 
+
 class TensorAttention(TensorBase):
-    def __init__(self, x): self = super().__new__(TensorBase, x)
+    def __init__(self, x):
+        self = super().__new__(TensorBase, x)
+
 
 class TensorAudio(TensorBase):
     sr: Optional[int] = None
