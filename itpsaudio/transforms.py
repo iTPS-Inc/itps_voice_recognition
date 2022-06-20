@@ -43,7 +43,6 @@ class TargetProcessor(Transform):
         with self.proc.as_target_processor():
             return self.proc.decode(y)
 
-
 class ENTransformersTokenizer(Transform):
     def __init__(self, tok=None):
         self.tokenizer = tok
@@ -54,10 +53,7 @@ class ENTransformersTokenizer(Transform):
 
     def batch_decode(self, xs, group_tokens=True):
         if len(xs.shape) == 2:
-            decoded = [
-                self.tokenizer.decode(x, group_tokens=group_tokens) for x in xs
-            ]
-
+            decoded = [self.tokenizer.decode(x, group_tokens=group_tokens) for x in xs]
             no_pads = [x.replace(self.tokenizer.pad_token, "") for x in decoded]
             return no_pads
         raise Exception("xs should be a two dimensional vector if using batch_decode")
@@ -102,26 +98,12 @@ class JPTransformersTokenizer(Transform):
 
     def batch_decode(self, xs, group_tokens=True):
         if len(xs.shape) == 2:
-            decoded = [
-                self.tokenizer.decode(x, group_tokens=group_tokens) for x in xs
-            ]
-            no_pads = [x[x != self.tokenizer.pad_token_id] for x in decoded]
+            decoded = [self.tokenizer.decode(x, group_tokens=group_tokens) for x in xs]
+            no_pads = [x.replace(self.tokenizer.pad_token, "") for x in decoded]
             return no_pads
         raise AttributeError
 
     def decodes(self, x):
-        return TitledStr(self.tokenizer.decode(x.cpu().numpy()))
-
-
-class TransformersTokenizer(Transform):
-    def __init__(self, tokenizer):
-        self.tokenizer = tokenizer
-
-    def encodes(self, x: str):
-        toks = tensor(self.tokenizer(x)["input_ids"])
-        return TensorText(toks)
-
-    def decodes(self, x: TensorText):
         return TitledStr(self.tokenizer.decode(x.cpu().numpy()))
 
 
