@@ -46,7 +46,7 @@ class CTCLoss(_Loss):
 
     def forward(self, preds, inp_len, labels, modelconf):
         inp_len = get_feat_extract_output_lengths(modelconf, inp_len, False)
-        labels_mask = labels >= 0
+        labels_mask = labels > 0
         target_lengths = labels_mask.sum(-1)
         flattened_targets = labels.masked_select(labels_mask)
         log_probs = nn.functional.log_softmax(
@@ -70,7 +70,7 @@ class SmoothCTCLoss(_Loss):
 
     def forward(self, preds, inp_len, labels, modelconf):
         inp_len = get_feat_extract_output_lengths(modelconf, inp_len, False)
-        labels_mask = labels >= 0
+        labels_mask = labels > 0
         target_lengths = labels_mask.sum(-1)
         flattened_targets = labels.masked_select(labels_mask)
         log_probs = nn.functional.log_softmax(
