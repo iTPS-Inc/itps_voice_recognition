@@ -211,8 +211,11 @@ class Pad_Audio_Batch(ItemTransform):
 
 
 class AudioBatchTransform(Transform):
+    def __init__(self, do_normalize=True):
+        self.do_norm=True
+
     def encodes(self, r):
-        t, sr = torchaudio_io.load(r["filename"])
+        t, sr = torchaudio_io.load(r["filename"], normalize=self.do_norm)
         text = r["text"]
         return AudioPair(TensorAudio(t, sr=sr), text)
 
