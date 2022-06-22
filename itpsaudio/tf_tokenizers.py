@@ -63,7 +63,7 @@ class ENTransformersTokenizer(Transform):
 
 
 class JPTransformersTokenizer(Transform):
-    extra_chars = "".join(set(" 、。？" + ".?!|-,\"'"))
+    extra_chars = "".join(set("、。？" + ".?!|-,\"'"))
 
     trans = str.maketrans(KATA, HIRA)
     node_format_csv = r"%f[8]|"
@@ -120,7 +120,7 @@ class JPTransformersTokenizer(Transform):
 
     @staticmethod
     def create_vocab(outpath):
-        allowed_letters = HIRA + " .?!|-,\"'"
+        allowed_letters = set(HIRA + ".?!|-,\"'")
         print("Allowing letters: ")
         print(allowed_letters)
         vocab = {}
