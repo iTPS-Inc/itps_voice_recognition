@@ -9,6 +9,7 @@ DATAROOT = (
     Path.home()
     / "proj/work/itps/itps_transcription_model/scripts/data/20210511_アノテーションデータ_full"
 )
+
 audio_files = get_files(DATAROOT, extensions=[".mp4"])
 outdir = DATAROOT.parent / "out_dir"
 if not os.path.exists(outdir):
@@ -136,16 +137,9 @@ df = df[["Transcription", "Keywords", "Comment",
 df.to_csv(outdir / "df.csv")
 subprocess.run(
     [
-        "ffmpeg",
-        "-i",
-        f"{input_file}",
-        "-vn",
-        "-acodec",
-        "pcm_s16le",
-        "-ar",
-        "16000",
-        "-ac",
-        "1",
-        f"{output_file}",
+        "zip",
+        "-r",
+        f"{str(DATAROOT.parent/'annotation_data.zip')}",
+        f"{str(outdir)}"
     ]
 )
