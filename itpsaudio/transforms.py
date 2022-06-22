@@ -126,7 +126,7 @@ class Pad_Audio_Batch(ItemTransform):
             )
             if self.with_attention_masks:
                 # We put y at the end so that it is always the y in the dataloader
-                assert x_atts and y_atts
+                assert x_atts is not None and y_atts is not None
                 outs.append(
                     (x, TensorAttention(x_atts > 0), TensorAttention(y_atts > 0), y)
                 )
