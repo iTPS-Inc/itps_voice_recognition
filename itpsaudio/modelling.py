@@ -57,7 +57,7 @@ class CTCLoss(_Loss):
 
 
 class SmoothCTCLoss(_Loss):
-    def __init__(self, num_classes, blank=0, weight=0.01, reduction="mean"):
+    def __init__(self, num_classes, blank=0, weight=0.01, ctc_red="mean", kl_red="mean"):
         """
         CTC loss with label smoothing.
         """
@@ -65,7 +65,7 @@ class SmoothCTCLoss(_Loss):
         self.weight = weight
         self.num_classes = num_classes
         self.ctc = nn.CTCLoss(reduction=reduction, blank=blank, zero_infinity=True)
-        kldiv_red = "batchmean" if reduction == "mean" else "sum"
+        kldiv_red = "batchmean" if kl_red=="mean" else "sum"
         self.kldiv = nn.KLDivLoss(reduction=kldiv_red)
 
     def forward(self, preds, inp_len, labels, modelconf):
