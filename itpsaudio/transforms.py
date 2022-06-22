@@ -7,6 +7,7 @@ import torchaudio.transforms as T
 from fastai.data.all import ItemTransform, Transform, noop, retain_type
 
 from itpsaudio.core import AudioPair, TensorAttention, TensorAudio
+from typing import Union
 
 
 @Transform
@@ -24,7 +25,7 @@ class Resampler(Transform):
         for sr in unique_srs:
             self.samplers[sr] = T.Resample(sr, 16000)
 
-    def encodes(self, x: TensorAudio, sr: int | None = None):
+    def encodes(self, x: TensorAudio, sr: Union[int,None] = None):
         sr = x.sr if x.sr else sr if sr else None
         assert sr, "Please give us some information about the sampling rate"
         return self.samplers[sr](x)
