@@ -1,8 +1,11 @@
+from functools import lru_cache
+
 import torch
+import torchaudio
 import torchaudio.backend.sox_io_backend as torchaudio_io
 import torchaudio.transforms as T
-import torchaudio
-from fastai.data.all import ItemTransform, Transform, retain_type, store_attr, noop
+from fastai.data.all import ItemTransform, Transform, noop, retain_type
+
 from itpsaudio.core import AudioPair, TensorAttention, TensorAudio
 
 
@@ -13,27 +16,35 @@ def extract_first(s: TensorAudio):
     else:
         return s
 
+
 class Resampler(Transform):
     samplers = {16000: noop}
-    def __init__(self, unique_srs):
-      for sr in unique_srs:
-        self.samplers[sr] = T.Resample(sr, 16000)
 
-    def encodes(self, x: TensorAudio):
-        return self.samplers[x.sr](x)
+    def __init__(self, unique_srs):
+        for sr in unique_srs:
+            self.samplers[sr] = T.Resample(sr, 16000)
+
+    def encodes(self, x: TensorAudio, sr: int | None = None):
+        sr = x.sr if x.sr else sr if sr else None
+        assert sr, "Please give us some information about the sampling rate"
+        return self.samplers[sr](x)
 
 
 @Transform
 def capitalize(s: str):
     return s.upper()
 
+
 @lru_cache(maxsize=None)
 def get_audio_length(s):
-    t, sr = torchaudio.load(s)
+    t, sr = torchaudio_io.load(s)
     return len(t[0]) / sr, sr
 
+
 @Transform
-def squeeze(s): return s.squeeze()
+def squeeze(s):
+    return s.squeeze()
+
 
 class Pad_Audio_Batch(ItemTransform):
     "Pad `samples` by adding padding by chunks of size `seq_len`"
@@ -48,9 +59,12 @@ class Pad_Audio_Batch(ItemTransform):
         with_attention_masks=False,
         **kwargs,
     ):
-        store_attr(
-            "pad_idx_text,pad_first,seq_len,seq_len,pad_idx_audio,with_attention_masks"
-        )
+        self.pad_idx_text = pad_idx_text
+        self.pad_idx_audio = pad_idx_audio
+        self.pad_first = pad_first
+        self.seq_len = seq_len
+        self.decode = decode
+        self.with_attention_masks = with_attention_masks
         super().__init__(**kwargs)
 
     def before_call(self, b):
@@ -111,6 +125,7 @@ class Pad_Audio_Batch(ItemTransform):
             )
             if self.with_attention_masks:
                 # We put y at the end so that it is always the y in the dataloader
+                assert x_atts and y_atts
                 outs.append(
                     (x, TensorAttention(x_atts > 0), TensorAttention(y_atts > 0), y)
                 )
