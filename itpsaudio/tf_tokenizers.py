@@ -48,18 +48,21 @@ class ENTransformersTokenizer(Transform):
                 )
                 for x in xs
             ]
+            decoded = [
+                "".join(outstr.split(self.tokenizer.unk_token)) for outstr in decoded
+            ]
             return decoded
         raise Exception("xs should be a two dimensional vector if using batch_decode")
 
     def decodes(self, x, group_tokens=True, skip_special_tokens=True, **kwargs):
-        return TitledStr(
-            self.tokenizer.decode(
-                x.cpu().numpy(),
-                group_tokens=group_tokens,
-                skip_special_tokens=skip_special_tokens,
-                **kwargs,
-            )
+        outstr = self.tokenizer.decode(
+            x.cpu().numpy(),
+            group_tokens=group_tokens,
+            skip_special_tokens=skip_special_tokens,
+            **kwargs,
         )
+        outstr = "".join(outstr.split(self.tokenizer.unk_token))
+        return outstr
 
 
 class JPTransformersTokenizer(Transform):
@@ -105,18 +108,21 @@ class JPTransformersTokenizer(Transform):
                 )
                 for x in xs
             ]
+            decoded = [
+                "".join(outstr.split(self.tokenizer.unk_token)) for outstr in decoded
+            ]
             return decoded
         raise AttributeError
 
     def decodes(self, x, group_tokens=False, skip_special_tokens=True, **kwargs):
-        return TitledStr(
-            self.tokenizer.decode(
-                x.cpu().numpy(),
-                skip_special_tokens=skip_special_tokens,
-                group_tokens=group_tokens,
-                **kwargs,
-            )
+        outstr = self.tokenizer.decode(
+            x.cpu().numpy(),
+            skip_special_tokens=skip_special_tokens,
+            group_tokens=group_tokens,
+            **kwargs,
         )
+        outstr = "".join(outstr.split(self.tokenizer.unk_token))
+        return TitledStr(outstr)
 
     @staticmethod
     def create_vocab(outpath):
