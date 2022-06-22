@@ -11,7 +11,7 @@ class TransformersLearnerAtt(Learner):
     def _do_one_batch(self):
         self.pred = self.model(self.xb[0],
                                attention_mask=self.xb[1],
-                               output_attentions=self.xb[2],
+                               output_attentions=False,
                                labels=cast(self.yb[-1], torch.Tensor))
         self("after_pred")
         self.loss_grad = self.pred["loss"]
