@@ -119,7 +119,7 @@ class JPTransformersTokenizer(Transform):
 
     @staticmethod
     def create_vocab(outpath):
-        allowed_letters = KATA + " .?!|-,\"'"
+        allowed_letters = HIRA + " .?!|-,\"'"
         print("Allowing letters: ")
         print(allowed_letters)
         vocab = {}
