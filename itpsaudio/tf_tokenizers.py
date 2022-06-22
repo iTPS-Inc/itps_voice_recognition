@@ -37,18 +37,28 @@ class ENTransformersTokenizer(Transform):
         toks = tensor(self.tokenizer(s)["input_ids"])
         return TensorText(toks)
 
-    def batch_decode(self, xs, group_tokens=True, **kwargs):
+    def batch_decode(self, xs, group_tokens=True, skip_special_tokens=True, **kwargs):
         if len(xs.shape) == 2:
             decoded = [
-                self.tokenizer.decode(x, group_tokens=group_tokens, **kwargs)
+                self.tokenizer.decode(
+                    x,
+                    group_tokens=group_tokens,
+                    skip_special_tokens=skip_special_tokens,
+                    **kwargs,
+                )
                 for x in xs
             ]
             return decoded
         raise Exception("xs should be a two dimensional vector if using batch_decode")
 
-    def decodes(self, x, group_tokens=True, **kwargs):
+    def decodes(self, x, group_tokens=True, skip_special_tokens=True, **kwargs):
         return TitledStr(
-            self.tokenizer.decode(x.cpu().numpy(), group_tokens=group_tokens, **kwargs)
+            self.tokenizer.decode(
+                x.cpu().numpy(),
+                group_tokens=group_tokens,
+                skip_special_tokens=skip_special_tokens,
+                **kwargs,
+            )
         )
 
 
@@ -83,18 +93,28 @@ class JPTransformersTokenizer(Transform):
         toks = tensor(self.tokenizer(s)["input_ids"])
         return TensorText(toks)
 
-    def batch_decode(self, xs, group_tokens=True, **kwargs):
+    def batch_decode(self, xs, group_tokens=True, skip_special_tokens=True, **kwargs):
         if len(xs.shape) == 2:
             decoded = [
-                self.tokenizer.decode(x, group_tokens=group_tokens, **kwargs)
+                self.tokenizer.decode(
+                    x,
+                    group_tokens=group_tokens,
+                    skip_special_tokens=skip_special_tokens,
+                    **kwargs,
+                )
                 for x in xs
             ]
             return decoded
         raise AttributeError
 
-    def decodes(self, x, group_tokens=False, **kwargs):
+    def decodes(self, x, group_tokens=False, skip_special_tokens=True, **kwargs):
         return TitledStr(
-            self.tokenizer.decode(x.cpu().numpy(), group_tokens=group_tokens, **kwargs)
+            self.tokenizer.decode(
+                x.cpu().numpy(),
+                skip_special_tokens=skip_special_tokens,
+                group_tokens=group_tokens,
+                **kwargs,
+            )
         )
 
     @staticmethod
