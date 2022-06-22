@@ -1,7 +1,10 @@
 import torch
 import torchaudio.backend.sox_io_backend as torchaudio_io
-from fastai.data.all import ItemTransform, Transform, retain_type, store_attr
+import torchaudio.transforms as T
+import torchaudio
+from fastai.data.all import ItemTransform, Transform, retain_type, store_attr, noop
 from itpsaudio.core import AudioPair, TensorAttention, TensorAudio
+
 
 @Transform
 def extract_first(s: TensorAudio):
@@ -10,11 +13,24 @@ def extract_first(s: TensorAudio):
     else:
         return s
 
+class Resampler(Transform):
+    samplers = {16000: noop}
+    def __init__(self, unique_srs):
+      for sr in unique_srs:
+        self.samplers[sr] = T.Resample(sr, 16000)
+
+    def encodes(self, x: TensorAudio):
+        return self.samplers[x.sr](x)
+
 
 @Transform
 def capitalize(s: str):
     return s.upper()
 
+@lru_cache(maxsize=None)
+def get_audio_length(s):
+    t, sr = torchaudio.load(s)
+    return len(t[0]) / sr, sr
 
 @Transform
 def squeeze(s): return s.squeeze()
