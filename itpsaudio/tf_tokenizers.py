@@ -63,7 +63,8 @@ class ENTransformersTokenizer(Transform):
 
 
 class JPTransformersTokenizer(Transform):
-    extra_chars = " |、。？" + " .?!|-,\"'"
+    extra_chars = "".join(set(" 、。？" + ".?!|-,\"'"))
+
     trans = str.maketrans(KATA, HIRA)
     node_format_csv = r"%f[8]|"
     eos_format_csv = r"[EOS]\n"
