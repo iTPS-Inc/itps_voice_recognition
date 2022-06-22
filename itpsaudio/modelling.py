@@ -40,6 +40,8 @@ class CTCLoss(_Loss):
         calculating the ctcloss similarly to how transformers does it "
         """
         super().__init__(reduction=reduction)
+        if weight is None:
+            weight=0.01
         self.weight = weight
         self.num_classes = num_classes
         self.ctc = nn.CTCLoss(reduction=reduction, blank=blank, zero_infinity=True)
