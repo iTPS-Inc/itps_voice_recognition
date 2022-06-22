@@ -32,7 +32,7 @@ class TransformersLearnerOwnLoss(Learner):
 
 class TransformersLearner(Learner):
     def _do_one_batch(self):
-        self.pred = self.model(self.xb[0], labels=cast(self.yb[0], torch.Tensor))
+        self.pred = self.model(self.xb[0], labels=cast(self.yb[-1], torch.Tensor))
         self("after_pred")
         self.loss_grad = self.pred["loss"]
         self.loss = self.loss_grad.clone()
