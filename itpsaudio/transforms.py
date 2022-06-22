@@ -1,17 +1,7 @@
-import torchaudio.backend.sox_io_backend as torchaudio_io
-from fastai.data.all import (
-    ItemTransform,
-    TitledStr,
-    Transform,
-    store_attr,
-    tensor,
-    retain_type,
-)
-from fastai.text.all import TensorText, pad_chunk
 import torch
-
-from itpsaudio.core import AudioPair, TensorAudio, TensorAttention
-
+import torchaudio.backend.sox_io_backend as torchaudio_io
+from fastai.data.all import ItemTransform, Transform, retain_type, store_attr
+from itpsaudio.core import AudioPair, TensorAttention, TensorAudio
 
 @Transform
 def extract_first(s: TensorAudio):
@@ -27,92 +17,7 @@ def capitalize(s: str):
 
 
 @Transform
-def squeeze(s):
-    return s.squeeze()
-
-
-class TargetProcessor(Transform):
-    def __init__(self, proc):
-        self.proc = proc
-
-    def encodes(self, y):
-        with self.proc.as_target_processor():
-            return self.proc(y).input_ids
-
-    def decodes(self, y):
-        with self.proc.as_target_processor():
-            return self.proc.decode(y)
-
-
-class ENTransformersTokenizer(Transform):
-    def __init__(self, tok=None):
-        self.tokenizer = tok
-
-    def encodes(self, s: str) -> TensorText:
-        toks = tensor(self.tokenizer(s)["input_ids"])
-        return TensorText(toks)
-
-    def batch_decode(self, xs, group_tokens=True, **kwargs):
-        if len(xs.shape) == 2:
-            decoded = [
-                self.tokenizer.decode(x, group_tokens=group_tokens, **kwargs)
-                for x in xs
-            ]
-            return decoded
-        raise Exception("xs should be a two dimensional vector if using batch_decode")
-
-    def decodes(self, x, group_tokens=True, **kwargs):
-        return TitledStr(
-            self.tokenizer.decode(x.cpu().numpy(), group_tokens=group_tokens, **kwargs)
-        )
-
-
-class JPTransformersTokenizer(Transform):
-    hira = "あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほまみむめもやゆよらりるれろわをんがぎぐげござじずぜぞだじづでどばびぶべぼぱぴぷぺぽゃゅょっぁぃぅぇぉ"
-    kata = "アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲンガギグゲゴザジズゼゾダジヅデドバビブベボパピプペポャュョッァィゥェォ"
-    trans = str.maketrans(kata, hira)
-    node_format_csv = r"%f[7]|"
-    eos_format_csv = r"[EOS]\n"
-    unk_format_csv = r"%m|"
-
-    def __init__(self, tok=None, mcb=None):
-        import MeCab
-
-        self.tokenizer = tok
-        self.mcb = mcb
-        if not self.mcb:
-            self.mcb = MeCab.Tagger(
-                f" --node-format='{self.node_format_csv}'"
-                + f" --unk-format='{self.unk_format_csv}'"
-                + f" --eos-format='{self.eos_format_csv}'"
-            )
-
-    def kata2hira(self, s):
-        return s.translate(self.trans).strip()
-
-    def mecab_step(self, s: str):
-        s = self.mcb.parse(s.lower())
-        return "[BOS]" + self.kata2hira(s)
-
-    def encodes(self, s: str) -> TensorText:
-        s = self.mecab_step(s)
-        toks = tensor(self.tokenizer(s)["input_ids"])
-        return TensorText(toks)
-
-    def batch_decode(self, xs, group_tokens=True, **kwargs):
-        if len(xs.shape) == 2:
-            decoded = [
-                self.tokenizer.decode(x, group_tokens=group_tokens, **kwargs)
-                for x in xs
-            ]
-            return decoded
-        raise AttributeError
-
-    def decodes(self, x, group_tokens=False, **kwargs):
-        return TitledStr(
-            self.tokenizer.decode(x.cpu().numpy(), group_tokens=group_tokens, **kwargs)
-        )
-
+def squeeze(s): return s.squeeze()
 
 class Pad_Audio_Batch(ItemTransform):
     "Pad `samples` by adding padding by chunks of size `seq_len`"
@@ -212,7 +117,7 @@ class Pad_Audio_Batch(ItemTransform):
 
 class AudioBatchTransform(Transform):
     def __init__(self, do_normalize=True):
-        self.do_norm=True
+        self.do_norm = do_normalize
 
     def encodes(self, r):
         t, sr = torchaudio_io.load(r["filename"], normalize=self.do_norm)
