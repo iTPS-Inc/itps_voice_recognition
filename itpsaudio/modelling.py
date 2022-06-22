@@ -61,10 +61,10 @@ class SmoothCTCLoss(_Loss):
         """
         CTC loss with label smoothing.
         """
-        super().__init__(reduction=reduction)
+        super().__init__()
         self.weight = weight
         self.num_classes = num_classes
-        self.ctc = nn.CTCLoss(reduction=reduction, blank=blank, zero_infinity=True)
+        self.ctc = nn.CTCLoss(reduction=ctc_red, blank=blank, zero_infinity=True)
         kldiv_red = "batchmean" if kl_red=="mean" else "sum"
         self.kldiv = nn.KLDivLoss(reduction=kldiv_red)
 
