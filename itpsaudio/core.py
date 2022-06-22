@@ -7,6 +7,24 @@ from fastai.vision.all import get_grid, CancelStepException
 
 from itpsaudio.utils import play_audio, show_specgram
 
+class TransformersLearnerAtt(Learner):
+    def _do_one_batch(self):
+        self.pred = self.model(self.xb[0],
+                               attention_mask=self.xb[1],
+                               output_attentions=self.xb[2],
+                               labels=cast(self.yb[-1], torch.Tensor))
+        self("after_pred")
+        self.loss_grad = self.pred["loss"]
+        self.loss = self.loss_grad.clone()
+        self.smooth_loss = self.loss_grad.clone()
+        self("after_loss")
+        if not self.training or not len(self.yb):
+            return
+        self("before_backward")
+        self.loss_grad.backward()
+        self._with_events(self.opt.step, "step", CancelStepException)
+        self.opt.zero_grad()
+
 
 class TransformersLearnerOwnLoss(Learner):
     def _do_one_batch(self):
