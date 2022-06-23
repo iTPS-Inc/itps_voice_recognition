@@ -4,7 +4,6 @@ import subprocess
 import pandas as pd
 import torchaudio
 from fastdownload import FastDownload
-
 from fastai.data.all import Path, get_files, untar_data
 
 DATAROOT = (
@@ -160,7 +159,7 @@ no_frames = []
 srs = []
 for f in outfile_names:
     t, sr = torchaudio.load(str(outdir / out_name))
-    no_frames.append(t.squeeze().shape[-1])
+    no_frames.append(len(t.squeeze()))
     srs.append(sr)
 
 
