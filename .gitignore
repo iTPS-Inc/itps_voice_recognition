@@ -8,3 +8,6 @@
 /.ipynb_checkpoints/
 /notebooks/itps_voice_recognition/
 /itpsaudio/.ipynb_checkpoints/
+/scripts/data/
+/notebooks/assets/
+/notebooks/models/
