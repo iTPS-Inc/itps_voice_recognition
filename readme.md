@@ -1,11 +1,13 @@
-# Transcription
+## Transcription
 
-## Dataset module
+### Dataset module
+
 The dataset module `dsets` exists to make access to the dataset we have at iTPS easy.
 It takes care of automatically downloading the data, caching that download, and getting the 
 data into the correct shape for instant usage.
 
-### Usage
+#### Usage
+
 The main interface to the `dsets` module is the `get_datasets` function and the `DatasetConfig` object.
 The `get_datasets` takes a list of `DatasetConfig` objects and builds a dataset from these.
 
@@ -41,9 +43,12 @@ assert set(df["original_dset"].unique()) == {"itps", "jsut"}
 ```
 
 
-#### Dependencies
+##### Dependencies
+
 to preprocess the itps datset `ffmpeg` is required.
-### Data
+
+#### Data
+
 The `dsets` contains a helper python module for getting the datasets and getting them into an acceptable format.
 There is a single function, `load_dset()`, with which it is possible to access all the datasets.
 
@@ -67,9 +72,11 @@ There is a single function, `load_dset()`, with which it is possible to access a
 | J-MAC                    | no      | not yet          | jp           | no       | No audio files | -      |
 |--------------------------|---------|------------------|--------------|----------|----------------|--------|
 
-#### NICT SPREDS dataset languages 
+##### NICT SPREDS dataset languages
 
 {'ru', 'zh', 'jp', 'th', 'es', 'br', 'en', 'fr', 'vi', 'ko', 'id', 'my'}
 
-## Scripts
-### Extracting data from excel files to make easy to use dataset.
+### Scripts
+
+#### Extracting data from excel files to make easy to use dataset.
+
