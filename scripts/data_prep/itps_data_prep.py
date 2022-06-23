@@ -159,14 +159,15 @@ df["file"] =  outfile_names
 no_frames = []
 srs = []
 for f in outfile_names:
-    f, sr = torchaudio.load(str(outdir / out_name))
-    no_frames.append(f.squeeze().shape[0])
+    t, sr = torchaudio.load(str(outdir / out_name))
+    no_frames.append(t.squeeze().shape[-1])
     srs.append(sr)
 
 
 df["sr"] = srs
 df["no_frames"] = no_frames
 df["audio_length"] = df["no_frames"] / df["sr"]
+df["lang"] = df["wav_file_name"].apply(lambda x: x[:2])
 # Get the relative path
 df = df[["Transcription", "Keywords", "Comment",
          "wav_file_name", "st", "text", "et", "test", "file",
