@@ -174,13 +174,15 @@ df_out = df[["Transcription", "Keywords", "Comment",
          "sr", "audio_length", "no_frames"
          ]].copy()
 
-df.to_csv(outdir / "df.csv")
+curdir= os.getcwd()
+os.chdir(DATAROOT.parent)
 df_out.to_csv(outdir / "df.csv")
 subprocess.run(
     [
         "zip",
         "-r",
-        f"{str(DATAROOT.parent/'annotation_data.zip')}",
-        f"{str(outdir)}"
+        f"annotation_data.zip",
+        f"annotation_data_out"
     ]
 )
+os.chdir(curdir)
