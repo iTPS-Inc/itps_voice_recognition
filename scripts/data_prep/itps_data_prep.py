@@ -158,7 +158,7 @@ df["file"] =  outfile_names
 no_frames = []
 srs = []
 for f in outfile_names:
-    t, sr = torchaudio.load(str(outdir / out_name))
+    t, sr = torchaudio.load(str(outdir / f))
     no_frames.append(len(t.squeeze()))
     srs.append(sr)
 
