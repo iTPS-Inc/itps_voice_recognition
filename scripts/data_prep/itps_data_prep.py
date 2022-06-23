@@ -96,6 +96,7 @@ df["wav_file_name"] = df["Source Video Name"].apply(lambda x: excel_trans.get(x,
 df = df[df["wav_file_name"].notna()].reset_index(drop=True)
 
 df[["st", "text", "et"]] = df["Transcription"].str.extract(r"(\[.*\])(.*)(\[.*\])")
+df["st"] = df["st"].str.extract(r"(\[[\d\.:]+\])(\[.*\])*")[0]
 
 def cut_out_part_ffmpeg(inp, st, end, out):
     st, end = st[1:-1], end[1:-1]
