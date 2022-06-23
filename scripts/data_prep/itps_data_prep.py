@@ -98,8 +98,22 @@ df = df[df["wav_file_name"].notna()].reset_index(drop=True)
 df[["st", "text", "et"]] = df["Transcription"].str.extract(r"(\[.*\])(.*)(\[.*\])")
 df["st"] = df["st"].str.extract(r"(\[[\d\.:]+\])(\[.*\])*")[0]
 
+
+def convert_time(time):
+    # 61:32.117
+    if len(time) == 9:
+        minutes = int(time[:2])
+        secs = time[3:]
+        hours, mins = minutes // 60, minutes % 60
+        return f"{hours}:{mins}:{secs}"
+    elif len(time) == 11:
+        return time
+
+
 def cut_out_part_ffmpeg(inp, st, end, out):
     st, end = st[1:-1], end[1:-1]
+    st, end = convert_time(st), convert_time(end)
+
     subprocess.run(
         [
             "ffmpeg",
