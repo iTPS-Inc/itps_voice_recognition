@@ -2,16 +2,25 @@
 import os
 import subprocess
 import pandas as pd
+import torchaudio
+from fastdownload import FastDownload
 
-from fastai.data.all import Path, get_files, L
+from fastai.data.all import Path, get_files, untar_data
 
 DATAROOT = (
     Path.home()
-    / "proj/work/itps/itps_transcription_model/scripts/data/20210511_アノテーションデータ_full"
+    / "dev/proj/work/itps/itps_voice_recognition/scripts/data/"
 )
+URL="https://www.dropbox.com/s/qzvrx0c3rrmxxl3/annotation_data_initial.tar.gz?dl=1"
+
+d = FastDownload(base=DATAROOT)
+DATAROOT = d.get(URL, force=False)
+
 
 audio_files = get_files(DATAROOT, extensions=[".mp4"])
-outdir = DATAROOT.parent / "out_dir"
+if os.path.exists(DATAROOT/"annotation_data.csv"):
+    os.unlink(DATAROOT / "annotation_data.csv")
+outdir = DATAROOT.parent / "annotation_data_out"
 if not os.path.exists(outdir):
     os.mkdir(outdir)
 
@@ -85,6 +94,7 @@ df = pd.concat(
 df = df[df["Source Video Name"].notna()]
 df["wav_file_name"] = df["Source Video Name"].apply(lambda x: excel_trans.get(x, None))
 df = df[df["wav_file_name"].notna()].reset_index(drop=True)
+
 df[["st", "text", "et"]] = df["Transcription"].str.extract(r"(\[.*\])(.*)(\[.*\])")
 
 def cut_out_part_ffmpeg(inp, st, end, out):
