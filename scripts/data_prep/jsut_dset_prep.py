@@ -2,6 +2,7 @@
 import os, shutil
 from pathlib import Path
 
+import torchaudio
 import pandas as pd
 from fastai.data.all import get_files, untar_data
 from tqdm import tqdm
@@ -9,7 +10,7 @@ from tqdm import tqdm
 from dsets.helpers.helpers import make_tarfile, train_test_split
 
 JSUT_URL_ORIG = "https://www.dropbox.com/s/a2z6bklpaphiu1k/jsut_ver1.1.zip?dl=1"
-OUTPATH = "/home/jjs/Dropbox/Share to iTPS AI-Team/train_data_repository/jsut_ver1.1.tar.gz"
+OUTPATH = "/home/jjs/proj/work/itps/itps_transcription_model/data/jsut_ver1.1.tar.gz"
 FORCE_DOWNLOAD=False
 
 def _get_info_file(fn):
@@ -64,7 +65,6 @@ for i, r in tqdm(df.iterrows()):
         if os.path.exists(src) and not os.path.exists(dest):
             shutil.move(src, dest)
 
-
 df["filename"] = df.apply(
     lambda r: r["filename"].parent / "test" / r["filename"].name
     if r["test"]
@@ -72,6 +72,14 @@ df["filename"] = df.apply(
     axis=1,
 )
 assert df["filename"].apply(os.path.exists).all()
+
+def get_frames_sr(f):
+    t, sr = torchaudio.load(f)
+    no_frames = len(t.squeeze())
+    return pd.Series([no_frames, sr])
+
+df[["no_frames", "sr"]] = df["filename"].apply(get_frames_sr)
+df["audio_length"] = df["no_frames"] / df["sr"]
 
 df["filename"] = df.apply(
     lambda r: Path(".") /r["filename"].parent.parent.parent.name /  r["filename"].parent.parent.name / "test" / r["filename"].name
