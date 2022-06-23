@@ -10,7 +10,9 @@ from tqdm import tqdm
 from dsets.helpers.helpers import make_tarfile, train_test_split
 
 JSUT_URL_ORIG = "https://www.dropbox.com/s/a2z6bklpaphiu1k/jsut_ver1.1.zip?dl=1"
-OUTPATH = "/home/jjs/proj/work/itps/itps_transcription_model/data/jsut_ver1.1.tar.gz"
+DATAROOT = os.environ.get("PREPROCESS_DATAROOT")
+OUTPATH = Path(DATAROOT) / "jsut_ver1.1.tar.gz"
+
 FORCE_DOWNLOAD=False
 
 def _get_info_file(fn):
