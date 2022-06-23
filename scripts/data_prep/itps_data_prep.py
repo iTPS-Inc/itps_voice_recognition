@@ -117,10 +117,10 @@ def cut_out_part_ffmpeg(inp, st, end, out):
     subprocess.run(
         [
             "ffmpeg",
-            "-ss",
-            f"{st}",
             "-i",
             f"{inp}",
+            "-ss",
+            f"{st}",
             "-to",
             f"{end}",
             "-vn",
@@ -156,9 +156,24 @@ for i, wav, test_string, st, end in df[["wav_file_name", "test_string", "st", "e
     cut_out_part_ffmpeg(infile, st, end, outfile)
 
 df["file"] =  outfile_names
+no_frames = []
+srs = []
+for f in outfile_names:
+    f, sr = torchaudio.load(str(outdir / out_name))
+    no_frames.append(f.squeeze().shape[0])
+    srs.append(sr)
+
+
+df["sr"] = srs
+df["no_frames"] = no_frames
+df["audio_length"] = df["no_frames"] / df["sr"]
 # Get the relative path
 df = df[["Transcription", "Keywords", "Comment",
-        "wav_file_name", "st", "text", "et", "test", "file"]]
+         "wav_file_name", "st", "text", "et", "test", "file",
+         "sr", "audio_length", "no_frames"
+         ]]
+
+
 df.to_csv(outdir / "df.csv")
 subprocess.run(
     [
