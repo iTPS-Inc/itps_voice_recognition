@@ -9,6 +9,8 @@ from fastai.data.all import ItemTransform, Transform, noop, retain_type
 from itpsaudio.core import AudioPair, TensorAttention, TensorAudio
 from typing import Union
 
+SAMPLERATE = 16000
+
 
 @Transform
 def extract_first(s: TensorAudio):
@@ -19,16 +21,16 @@ def extract_first(s: TensorAudio):
 
 
 class Resampler(Transform):
-    samplers = {16000: noop}
+    samplers = {SAMPLERATE: noop}
 
     def __init__(self, unique_srs):
         for sr in unique_srs:
-            self.samplers[sr] = T.Resample(sr, 16000)
+            self.samplers[sr] = T.Resample(sr, SAMPLERATE)
 
-    def encodes(self, x: TensorAudio, sr: Union[int,None] = None):
+    def encodes(self, x: TensorAudio, sr: Union[int, None] = None):
         sr = x.sr if x.sr else sr if sr else None
         assert sr, "Please give us some information about the sampling rate"
-        return TensorAudio(self.samplers[sr](x), sr=16000)
+        return TensorAudio(self.samplers[sr](x), sr=SAMPLERATE)
 
 
 @Transform
