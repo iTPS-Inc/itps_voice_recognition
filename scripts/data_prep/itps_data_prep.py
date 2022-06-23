@@ -167,14 +167,15 @@ df["sr"] = srs
 df["no_frames"] = no_frames
 df["audio_length"] = df["no_frames"] / df["sr"]
 df["lang"] = df["wav_file_name"].apply(lambda x: x[:2])
+
 # Get the relative path
-df = df[["Transcription", "Keywords", "Comment",
+df_out = df[["Transcription", "Keywords", "Comment",
          "wav_file_name", "st", "text", "et", "test", "file",
          "sr", "audio_length", "no_frames"
-         ]]
-
+         ]].copy()
 
 df.to_csv(outdir / "df.csv")
+df_out.to_csv(outdir / "df.csv")
 subprocess.run(
     [
         "zip",
