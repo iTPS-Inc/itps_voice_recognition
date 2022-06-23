@@ -28,7 +28,7 @@ class Resampler(Transform):
     def encodes(self, x: TensorAudio, sr: Union[int,None] = None):
         sr = x.sr if x.sr else sr if sr else None
         assert sr, "Please give us some information about the sampling rate"
-        return self.samplers[sr](x)
+        return TensorAudio(self.samplers[sr](x), sr=16000)
 
 
 @Transform
