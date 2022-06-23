@@ -7,20 +7,18 @@ from fastdownload import FastDownload
 from fastai.data.all import Path, get_files, untar_data
 
 DATAROOT = os.environ.get("PREPROCESS_DATAROOT")
-URL="https://www.dropbox.com/s/qzvrx0c3rrmxxl3/annotation_data_initial.tar.gz?dl=1"
+URL = "https://www.dropbox.com/s/qzvrx0c3rrmxxl3/annotation_data_initial.tar.gz?dl=1"
 
 d = FastDownload(base=DATAROOT)
 DATAROOT = d.get(URL, force=False)
 
 
 audio_files = get_files(DATAROOT, extensions=[".mp4"])
-if os.path.exists(DATAROOT/"annotation_data.csv"):
+if os.path.exists(DATAROOT / "annotation_data.csv"):
     os.unlink(DATAROOT / "annotation_data.csv")
 outdir = DATAROOT.parent / "annotation_data_out"
 if not os.path.exists(outdir):
     os.mkdir(outdir)
-
-print(outdir)
 
 
 def convert_to_wav(input_file, output_file):
@@ -142,7 +140,9 @@ os.mkdir(outdir / "wavs" / "train")
 os.mkdir(outdir / "wavs" / "test")
 
 outfile_names = []
-for i, wav, test_string, st, end in df[["wav_file_name", "test_string", "st", "et"]].itertuples():
+for i, wav, test_string, st, end in df[
+    ["wav_file_name", "test_string", "st", "et"]
+].itertuples():
 
     infile = outdir / "base_wavs" / wav
     out_name = f"wavs/{test_string}/" + str(Path(wav).stem + f"_{i}.wav")
@@ -151,7 +151,7 @@ for i, wav, test_string, st, end in df[["wav_file_name", "test_string", "st", "e
 
     cut_out_part_ffmpeg(infile, st, end, outfile)
 
-df["file"] =  outfile_names
+df["file"] = outfile_names
 no_frames = []
 srs = []
 for f in outfile_names:
@@ -166,20 +166,25 @@ df["audio_length"] = df["no_frames"] / df["sr"]
 df["lang"] = df["wav_file_name"].apply(lambda x: x[:2])
 
 # Get the relative path
-df_out = df[["Transcription", "Keywords", "Comment",
-         "wav_file_name", "st", "text", "et", "test", "file",
-         "sr", "audio_length", "no_frames"
-         ]].copy()
+df_out = df[
+    [
+        "Transcription",
+        "Keywords",
+        "Comment",
+        "wav_file_name",
+        "st",
+        "text",
+        "et",
+        "test",
+        "file",
+        "sr",
+        "audio_length",
+        "no_frames",
+    ]
+].copy()
 
-curdir= os.getcwd()
+curdir = os.getcwd()
 os.chdir(DATAROOT.parent)
 df_out.to_csv(outdir / "df.csv")
-subprocess.run(
-    [
-        "zip",
-        "-r",
-        f"annotation_data.zip",
-        f"annotation_data_out"
-    ]
-)
+subprocess.run(["zip", "-r", f"annotation_data.zip", f"annotation_data_out"])
 os.chdir(curdir)
