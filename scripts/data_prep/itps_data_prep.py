@@ -6,10 +6,7 @@ import torchaudio
 from fastdownload import FastDownload
 from fastai.data.all import Path, get_files, untar_data
 
-DATAROOT = (
-    Path.home()
-    / "dev/proj/work/itps/itps_voice_recognition/scripts/data/"
-)
+DATAROOT = os.environ.get("PREPROCESS_DATAROOT")
 URL="https://www.dropbox.com/s/qzvrx0c3rrmxxl3/annotation_data_initial.tar.gz?dl=1"
 
 d = FastDownload(base=DATAROOT)
