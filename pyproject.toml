@@ -1,3 +1,4 @@
+name = "itpsaudio"
 [build-system]
 requires = ["wheel", "setuptools"]
 build-backend = "setuptools.build_meta"
