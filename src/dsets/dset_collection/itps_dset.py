@@ -3,7 +3,8 @@ from typing import Tuple
 
 import pandas as pd
 from dsets.dset_config.dset_config import DatasetConfig
-from fastai.data.all import Path, untar_data
+from pathlib import Path
+from fastdownload import FastDownload
 
 ANNOTATION_DATA_URL = (
     "https://www.dropbox.com/s/92tbhcdlymk5s0w/annotation_data.tar.gz?dl=1"
@@ -32,9 +33,10 @@ def _subset_lang(df: pd.DataFrame, lang=None):
 
 
 def get_annotation_data(
-    dset: DatasetConfig, force_download=False
+        base, dset: DatasetConfig, force_download=False
 ) -> Tuple[Path, pd.DataFrame]:
-    p = untar_data(ANNOTATION_DATA_URL, force_download=force_download)
+    d = FastDownload(base=base)
+    p = d.get(ANNOTATION_DATA_URL, force=force_download)
     if not isinstance(p, Path):
         raise AttributeError(f"Failed to unzip URL dataset under {ANNOTATION_DATA_URL}")
     df = pd.read_csv(p / "annotation_data.csv", index_col=0)
