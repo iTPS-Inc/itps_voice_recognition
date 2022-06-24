@@ -14,7 +14,7 @@ SPREDS_URL_ORIG = (
 )
 
 OUTPATH = (
-    "/home/jjs/Dropbox/Share to iTPS AI-Team/train_data_repository/NICT_SPREDS.tar.gz"
+    "/home/jjs/.fastai/data/NICT_SPREDS.tar.gz"
 )
 
 
@@ -93,6 +93,15 @@ def get_nict_data(force_download=False):
     out_df.loc[out_df["language"] == "ja", "language"] = "jp"
     return p, out_df
 
+
+def get_frames_sr(f):
+    t, sr = torchaudio.load(f)
+    no_frames = len(t.squeeze())
+    return pd.Series([no_frames, sr])
+
 p, df = get_nict_data()
+
+df[["no_frames", "sr"]] = df["filename"].apply(lambda x: get_frames_sr(p / x))
+df["audio_length"] = df["no_frames"] / df["sr"]
 df.to_csv(p / "metadata.csv")
 make_tarfile(OUTPATH, p)
