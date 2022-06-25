@@ -11,7 +11,7 @@ SPREDS_URL = "https://www.dropbox.com/s/7325sa83zdgl3le/NICT_SPREDS.tar.gz?dl=1"
 TEST_DATA_URL = "https://www.dropbox.com/s/hrfmsjadepupiwu/test_data.tar.gz?dl=1"
 
 
-def get_ljl_data(dset_config: DatasetConfig, force_download=False):
+def get_ljl_data(dset_config: DatasetConfig, base=None, force_download=False):
     p = untar_data(LJ_SPEECH_URL, force_download=force_download)
     df = pd.read_csv(p / "metadata.csv", index_col=0)
     if not isinstance(df, pd.DataFrame):
@@ -24,7 +24,7 @@ def get_ljl_data(dset_config: DatasetConfig, force_download=False):
     return p, df
 
 
-def get_jsut_data(dset_config: DatasetConfig, force_download=False):
+def get_jsut_data(dset_config: DatasetConfig, base=None, force_download=False):
     p = untar_data(JSUT_URL, force_download=force_download)
     df = pd.read_csv(p / "metadata.csv", index_col=0)
     if not isinstance(df, pd.DataFrame):
@@ -37,7 +37,7 @@ def get_jsut_data(dset_config: DatasetConfig, force_download=False):
     return p, df
 
 
-def get_nictspreds_data(dset_config: DatasetConfig, force_download=False):
+def get_nictspreds_data(dset_config: DatasetConfig, base=None, force_download=False):
     p = untar_data(SPREDS_URL, force_download=force_download)
     df = pd.read_csv(p / "metadata.csv", index_col=0)
     if not isinstance(df, pd.DataFrame):
@@ -56,6 +56,7 @@ def get_nictspreds_data(dset_config: DatasetConfig, force_download=False):
 
 def get_test_data(
     dset_config: DatasetConfig = DatasetConfig(name="test_data", split="both"),
+    base=None,
     force_download=False,
 ) -> Tuple[Path, pd.DataFrame]:
     p = untar_data(TEST_DATA_URL, force_download=force_download)

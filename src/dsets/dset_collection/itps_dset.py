@@ -33,7 +33,7 @@ def _subset_lang(df: pd.DataFrame, lang=None):
 
 
 def get_annotation_data(
-        base, dset: DatasetConfig, force_download=False
+        dset: DatasetConfig, base=None, force_download=False
 ) -> Tuple[Path, pd.DataFrame]:
     d = FastDownload(base=base)
     p = d.get(ANNOTATION_DATA_URL, force=force_download)
