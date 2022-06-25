@@ -14,7 +14,7 @@ class WER(Metric):
       return "wer"
 
   def accumulate(self, learn):
-      pred_logits = learn.pred.logits
+      pred_logits = learn.pred
       labels = learn.yb[-1].detach().cpu().numpy()
       pred_ids = np.argmax(pred_logits.detach().cpu().numpy(), axis=-1)
       pred_str = self.tok.batch_decode(
@@ -46,7 +46,7 @@ class CER(Metric):
       return "cer"
 
   def accumulate(self, learn):
-      pred_logits = learn.pred.logits
+      pred_logits = learn.pred
       labels = learn.yb[-1].detach().cpu().numpy()
       pred_ids = np.argmax(pred_logits.detach().cpu().numpy(), axis=-1)
       pred_str = self.tok.batch_decode(

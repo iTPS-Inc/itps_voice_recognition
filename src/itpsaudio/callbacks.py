@@ -12,8 +12,8 @@ import os
 
 class MixedPrecisionTransformers(MixedPrecision):
     def after_pred(self):
-        if self.pred.logits.dtype == torch.float16:
-            self.learn.pred.logits = to_float(self.pred.logits)
+        if self.pred.dtype == torch.float16:
+            self.learn.pred = to_float(self.pred)
 
 
 class SeePreds(TensorBoardBaseCallback):
@@ -41,7 +41,7 @@ class SeePreds(TensorBoardBaseCallback):
 
             if i < self.n_vals:
                 with torch.no_grad():
-                    preds = np.argmax(self.model(x).logits.detach().cpu(), axis=-1)
+                    preds = np.argmax(self.model(x).detach().cpu(), axis=-1)
                 decoded_preds += self.tok.batch_decode(preds, group_tokens=True)
                 decoded_ys += self.tok.batch_decode(y, group_tokens=False)
             else:
@@ -67,9 +67,9 @@ class SeePreds(TensorBoardBaseCallback):
 
     def after_pred(self):
         if self.iter % self.n_iters == 0:
-            preds = np.argmax(self.pred.logits.detach().cpu(), axis=-1)
-            decoded_preds = self.tok.batch_decode(preds)
-            decoded_ys = self.tok.batch_decode(self.yb[0])
+            preds = np.argmax(self.pred.detach().cpu(), axis=-1)
+            decoded_preds = self.tok.batch_decode(preds, group_tokens=True)
+            decoded_ys = self.tok.batch_decode(self.yb[0], group_tokens=False)
             dec_preds_valid, dec_ys_valid = self.get_valid_preds()
             for x in self.xb[0]:
                 self.writer.add_audio(f"{self.iter}: Audio", x, self.iter, 16000)

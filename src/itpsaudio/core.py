@@ -33,7 +33,7 @@ class TransformersLearnerOwnLoss(Learner):
         self("after_pred")
         if len(self.yb):
             self.loss_grad = self.loss_func(
-                preds=cast(self.pred.logits, torch.Tensor),
+                preds=cast(self.pred, torch.Tensor),
                 inp_len=self.xb[1].sum(1).long(),
                 labels=cast(self.yb[0], torch.Tensor),
                 modelconf=self.model.config,
