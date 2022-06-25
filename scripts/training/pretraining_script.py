@@ -2,6 +2,10 @@
 # coding=utf-8
 #
 # THis script was taken from.
+#!/usr/bin/env python
+# coding=utf-8
+#
+# THis script was taken from.
 #
 #
 # https://github.com/huggingface/transformers/blob/main/src/transformers/models/wav2vec2/modeling_wav2vec2.py
@@ -18,8 +22,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 """ Pre-Training a 🤗 Wav2Vec2 model on unlabeled audio data """
-
-
 import argparse
 import math
 import os
@@ -47,9 +49,6 @@ from transformers import (
     is_wandb_available,
     set_seed,
 )
-from transformers.models.wav2vec2.modeling_wav2vec2 import _compute_mask_indices, _sample_negative_indices
-from transformers.utils import get_full_repo_name, send_example_telemetry
-
 
 logger = get_logger(__name__)
 
@@ -262,6 +261,109 @@ def parse_args():
 
     return args
 
+def _sample_negative_indices( features_shape, num_negatives, mask_time_indices):
+    """
+    Sample `num_negatives` vectors from feature vectors.
+    """
+    batch_size, sequence_length = features_shape
+
+    # generate indices of the positive vectors themselves, repeat them `num_negatives` times
+    sequence_length_range = np.arange(sequence_length)
+
+    # get `num_negatives` random vector indices from the same utterance
+    sampled_negative_indices = np.zeros(shape=(batch_size, sequence_length, num_negatives), dtype=np.int32)
+
+    mask_time_indices = (
+        mask_time_indices.astype(np.bool) if mask_time_indices is not None else np.ones(features_shape, dtype=np.bool)
+    )
+
+    for batch_idx in range(batch_size):
+        high = mask_time_indices[batch_idx].sum() - 1
+        mapped_masked_indices = sequence_length_range[mask_time_indices[batch_idx]]
+
+        feature_indices = np.broadcast_to(np.arange(high + 1)[:, None], (high + 1, num_negatives))
+        sampled_indices = np.random.randint(0, high, size=(high + 1, num_negatives))
+        # avoid sampling the same positive vector, but keep the distribution uniform
+        sampled_indices[sampled_indices >= feature_indices] += 1
+
+        # remap to actual indices
+        sampled_negative_indices[batch_idx][mask_time_indices[batch_idx]] = mapped_masked_indices[sampled_indices]
+
+        # correct for batch size
+        sampled_negative_indices[batch_idx] += batch_idx * sequence_length
+
+    return sampled_negative_indices
+
+def _compute_mask_indices(
+    shape,
+    mask_prob: float,
+    mask_length: int,
+    device: torch.device,
+    attention_mask = None,
+    min_masks: int = 0,
+) -> torch.tensor:
+    """
+    Computes random mask spans for a given shape. Used to implement `SpecAugment: A Simple Data Augmentation Method for
+    ASR <https://arxiv.org/abs/1904.08779>`__.
+
+    Args:
+        shape: the the shape for which to compute masks.
+            should be of size 2 where first element is batch size and 2nd is timesteps
+        mask_prob: probability for each token to be chosen as start of the span to be masked. this will be multiplied by
+            number of timesteps divided by length of mask span to mask approximately this percentage of all elements.
+            however due to overlaps, the actual number will be smaller (unless no_overlap is True)
+        mask_length: size of the mask
+        min_masks: minimum number of masked spans
+
+    """
+    batch_size, sequence_length = shape
+
+    if mask_length < 1:
+        raise ValueError("`mask_length` has to be bigger than 0.")
+
+    if mask_length > sequence_length:
+        raise ValueError(
+            f"`mask_length` has to be smaller than `sequence_length`, but got `mask_length`: {mask_length} and `sequence_length`: {sequence_length}`"
+        )
+
+    # compute number of masked spans in batch
+    num_masked_spans = int(mask_prob * sequence_length / mask_length + torch.rand((1,)).item())
+    num_masked_spans = max(num_masked_spans, min_masks)
+
+    # make sure num masked indices <= sequence_length
+    if num_masked_spans * mask_length > sequence_length:
+        num_masked_spans = sequence_length // mask_length
+
+    # SpecAugment mask to fill
+    spec_aug_mask = torch.zeros((batch_size, sequence_length), device=device, dtype=torch.bool)
+
+    # uniform distribution to sample from, make sure that offset samples are < sequence_length
+    uniform_dist = torch.ones((batch_size, sequence_length - (mask_length - 1)), device=device)
+
+    # get random indices to mask
+    spec_aug_mask_idxs = torch.multinomial(uniform_dist, num_masked_spans)
+
+    # expand masked indices to masked spans
+    spec_aug_mask_idxs = (
+        spec_aug_mask_idxs.unsqueeze(dim=-1)
+        .expand((batch_size, num_masked_spans, mask_length))
+        .reshape(batch_size, num_masked_spans * mask_length)
+    )
+    offsets = (
+        torch.arange(mask_length, device=device)[None, None, :]
+        .expand((batch_size, num_masked_spans, mask_length))
+        .reshape(batch_size, num_masked_spans * mask_length)
+    )
+    spec_aug_mask_idxs = spec_aug_mask_idxs + offsets
+
+    # scatter indices to mask
+    spec_aug_mask = spec_aug_mask.scatter(1, spec_aug_mask_idxs, True)
+
+    if attention_mask is not None:
+        # make sure padded input ids cannot be masked
+        spec_aug_mask = torch.where(attention_mask.bool(), spec_aug_mask, False)
+
+    return spec_aug_mask
 
 @dataclass
 class DataCollatorForWav2Vec2Pretraining:
@@ -367,11 +469,6 @@ def main():
     # or by passing the --help flag to this script.
     # We now keep distinct sets of args, for a cleaner separation of concerns.
     args = parse_args()
-
-    # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The
-    # information sent is the one passed as arguments along with your Python/PyTorch versions.
-    send_example_telemetry("run_wav2vec2_pretraining_no_trainer", args)
-
     # Initialize the accelerator. We will let the accelerator handle device placement for us in this example.
     accelerator = Accelerator()
     logger.info(accelerator.state, main_process_only=False)

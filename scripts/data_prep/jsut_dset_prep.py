@@ -4,16 +4,17 @@ from pathlib import Path
 
 import torchaudio
 import pandas as pd
-from fastai.data.all import get_files, untar_data
+from fastai.data.all import get_files
 from tqdm import tqdm
+from fastdownload import FastDownload
 
 from dsets.helpers.helpers import make_tarfile, train_test_split
 
 JSUT_URL_ORIG = "https://www.dropbox.com/s/a2z6bklpaphiu1k/jsut_ver1.1.zip?dl=1"
-DATAROOT = os.environ.get("PREPROCESS_DATAROOT")
+DATAROOT = os.environ.get("PREPROCESS_DATAROOT", str(Path.home() / ".fastai" / "data"))
 OUTPATH = Path(DATAROOT) / "jsut_ver1.1.tar.gz"
+FORCE_DOWNLOAD = False
 
-FORCE_DOWNLOAD=False
 
 def _get_info_file(fn):
     out_dict = {}
@@ -38,8 +39,9 @@ def _get_info(text_files, kind="transcript_utf8", colname="text"):
     )
 
 
-def get_jsut_data(force_download=True):
-    p = untar_data(JSUT_URL_ORIG, force_download=force_download)
+def get_jsut_data(base, force_download=True):
+    d = FastDownload(base=str(base))
+    p = d.get(JSUT_URL_ORIG, force=force_download)
     text_files = get_files(p, extensions=[".txt"])
     d = _get_info(text_files, kind="transcript_utf8", colname="text")
     df = _get_info(text_files, kind="recording_info", colname="recording_info")
@@ -47,13 +49,16 @@ def get_jsut_data(force_download=True):
     return p, d
 
 
-p, df = get_jsut_data(force_download=FORCE_DOWNLOAD)
+p, df = get_jsut_data(str(DATAROOT), force_download=FORCE_DOWNLOAD)
 df = train_test_split(df)
 
 for i in p.ls():
-    if not os.path.isdir(i): continue
-    if not os.path.exists(i / "wav"/ "train"): os.mkdir( i / "wav"/ "train" )
-    if not os.path.exists(i / "wav"/ "test"): os.mkdir( i / "wav"/ "test" )
+    if not os.path.isdir(i):
+        continue
+    if not os.path.exists(i / "wav" / "train"):
+        os.mkdir(i / "wav" / "train")
+    if not os.path.exists(i / "wav" / "test"):
+        os.mkdir(i / "wav" / "test")
 
 for i, r in tqdm(df.iterrows()):
     if r["test"]:
@@ -75,18 +80,28 @@ df["filename"] = df.apply(
 )
 assert df["filename"].apply(os.path.exists).all()
 
+
 def get_frames_sr(f):
     t, sr = torchaudio.load(f)
     no_frames = len(t.squeeze())
     return pd.Series([no_frames, sr])
 
+
 df[["no_frames", "sr"]] = df["filename"].apply(get_frames_sr)
 df["audio_length"] = df["no_frames"] / df["sr"]
 
 df["filename"] = df.apply(
-    lambda r: Path(".") /r["filename"].parent.parent.parent.name /  r["filename"].parent.parent.name / "test" / r["filename"].name
+    lambda r: Path(".")
+    / r["filename"].parent.parent.parent.name
+    / r["filename"].parent.parent.name
+    / "test"
+    / r["filename"].name
     if r["test"]
-    else Path(".") /r["filename"].parent.parent.parent.name / r["filename"].parent.parent.name / "train" / r["filename"].name,
+    else Path(".")
+    / r["filename"].parent.parent.parent.name
+    / r["filename"].parent.parent.name
+    / "train"
+    / r["filename"].name,
     axis=1,
 )
 
