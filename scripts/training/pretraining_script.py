@@ -54,7 +54,9 @@ logger = get_logger(__name__)
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Finetune a transformers model on a text classification task")
+    parser = argparse.ArgumentParser(
+        description="Finetune a transformers model on a text classification task"
+    )
     parser.add_argument(
         "--dataset_name",
         type=str,
@@ -82,7 +84,9 @@ def parse_args():
         help="The number of processes to use for the preprocessing.",
     )
     parser.add_argument(
-        "--overwrite_cache", action="store_true", help="Overwrite the cached training and evaluation sets"
+        "--overwrite_cache",
+        action="store_true",
+        help="Overwrite the cached training and evaluation sets",
     )
     parser.add_argument(
         "--preprocessing_only",
@@ -161,8 +165,15 @@ def parse_args():
         default=5e-5,
         help="Initial learning rate (after the potential warmup period) to use.",
     )
-    parser.add_argument("--weight_decay", type=float, default=0.0, help="Weight decay to use.")
-    parser.add_argument("--num_train_epochs", type=int, default=3, help="Total number of training epochs to perform.")
+    parser.add_argument(
+        "--weight_decay", type=float, default=0.0, help="Weight decay to use."
+    )
+    parser.add_argument(
+        "--num_train_epochs",
+        type=int,
+        default=3,
+        help="Total number of training epochs to perform.",
+    )
     parser.add_argument(
         "--max_train_steps",
         type=int,
@@ -185,13 +196,27 @@ def parse_args():
         type=SchedulerType,
         default="linear",
         help="The scheduler type to use.",
-        choices=["linear", "cosine", "cosine_with_restarts", "polynomial", "constant", "constant_with_warmup"],
+        choices=[
+            "linear",
+            "cosine",
+            "cosine_with_restarts",
+            "polynomial",
+            "constant",
+            "constant_with_warmup",
+        ],
     )
     parser.add_argument(
-        "--num_warmup_steps", type=int, default=0, help="Number of steps for the warmup in the lr scheduler."
+        "--num_warmup_steps",
+        type=int,
+        default=0,
+        help="Number of steps for the warmup in the lr scheduler.",
     )
-    parser.add_argument("--output_dir", type=str, default=None, help="Where to store the final model.")
-    parser.add_argument("--seed", type=int, default=0, help="A seed for reproducible training.")
+    parser.add_argument(
+        "--output_dir", type=str, default=None, help="Where to store the final model."
+    )
+    parser.add_argument(
+        "--seed", type=int, default=0, help="A seed for reproducible training."
+    )
     parser.add_argument(
         "--max_gumbel_temperature",
         type=float,
@@ -205,7 +230,10 @@ def parse_args():
         help="Minimum temperature for gumbel softmax.",
     )
     parser.add_argument(
-        "--gumbel_temperature_decay", type=float, default=0.999995, help="Decay of gumbel temperature during training."
+        "--gumbel_temperature_decay",
+        type=float,
+        default=0.999995,
+        help="Decay of gumbel temperature during training.",
     )
     parser.add_argument(
         "--max_duration_in_seconds",
@@ -246,22 +274,33 @@ def parse_args():
         default=1e-8,
         help="Epsilon for AdamW optimizer",
     )
-    parser.add_argument("--push_to_hub", action="store_true", help="Whether or not to push the model to the Hub.")
     parser.add_argument(
-        "--hub_model_id", type=str, help="The name of the repository to keep in sync with the local `output_dir`."
+        "--push_to_hub",
+        action="store_true",
+        help="Whether or not to push the model to the Hub.",
     )
-    parser.add_argument("--hub_token", type=str, help="The token to use to push to the Model Hub.")
+    parser.add_argument(
+        "--hub_model_id",
+        type=str,
+        help="The name of the repository to keep in sync with the local `output_dir`.",
+    )
+    parser.add_argument(
+        "--hub_token", type=str, help="The token to use to push to the Model Hub."
+    )
     args = parser.parse_args()
 
     if args.push_to_hub:
-        assert args.output_dir is not None, "Need an `output_dir` to create a repo when `--push_to_hub` is passed."
+        assert (
+            args.output_dir is not None
+        ), "Need an `output_dir` to create a repo when `--push_to_hub` is passed."
 
     if args.output_dir is not None:
         os.makedirs(args.output_dir, exist_ok=True)
 
     return args
 
-def _sample_negative_indices( features_shape, num_negatives, mask_time_indices):
+
+def _sample_negative_indices(features_shape, num_negatives, mask_time_indices):
     """
     Sample `num_negatives` vectors from feature vectors.
     """
@@ -271,35 +310,44 @@ def _sample_negative_indices( features_shape, num_negatives, mask_time_indices):
     sequence_length_range = np.arange(sequence_length)
 
     # get `num_negatives` random vector indices from the same utterance
-    sampled_negative_indices = np.zeros(shape=(batch_size, sequence_length, num_negatives), dtype=np.int32)
+    sampled_negative_indices = np.zeros(
+        shape=(batch_size, sequence_length, num_negatives), dtype=np.int32
+    )
 
     mask_time_indices = (
-        mask_time_indices.astype(np.bool) if mask_time_indices is not None else np.ones(features_shape, dtype=np.bool)
+        mask_time_indices.astype(np.bool)
+        if mask_time_indices is not None
+        else np.ones(features_shape, dtype=np.bool)
     )
 
     for batch_idx in range(batch_size):
         high = mask_time_indices[batch_idx].sum() - 1
         mapped_masked_indices = sequence_length_range[mask_time_indices[batch_idx]]
 
-        feature_indices = np.broadcast_to(np.arange(high + 1)[:, None], (high + 1, num_negatives))
+        feature_indices = np.broadcast_to(
+            np.arange(high + 1)[:, None], (high + 1, num_negatives)
+        )
         sampled_indices = np.random.randint(0, high, size=(high + 1, num_negatives))
         # avoid sampling the same positive vector, but keep the distribution uniform
         sampled_indices[sampled_indices >= feature_indices] += 1
 
         # remap to actual indices
-        sampled_negative_indices[batch_idx][mask_time_indices[batch_idx]] = mapped_masked_indices[sampled_indices]
+        sampled_negative_indices[batch_idx][
+            mask_time_indices[batch_idx]
+        ] = mapped_masked_indices[sampled_indices]
 
         # correct for batch size
         sampled_negative_indices[batch_idx] += batch_idx * sequence_length
 
     return sampled_negative_indices
 
+
 def _compute_mask_indices(
     shape,
     mask_prob: float,
     mask_length: int,
     device: torch.device,
-    attention_mask = None,
+    attention_mask=None,
     min_masks: int = 0,
 ) -> torch.tensor:
     """
@@ -327,7 +375,9 @@ def _compute_mask_indices(
         )
 
     # compute number of masked spans in batch
-    num_masked_spans = int(mask_prob * sequence_length / mask_length + torch.rand((1,)).item())
+    num_masked_spans = int(
+        mask_prob * sequence_length / mask_length + torch.rand((1,)).item()
+    )
     num_masked_spans = max(num_masked_spans, min_masks)
 
     # make sure num masked indices <= sequence_length
@@ -335,10 +385,14 @@ def _compute_mask_indices(
         num_masked_spans = sequence_length // mask_length
 
     # SpecAugment mask to fill
-    spec_aug_mask = torch.zeros((batch_size, sequence_length), device=device, dtype=torch.bool)
+    spec_aug_mask = torch.zeros(
+        (batch_size, sequence_length), device=device, dtype=torch.bool
+    )
 
     # uniform distribution to sample from, make sure that offset samples are < sequence_length
-    uniform_dist = torch.ones((batch_size, sequence_length - (mask_length - 1)), device=device)
+    uniform_dist = torch.ones(
+        (batch_size, sequence_length - (mask_length - 1)), device=device
+    )
 
     # get random indices to mask
     spec_aug_mask_idxs = torch.multinomial(uniform_dist, num_masked_spans)
@@ -364,6 +418,7 @@ def _compute_mask_indices(
         spec_aug_mask = torch.where(attention_mask.bool(), spec_aug_mask, False)
 
     return spec_aug_mask
+
 
 @dataclass
 class DataCollatorForWav2Vec2Pretraining:
@@ -399,7 +454,9 @@ class DataCollatorForWav2Vec2Pretraining:
     padding: Union[bool, str] = "longest"
     pad_to_multiple_of: Optional[int] = None
 
-    def __call__(self, features: List[Dict[str, Union[List[int], torch.Tensor]]]) -> Dict[str, torch.Tensor]:
+    def __call__(
+        self, features: List[Dict[str, Union[List[int], torch.Tensor]]]
+    ) -> Dict[str, torch.Tensor]:
         # reformat list to dict and set to pytorch format
         batch = self.feature_extractor.pad(
             features,
@@ -411,7 +468,9 @@ class DataCollatorForWav2Vec2Pretraining:
         device = batch["input_values"].device
         batch_size = batch["input_values"].shape[0]
 
-        mask_indices_seq_length = self.model._get_feat_extract_output_lengths(batch["input_values"].shape[-1])
+        mask_indices_seq_length = self.model._get_feat_extract_output_lengths(
+            batch["input_values"].shape[-1]
+        )
         # make sure masked sequence length is a Python scalar
         mask_indices_seq_length = int(mask_indices_seq_length)
 
@@ -426,9 +485,10 @@ class DataCollatorForWav2Vec2Pretraining:
 
         # sample randomly masked indices
         mask_time_indices = _compute_mask_indices(
-            features_shape,
-            self.model.config.mask_time_prob,
-            self.model.config.mask_time_length,
+            shape=features_shape,
+            mask_prob=self.model.config.mask_time_prob,
+            mask_length=self.model.config.mask_time_length,
+            device=device,
             attention_mask=batch.get("sub_attention_mask"),
         )
 
@@ -438,8 +498,12 @@ class DataCollatorForWav2Vec2Pretraining:
             self.model.config.num_negatives,
             mask_time_indices=mask_time_indices,
         )
-        batch["mask_time_indices"] = torch.tensor(mask_time_indices, dtype=torch.long, device=device)
-        batch["sampled_negative_indices"] = torch.tensor(sampled_negative_indices, dtype=torch.long, device=device)
+        batch["mask_time_indices"] = torch.tensor(
+            mask_time_indices, dtype=torch.long, device=device
+        )
+        batch["sampled_negative_indices"] = torch.tensor(
+            sampled_negative_indices, dtype=torch.long, device=device
+        )
 
         return batch
 
@@ -493,7 +557,9 @@ def main():
     if accelerator.is_main_process:
         if args.push_to_hub and not args.preprocessing_only:
             if args.hub_model_id is None:
-                repo_name = get_full_repo_name(Path(args.output_dir).name, token=args.hub_token)
+                repo_name = get_full_repo_name(
+                    Path(args.output_dir).name, token=args.hub_token
+                )
             else:
                 repo_name = args.hub_model_id
             repo = Repository(args.output_dir, clone_from=repo_name)
@@ -505,7 +571,9 @@ def main():
     # We load all dataset configuration and datset split pairs passed in
     # ``args.dataset_config_names`` and ``args.dataset_split_names``
     datasets_splits = []
-    for dataset_config_name, train_split_name in zip(args.dataset_config_names, args.dataset_split_names):
+    for dataset_config_name, train_split_name in zip(
+        args.dataset_config_names, args.dataset_split_names
+    ):
         # load dataset
         dataset_split = load_dataset(
             args.dataset_name,
@@ -518,12 +586,16 @@ def main():
     # Next, we concatenate all configurations and splits into a single training dataset
     raw_datasets = DatasetDict()
     if len(datasets_splits) > 1:
-        raw_datasets["train"] = concatenate_datasets(datasets_splits).shuffle(seed=args.seed)
+        raw_datasets["train"] = concatenate_datasets(datasets_splits).shuffle(
+            seed=args.seed
+        )
     else:
         raw_datasets["train"] = datasets_splits[0]
 
     # Take ``args.validation_split_percentage`` from the training dataset for the validation_split_percentage
-    num_validation_samples = raw_datasets["train"].num_rows * args.validation_split_percentage // 100
+    num_validation_samples = (
+        raw_datasets["train"].num_rows * args.validation_split_percentage // 100
+    )
 
     if num_validation_samples == 0:
         raise ValueError(
@@ -532,18 +604,25 @@ def main():
             "`args.num_validation_split_percentage`. "
         )
 
-    raw_datasets["validation"] = raw_datasets["train"].select(range(num_validation_samples))
-    raw_datasets["train"] = raw_datasets["train"].select(range(num_validation_samples, raw_datasets["train"].num_rows))
+    raw_datasets["validation"] = raw_datasets["train"].select(
+        range(num_validation_samples)
+    )
+    raw_datasets["train"] = raw_datasets["train"].select(
+        range(num_validation_samples, raw_datasets["train"].num_rows)
+    )
 
     # 2. Now we preprocess the datasets including loading the audio, resampling and normalization
     # Thankfully, `datasets` takes care of automatically loading and resampling the audio,
     # so that we just need to set the correct target sampling rate and normalize the input
     # via the `feature_extractor`
-    feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(args.model_name_or_path)
+    feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(
+        args.model_name_or_path
+    )
 
     # make sure that dataset decodes audio with correct sampling rate
     raw_datasets = raw_datasets.cast_column(
-        args.audio_column_name, datasets.features.Audio(sampling_rate=feature_extractor.sampling_rate)
+        args.audio_column_name,
+        datasets.features.Audio(sampling_rate=feature_extractor.sampling_rate),
     )
 
     # only normalized-inputs-training is supported
@@ -560,7 +639,10 @@ def main():
         sample = batch[args.audio_column_name]
 
         inputs = feature_extractor(
-            sample["array"], sampling_rate=sample["sampling_rate"], max_length=max_length, truncation=True
+            sample["array"],
+            sampling_rate=sample["sampling_rate"],
+            max_length=max_length,
+            truncation=True,
         )
         batch["input_values"] = inputs.input_values[0]
         batch["input_length"] = len(inputs.input_values[0])
@@ -570,7 +652,10 @@ def main():
     # load via mapped files via path
     cache_file_names = None
     if args.train_cache_file_name is not None:
-        cache_file_names = {"train": args.train_cache_file_name, "validation": args.validation_cache_file_name}
+        cache_file_names = {
+            "train": args.train_cache_file_name,
+            "validation": args.validation_cache_file_name,
+        }
 
     # load audio files into numpy arrays
     with accelerator.main_process_first():
@@ -618,7 +703,9 @@ def main():
 
     # 4. Define data collator, optimizer and scheduler
     data_collator = DataCollatorForWav2Vec2Pretraining(
-        model=model, feature_extractor=feature_extractor, pad_to_multiple_of=args.pad_to_multiple_of
+        model=model,
+        feature_extractor=feature_extractor,
+        pad_to_multiple_of=args.pad_to_multiple_of,
     )
     train_dataloader = DataLoader(
         vectorized_datasets["train"],
@@ -627,7 +714,9 @@ def main():
         batch_size=args.per_device_train_batch_size,
     )
     eval_dataloader = DataLoader(
-        vectorized_datasets["validation"], collate_fn=data_collator, batch_size=args.per_device_eval_batch_size
+        vectorized_datasets["validation"],
+        collate_fn=data_collator,
+        batch_size=args.per_device_eval_batch_size,
     )
 
     # Optimizer
@@ -644,7 +733,9 @@ def main():
     )
 
     # Scheduler and math around the number of training steps.
-    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
+    num_update_steps_per_epoch = math.ceil(
+        len(train_dataloader) / args.gradient_accumulation_steps
+    )
 
     if args.max_train_steps is None:
         args.max_train_steps = args.num_train_epochs * num_update_steps_per_epoch
@@ -660,20 +751,30 @@ def main():
     args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
 
     # 5. Train
-    total_batch_size = args.per_device_train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
+    total_batch_size = (
+        args.per_device_train_batch_size
+        * accelerator.num_processes
+        * args.gradient_accumulation_steps
+    )
 
     logger.info("***** Running training *****")
     logger.info(f"  Num examples = {len(vectorized_datasets['train'])}")
     logger.info(f"  Num Epochs = {args.num_train_epochs}")
-    logger.info(f"  Instantaneous batch size per device = {args.per_device_train_batch_size}")
-    logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
+    logger.info(
+        f"  Instantaneous batch size per device = {args.per_device_train_batch_size}"
+    )
+    logger.info(
+        f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}"
+    )
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     logger.info(f"  Total optimization steps = {args.max_train_steps}")
     completed_steps = 0
     starting_epoch = 0
 
     # Only show the progress bar once on each machine.
-    progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process)
+    progress_bar = tqdm(
+        range(args.max_train_steps), disable=not accelerator.is_local_main_process
+    )
     completed_steps = 0
     starting_epoch = 0
     for epoch in range(starting_epoch, args.num_train_epochs):
@@ -683,7 +784,9 @@ def main():
             num_losses = batch["mask_time_indices"].sum()
             sub_attention_mask = batch.pop("sub_attention_mask", None)
             sub_attention_mask = (
-                sub_attention_mask if sub_attention_mask is not None else torch.ones_like(batch["mask_time_indices"])
+                sub_attention_mask
+                if sub_attention_mask is not None
+                else torch.ones_like(batch["mask_time_indices"])
             )
             percent_masked = num_losses / sub_attention_mask.sum()
 
@@ -705,7 +808,9 @@ def main():
                 multiply_grads(model.parameters(), 1 / num_losses)
 
             # update step
-            if (step + 1) % args.gradient_accumulation_steps == 0 or step == len(train_dataloader) - 1:
+            if (step + 1) % args.gradient_accumulation_steps == 0 or step == len(
+                train_dataloader
+            ) - 1:
 
                 # compute grad norm for monitoring
                 scale = (
@@ -731,7 +836,8 @@ def main():
 
                 # update gumbel temperature
                 gumbel_temperature = max(
-                    args.max_gumbel_temperature * args.gumbel_temperature_decay**completed_steps,
+                    args.max_gumbel_temperature
+                    * args.gumbel_temperature_decay**completed_steps,
                     args.min_gumbel_temperature,
                 )
                 if hasattr(model, "module"):
@@ -743,15 +849,21 @@ def main():
                 completed_steps += 1
 
             # 6. Log all results
-            if (step + 1) % (args.gradient_accumulation_steps * args.logging_steps) == 0:
+            if (step + 1) % (
+                args.gradient_accumulation_steps * args.logging_steps
+            ) == 0:
                 loss.detach()
                 outputs.contrastive_loss.detach()
                 outputs.diversity_loss.detach()
 
                 if accelerator.state.num_processes > 1:
                     loss = accelerator.gather(loss).sum()
-                    outputs.contrastive_loss = accelerator.gather(outputs.contrastive_loss).sum()
-                    outputs.diversity_loss = accelerator.gather(outputs.diversity_loss).sum()
+                    outputs.contrastive_loss = accelerator.gather(
+                        outputs.contrastive_loss
+                    ).sum()
+                    outputs.diversity_loss = accelerator.gather(
+                        outputs.diversity_loss
+                    ).sum()
                     percent_masked = accelerator.gather(percent_masked).sum()
 
                 train_logs = {
@@ -775,14 +887,20 @@ def main():
 
             # save model every `args.saving_steps` steps
             if (step + 1) % (args.gradient_accumulation_steps * args.saving_steps) == 0:
-                if (args.push_to_hub and epoch < args.num_train_epochs - 1) or args.output_dir is not None:
+                if (
+                    args.push_to_hub and epoch < args.num_train_epochs - 1
+                ) or args.output_dir is not None:
                     accelerator.wait_for_everyone()
                     unwrapped_model = accelerator.unwrap_model(model)
                     unwrapped_model.save_pretrained(
-                        args.output_dir, is_main_process=accelerator.is_main_process, save_function=accelerator.save
+                        args.output_dir,
+                        is_main_process=accelerator.is_main_process,
+                        save_function=accelerator.save,
                     )
 
-                if (args.push_to_hub and epoch < args.num_train_epochs - 1) and accelerator.is_main_process:
+                if (
+                    args.push_to_hub and epoch < args.num_train_epochs - 1
+                ) and accelerator.is_main_process:
                     repo.push_to_hub(
                         commit_message=f"Training in progress step {completed_steps}",
                         blocking=False,
@@ -832,11 +950,15 @@ def main():
             accelerator.wait_for_everyone()
             unwrapped_model = accelerator.unwrap_model(model)
             unwrapped_model.save_pretrained(
-                args.output_dir, is_main_process=accelerator.is_main_process, save_function=accelerator.save
+                args.output_dir,
+                is_main_process=accelerator.is_main_process,
+                save_function=accelerator.save,
             )
             if accelerator.is_main_process:
                 if args.push_to_hub:
-                    repo.push_to_hub(commit_message="End of training", auto_lfs_prune=True)
+                    repo.push_to_hub(
+                        commit_message="End of training", auto_lfs_prune=True
+                    )
 
 
 if __name__ == "__main__":
