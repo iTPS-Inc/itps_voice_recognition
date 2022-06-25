@@ -103,3 +103,7 @@ class NeptuneSaveModel(Callback):
                     l.WARNING,
                     f"Could find {_file}, thus couldn't upload it to Neptune.",
                 )
+
+class DropPreds(Callback):
+    def after_pred(self):
+        self.learn.pred = self.pred.logits
