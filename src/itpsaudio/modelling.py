@@ -1,8 +1,9 @@
-from torch.nn.modules.loss import _Loss
+from typing import Optional, Union
+
 import torch
 import torch.nn as nn
-from typing import Union, Optional
 from fastai.data.all import Tensor
+from torch.nn.modules.loss import _Loss
 
 
 def torch_int_div(a, b):
