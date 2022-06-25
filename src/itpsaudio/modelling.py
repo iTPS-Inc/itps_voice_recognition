@@ -2,6 +2,7 @@ from torch.nn.modules.loss import _Loss
 import torch
 import torch.nn as nn
 from typing import Union, Optional
+from fastai.data.all import Tensor
 
 
 def torch_int_div(a, b):
@@ -55,19 +56,27 @@ class CTCLoss(_Loss):
         ctc_loss = self.ctc(log_probs, flattened_targets, inp_len, target_lengths)
         return ctc_loss
 
+    def decodes(self, x):
+        if not isinstance(x, Tensor):
+            return x.map(lambda x: torch.argmax(x, dim=-1))
+        else:
+            return torch.argmax(x, dim=0)
+
 
 class SmoothCTCLoss(_Loss):
-    def __init__(self, num_classes, blank=0, weight=0.01, ctc_red="mean", kl_red="mean"):
+    def __init__(
+        self, num_classes, blank=0, weight=0.01, ctc_red="mean", kl_red="mean"
+    ):
         """
         CTC loss with label smoothing.
         """
         super().__init__()
         self.weight = weight
         if weight is None:
-            self.weight=0.01
+            self.weight = 0.01
         self.num_classes = num_classes
         self.ctc = nn.CTCLoss(reduction=ctc_red, blank=blank, zero_infinity=True)
-        kldiv_red = "batchmean" if kl_red=="mean" else "sum"
+        kldiv_red = "batchmean" if kl_red == "mean" else "sum"
         self.kldiv = nn.KLDivLoss(reduction=kldiv_red)
 
     def forward(self, preds, inp_len, labels, modelconf):
@@ -84,3 +93,9 @@ class SmoothCTCLoss(_Loss):
         kldiv_loss = self.kldiv(kl_inp, kl_tar)
         loss = (1.0 - self.weight) * ctc_loss + self.weight * kldiv_loss
         return loss
+
+    def decodes(self, x):
+        if not isinstance(x, Tensor):
+            return x.map(lambda x: torch.argmax(x, dim=-1))
+        else:
+            return torch.argmax(x, dim=0)
