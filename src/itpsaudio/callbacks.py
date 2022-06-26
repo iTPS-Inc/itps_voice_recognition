@@ -17,6 +17,7 @@ class MixedPrecisionTransformers(MixedPrecision):
 
 
 class SeePreds(TensorBoardBaseCallback):
+    order=51
     def __init__(
         self, base_model_name, tok, n_iters=50, log_dir=None, neptune=False, n_vals=6
     ):
@@ -105,5 +106,6 @@ class NeptuneSaveModel(Callback):
                 )
 
 class DropPreds(Callback):
+    order = 50
     def after_pred(self):
         self.learn.pred = self.pred.logits
