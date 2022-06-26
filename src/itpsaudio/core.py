@@ -25,9 +25,34 @@ class TransformersLearnerAtt(Learner):
         self._with_events(self.opt.step, "step", CancelStepException)
         self.opt.zero_grad()
 
-
 class TransformersLearnerOwnLoss(Learner):
-    def _do_one_batch(self):
+    def __init__(self, *args,with_attentions=True, **kwargs):
+      super().__init__(*args, **kwargs)
+      if with_attentions:
+        self._do_one_batch = self._do_one_batch_w_att
+      else:
+        self._do_one_batch = self._do_one_batch_wo_att
+
+    def _do_one_batch_wo_att(self):
+        self.pred = self.model(self.xb[0])
+        self("after_pred")
+        if len(self.yb):
+            self.loss_grad = self.loss_func(
+                preds=cast(self.pred, torch.Tensor),
+                inp_len=torch.ones_like(self.xb[0], dtype=torch.long).sum(-1),
+                labels=cast(self.yb[-1], torch.Tensor),
+                modelconf=self.model.config,
+            )
+            self.loss = self.loss_grad.clone()
+        self("after_loss")
+        if not self.training or not len(self.yb):
+            return
+        self("before_backward")
+        self.loss_grad.backward()
+        self._with_events(self.opt.step, "step", CancelStepException)
+        self.opt.zero_grad()
+
+    def _do_one_batch_w_att(self):
         # TODO: When using spec mask, can't use attention_mask
         self.pred = self.model(self.xb[0], attention_mask=self.xb[1])
         self("after_pred")
@@ -45,7 +70,7 @@ class TransformersLearnerOwnLoss(Learner):
         self("before_backward")
         self.loss_grad.backward()
         self._with_events(self.opt.step, "step", CancelStepException)
-        self.opt.zero_grad()
+
 
 
 class TransformersLearner(Learner):
