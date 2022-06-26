@@ -13,8 +13,8 @@ class TransformersLearnerAtt(Learner):
                                attention_mask=self.xb[1],
                                output_attentions=False,
                                labels=cast(self.yb[-1], torch.Tensor))
-        self("after_pred")
         self.loss_grad = self.pred["loss"]
+        self("after_pred")
         self.loss = self.loss_grad.clone()
         self.smooth_loss = self.loss_grad.clone()
         self("after_loss")

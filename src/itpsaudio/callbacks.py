@@ -41,7 +41,7 @@ class SeePreds(TensorBoardBaseCallback):
 
             if i < self.n_vals:
                 with torch.no_grad():
-                    preds = np.argmax(self.model(x).detach().cpu(), axis=-1)
+                    preds = np.argmax(self.model(x).logits.detach().cpu(), axis=-1)
                 decoded_preds += self.tok.batch_decode(preds, group_tokens=True)
                 decoded_ys += self.tok.batch_decode(y, group_tokens=False)
             else:
