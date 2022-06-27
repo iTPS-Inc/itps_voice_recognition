@@ -70,20 +70,20 @@ class JPTransformersTokenizer(Transform):
 
     trans = str.maketrans(KATA, HIRA)
     node_format_csv = r"%f[8]|"
-    eos_format_csv = r"[EOS]\n"
+    eos_format_csv = r"[EOS]"
     unk_format_csv = r"%m|"
 
-    def __init__(self, tok=None, mcb=None):
+    def __init__(self, tok=None, mcb=None, neolog_available=True,replace_unk=False):
         import MeCab
-
+        self.neolog_available = True
         self.tokenizer = tok
         self.mcb = mcb
         if not self.mcb:
             self.mcb = MeCab.Tagger(
                 f" --node-format={self.node_format_csv}"
-                + f" --unk-format={self.unk_format_csv}"
+                + f" --unk-format={self.unk_format_csv if not replace_unk else '[UNK]' }"
                 + f" --eos-format={self.eos_format_csv}"
-                # + f" --unk-format={self.tokenizer.unk_token}|"
+                + ("" if not neolog_available else " -d /usr/lib/x86_64-linux-gnu/mecab/dic/mecab-ipadic-neologd")
             )
 
     def kata2hira(self, s):
