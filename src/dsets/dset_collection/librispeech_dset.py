@@ -4,6 +4,7 @@ from typing import Tuple
 
 import pandas as pd
 from dsets.dset_config.dset_config import DatasetConfig
+from fastdownload import FastDownload
 from fastai.data.all import get_files, untar_data
 
 DEV_CLEAN = "https://www.dropbox.com/s/dks1ym745vyn9l4/dev-clean.tar.gz?dl=1"
@@ -53,7 +54,7 @@ def _assemble_librispeech_dict(folder):
 
 
 def get_librispeech(
-    dset: DatasetConfig = lib_clean_train, force_download=False
+        dset: DatasetConfig = lib_clean_train, base="~/.fastai", force_download=False
 ) -> Tuple[Path, dict]:
     if dset.kind is None:
         raise AttributeError(
@@ -61,7 +62,9 @@ def get_librispeech(
         )
     dset_name = dset.split + "-" + dset.kind
     dset_url = LIBRISPEECH_DSETS[dset_name]
-    path = untar_data(dset_url, force_download=force_download)
+
+    d = FastDownload(base=base)
+    path = d.get(dset_url, force=force_download)
 
     if dset_name == "train-other":
         dset_name = "train-other-500"
