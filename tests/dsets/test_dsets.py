@@ -25,7 +25,7 @@ def dset_ok(df):
 
 
 def test_get_ENGLISH_DATASETS():
-    p, df = get_datasets(ENGLISH_DATASETS, force_download=REDOWNLOAD)
+    p, df = get_datasets(ENGLISH_DATASETS, force_download=REDOWNLOAD, base="~/.fastai")
     assert len(df["original_dset"].unique()) == 4
     assert set(df["original_dset"].unique()) == {
         "itps",
@@ -37,7 +37,7 @@ def test_get_ENGLISH_DATASETS():
 
 
 def test_get_JAPANESE_DATASETS():
-    p, df = get_datasets(JAPANESE_DATASETS, force_download=REDOWNLOAD)
+    p, df = get_datasets(JAPANESE_DATASETS, force_download=REDOWNLOAD, base="~/.fastai")
     assert len(df["original_dset"].unique()) == 3
     assert set(df["original_dset"].unique()) == {"itps", "jsut", "nict_spreds"}
     assert dset_ok(df)
