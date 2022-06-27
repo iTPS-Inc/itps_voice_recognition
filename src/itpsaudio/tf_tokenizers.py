@@ -2,6 +2,7 @@
 import json
 import string
 
+import re
 from fastai.data.all import TitledStr, Transform, tensor
 from fastai.text.all import TensorText
 
@@ -72,10 +73,11 @@ class JPTransformersTokenizer(Transform):
     node_format_csv = r"%f[8]|"
     eos_format_csv = r"[EOS]"
     unk_format_csv = r"%m|"
+    kanji = re.compile('[\u2E80-\u2FDF\u3005-\u3007\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF\U00020000-\U0002EBEF]+')
 
-    def __init__(self, tok=None, mcb=None, neolog_available=True,replace_unk=False):
+    def __init__(self, tok=None, mcb=None, neologd_available=True,replace_unk=False):
         import MeCab
-        self.neolog_available = True
+        self.neologd_available = True
         self.tokenizer = tok
         self.mcb = mcb
         if not self.mcb:
@@ -83,7 +85,7 @@ class JPTransformersTokenizer(Transform):
                 f" --node-format={self.node_format_csv}"
                 + f" --unk-format={self.unk_format_csv if not replace_unk else '[UNK]' }"
                 + f" --eos-format={self.eos_format_csv}"
-                + ("" if not neolog_available else " -d /usr/lib/x86_64-linux-gnu/mecab/dic/mecab-ipadic-neologd")
+                + ("" if not neologd_available else " -d /usr/lib/x86_64-linux-gnu/mecab/dic/mecab-ipadic-neologd")
             )
 
     def kata2hira(self, s):
@@ -91,6 +93,7 @@ class JPTransformersTokenizer(Transform):
 
     def mecab_step(self, s: str):
         s = self.mcb.parse(s.lower())
+        s = self.kanji.sub(self.tokenizer.unk_token, s)
         return "[BOS]|" + self.kata2hira(s)
 
     def encodes(self, s: str) -> TensorText:
@@ -98,7 +101,7 @@ class JPTransformersTokenizer(Transform):
         toks = tensor(self.tokenizer(s)["input_ids"])
         return TensorText(toks)
 
-    def batch_decode(self, xs, group_tokens=True, skip_special_tokens=True, **kwargs):
+    def batch_decode(self, xs, group_tokens=True, skip_special_tokens=False, **kwargs):
         if len(xs.shape) == 2:
             decoded = [
                 self.tokenizer.decode(
@@ -109,20 +112,16 @@ class JPTransformersTokenizer(Transform):
                 )
                 for x in xs
             ]
-            decoded = [
-                "".join(outstr.split(self.tokenizer.unk_token)) for outstr in decoded
-            ]
             return decoded
         raise AttributeError
 
-    def decodes(self, x, group_tokens=False, skip_special_tokens=True, **kwargs):
+    def decodes(self, x, group_tokens=False, skip_special_tokens=False, **kwargs):
         outstr = self.tokenizer.decode(
             x.cpu().numpy(),
             skip_special_tokens=skip_special_tokens,
             group_tokens=group_tokens,
             **kwargs,
         )
-        outstr = "".join(outstr.split(self.tokenizer.unk_token))
         return TitledStr(outstr)
 
     @staticmethod

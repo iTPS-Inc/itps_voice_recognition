@@ -9,9 +9,8 @@ Original file is located at
 # Setup
 """
 
-from google.colab import drive
-drive.mount('/content/drive')
-
+# from google.colab import drive
+# drive.mount('/content/drive')
 # Commented out IPython magic to ensure Python compatibility.
 # %%bash 
 # cd /content/
@@ -36,18 +35,17 @@ drive.mount('/content/drive')
 # %load_ext autoreload
 # %load_ext tensorboard
 # %autoreload 2
-import os 
-os.chdir("/content/itps_voice_recognition")
+# import os 
+# os.chdir("/content/itps_voice_recognition")
 
 """# Tensorboard
 
 # Imports
 """
-
 import os 
-os.chdir("/content/itps_voice_recognition/src/")
+# os.chdir("/content/itps_voice_recognition/src/")
 
-from fastai.data.all import * 
+from fastai.data.all import *
 from transformers import Wav2Vec2FeatureExtractor, Wav2Vec2ForMaskedLM, AutoTokenizer, Wav2Vec2Processor, Wav2Vec2ForCTC, AutoModelForCTC
 from transformers import Wav2Vec2CTCTokenizer
 from datasets import load_dataset
