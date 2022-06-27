@@ -1,3 +1,4 @@
+# %%
 #!/usr/bin/env python3
 import os
 import subprocess
@@ -5,22 +6,23 @@ import pandas as pd
 import torchaudio
 from fastdownload import FastDownload
 from fastai.data.all import Path, get_files, untar_data
-
-DATAROOT = os.environ.get("PREPROCESS_DATAROOT")
+#%%
+# DATAROOT = os.environ.get("PREPROCESS_DATAROOT")
 URL = "https://www.dropbox.com/s/qzvrx0c3rrmxxl3/annotation_data_initial.tar.gz?dl=1"
 
-d = FastDownload(base=DATAROOT)
+d = FastDownload()
 DATAROOT = d.get(URL, force=False)
 
 
 audio_files = get_files(DATAROOT, extensions=[".mp4"])
 if os.path.exists(DATAROOT / "annotation_data.csv"):
     os.unlink(DATAROOT / "annotation_data.csv")
-outdir = DATAROOT.parent / "annotation_data_out"
+outdir = DATAROOT.parent.parent / "out" / "annotation_data_out"
 if not os.path.exists(outdir):
+    os.mkdir(outdir.parent)
     os.mkdir(outdir)
 
-
+# %%
 def convert_to_wav(input_file, output_file):
     subprocess.run(
         [
@@ -128,27 +130,32 @@ def cut_out_part_ffmpeg(inp, st, end, out):
             "-y",
         ]
     )
+    print("Return code: x")
+    return x
 
+# %%
 
 df["test"] = False
 df.loc[df.sample(frac=0.2).index, "test"] = True
 df["test_string"] = df["test"].apply(lambda x: "test" if x else "train")
 df["base_path"] = df["test_string"].apply(lambda _: str(outdir / "wavs"))
 
-os.mkdir(outdir / "wavs")
-os.mkdir(outdir / "wavs" / "train")
-os.mkdir(outdir / "wavs" / "test")
+def mkdir(d):
+    if not os.path.exists(d):
+        os.mkdir(d)
+
+mkdir(outdir / "wavs")
+mkdir(outdir / "wavs" / "train")
+mkdir(outdir / "wavs" / "test")
 
 outfile_names = []
 for i, wav, test_string, st, end in df[
     ["wav_file_name", "test_string", "st", "et"]
 ].itertuples():
-
     infile = outdir / "base_wavs" / wav
     out_name = f"wavs/{test_string}/" + str(Path(wav).stem + f"_{i}.wav")
     outfile = outdir / out_name
     outfile_names.append(out_name)
-
     cut_out_part_ffmpeg(infile, st, end, outfile)
 
 df["file"] = outfile_names
@@ -188,3 +195,5 @@ os.chdir(DATAROOT.parent)
 df_out.to_csv(outdir / "df.csv")
 subprocess.run(["zip", "-r", f"annotation_data.zip", f"annotation_data_out"])
 os.chdir(curdir)
+
+# %%

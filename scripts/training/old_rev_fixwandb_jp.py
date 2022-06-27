@@ -274,7 +274,7 @@ class TransformersLearnerOwnLoss(Learner):
 
 def get_logging_cbs(framework, valid_dl=None,params=None, **kwargs):
     if framework.lower() =="wandb":
-        wandb.init(config=params)
+        wandb.init(project="itps-gpu", config=params)
         log_cbs =  [ WandbCallback(log="all", log_model=True, valid_dl=valid_dl, **kwargs) ]
     elif framework.lower() == "neptune":
         neptune.init("jjs/itps-language-model")
@@ -311,8 +311,6 @@ def get_learner(dls, model, loss_func, modelpath, cbs,log_cbs, metrics, with_att
     return learn
 
 """# Optuna run"""
-
-!wandb login
 
 from fastai.callback.wandb import WandbCallback
 LOGGING_FRAMEWORK="wandb"
@@ -402,8 +400,7 @@ def run(input_pars, modelpath, logpath):
 
   log_cbs = get_logging_cbs(framework=LOGGING_FRAMEWORK,
                             params=input_pars,
-                            valid_dl=dls.valid,
-                            log_preds_every_epoch=True)
+                            valid_dl=dls.valid)
   if LOGGING_FRAMEWORK.lower() == "wandb":
     wandb.log(input_pars)
     wandb.run.summary["epoch"] = 0
@@ -434,17 +431,17 @@ if LANG =="jp":
 if LANG =="en":
   datasets = [
     # DatasetConfig(name='itps', split='train', lang='en', kind=None),
-    DatasetConfig(name='librispeech', split='train', lang=None, kind='clean'),
+    DatasetConfig(name='librispeech', split='dev', lang=None, kind='clean'),
     DatasetConfig(name='ljl', split='train', lang=None, kind=None),
     DatasetConfig(name='nict_spreds', split='train', lang='en', kind=None)
 ]
 MONITOR="cer"
 NUM_EPOCHS=20
 AUDIO_LENGTH=10
-DSET_NAMES = "-".join(["cvjp"] + [d.name[:4] for d in datasets])
+DSET_NAMES = "-".join(["cvjp"] + [d.name[:4]+ "-" + d.split[:4] for d in datasets])
 print(DSET_NAMES)
 
-p, df = get_datasets(datasets, base="/root/.fastai")
+p, df = get_datasets(datasets, base="~/.datasets")
 
 if LANG == "jp":
   cv = load_dataset("common_voice", "")
@@ -465,11 +462,14 @@ if LANG == "jp":
 
 """# Actual Run"""
 
-if not os.path.exists("/content/df.pkl"):
-    df = prepare_df(df, audio_length=AUDIO_LENGTH)
-    df.to_pickle("/content/df.pkl")
+dfpath = Path().home() / ".fastdownload" / "preprocessed" / f"{LANG}_df_{DSET_NAMES}.csv"
+if not os.path.exists(dfpath):
+  print('Preparing df')
+  df = prepare_df(df, audio_length=AUDIO_LENGTH)
+  df.to_pickle(dfpath)
 else:
-    df = pd.read_pickle("/content/df.pkl")
+  print('reading df')
+  df = pd.read_pickle(dfpath)
 
 if LANG=="jp":
   vocab = JPTransformersTokenizer.create_vocab("vocab.json")
@@ -492,11 +492,16 @@ else:
       )
   )
 
-modelpath=Path(f"/content/drive/MyDrive/data/models/audio_{LANG}/")
-logpath = f"/content/drive/MyDrive/data/logs/audio_{LANG}"
-storage=f"sqlite:///{modelpath / f'testing_optuna_study_{LANG}.db' }"
-all_studies = optuna.get_all_study_summaries(storage)
-STUDY_NAME = f"{LANG}_study_1.db"
+modelpath = os.environ.get("AUDIOMODELDIR", f"/content/drive/MyDrive/data/models/")
+modelpath = Path(modelpath) / f"audio_{LANG}"
+
+logpath = os.environ.get("AUDIOLOGDIR", f"/content/drive/MyDrive/data/logs/")
+logpath = Path(logpath) / f"audio_{LANG}"
+
+storage_fname = f"testing_optuna_study_{LANG}"
+storage=f"{modelpath / storage_fname}"
+
+STUDY_NAME = f"{LANG}_study_0.db"
 
 from pprint import pprint
 def objective(trial):
@@ -504,10 +509,12 @@ def objective(trial):
   valid_loss, perp, wer, cer = run(trial.params, modelpath, logpath)
   return cer
 
-study = optuna.create_study(storage,
+study = optuna.create_study("sqlite:///{}.db".format(storage),
                             direction="minimize",
-                            study_name=STUDY_NAME, load_if_exists=True)
+                            study_name=STUDY_NAME,
+                            load_if_exists=True)
 
+all_studies = optuna.get_all_study_summaries("sqlite:///{}.db".format(storage))
 study.optimize(objective, n_trials=10)
 trial = study.best_trial
 
@@ -554,6 +561,7 @@ def quick_get_run(input_pars, modelpath, logpath):
   archname = f"{arch.replace('/', '_')}_{timestamp}"
   model_out_path = f"{modelpath / archname}"
   logdir = Path(f"{log_base_path / archname}")
+
   fit_cbs=[
     ParamScheduler({"lr": SchedExp(start=lr, end=lr/10)}),
     SeePreds(arch, tok, n_iters=500, log_dir=logdir, neptune=(LOGGING_FRAMEWORK.lower() == "neptune")),
@@ -676,3 +684,5 @@ for i, (x_pair, y_pair) in enumerate(comp):
 with open("/content/drive/MyDrive/data/models/audio_jp/good_jp_mod/tok.pkl", "rb") as f:
     t = pickle.load(f)
 
+
+# %%
