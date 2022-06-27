@@ -109,7 +109,7 @@ class TensorAudio(TensorBase):
 
 
 class AudioPair(fastuple):
-    def show(self, ctx=None, tok=None,skip_special_tokens=True, **kwargs):
+    def show(self, ctx=None, tok=None,skip_special_tokens=False, **kwargs):
         audio, text = self
         if tok is not None:
             text = tok.decode(text, group_tokens=False, skip_special_tokens=skip_special_tokens)

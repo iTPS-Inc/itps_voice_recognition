@@ -38,7 +38,7 @@ class ENTransformersTokenizer(Transform):
         toks = tensor(self.tokenizer(s)["input_ids"])
         return TensorText(toks)
 
-    def batch_decode(self, xs, group_tokens=True, skip_special_tokens=True, **kwargs):
+    def batch_decode(self, xs, group_tokens=True, skip_special_tokens=False, **kwargs):
         if len(xs.shape) == 2:
             decoded = [
                 self.tokenizer.decode(
@@ -55,7 +55,7 @@ class ENTransformersTokenizer(Transform):
             return decoded
         raise Exception("xs should be a two dimensional vector if using batch_decode")
 
-    def decodes(self, x, group_tokens=True, skip_special_tokens=True, **kwargs):
+    def decodes(self, x, group_tokens=True, skip_special_tokens=False, **kwargs):
         outstr = self.tokenizer.decode(
             x.cpu().numpy(),
             group_tokens=group_tokens,
@@ -67,7 +67,6 @@ class ENTransformersTokenizer(Transform):
 
 
 class JPTransformersTokenizer(Transform):
-    extra_chars = "".join(set("、。？" + ".?!|-,\"'"))
 
     trans = str.maketrans(KATA, HIRA)
     node_format_csv = r"%f[8]|"
@@ -126,7 +125,8 @@ class JPTransformersTokenizer(Transform):
 
     @staticmethod
     def create_vocab(outpath):
-        allowed_letters = set(HIRA + ".?!|-,\"'ー" + string.ascii_lowercase)
+        extra_chars = "".join(set("、。？" + ".?!|-,\"'"))
+        allowed_letters = set(HIRA + ".?!|-,\"'ー" + string.ascii_lowercase + extra_chars)
         print("Allowing letters: ")
         print(allowed_letters)
         vocab = {}
