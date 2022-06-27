@@ -80,9 +80,10 @@ class JPTransformersTokenizer(Transform):
         self.mcb = mcb
         if not self.mcb:
             self.mcb = MeCab.Tagger(
-                f" --node-format='{self.node_format_csv}'"
-                + f" --unk-format='{self.unk_format_csv}'"
-                + f" --eos-format='{self.eos_format_csv}'"
+                f" --node-format={self.node_format_csv}"
+                + f" --unk-format={self.unk_format_csv}"
+                + f" --eos-format={self.eos_format_csv}"
+                # + f" --unk-format={self.tokenizer.unk_token}|"
             )
 
     def kata2hira(self, s):
@@ -90,7 +91,7 @@ class JPTransformersTokenizer(Transform):
 
     def mecab_step(self, s: str):
         s = self.mcb.parse(s.lower())
-        return "[BOS]" + self.kata2hira(s)
+        return "[BOS]|" + self.kata2hira(s)
 
     def encodes(self, s: str) -> TensorText:
         s = self.mecab_step(s)
@@ -126,7 +127,7 @@ class JPTransformersTokenizer(Transform):
 
     @staticmethod
     def create_vocab(outpath):
-        allowed_letters = set(HIRA + ".?!|-,\"'ー")
+        allowed_letters = set(HIRA + ".?!|-,\"'ー" + string.ascii_lowercase)
         print("Allowing letters: ")
         print(allowed_letters)
         vocab = {}
