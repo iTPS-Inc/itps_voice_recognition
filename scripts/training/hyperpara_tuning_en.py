@@ -100,6 +100,7 @@ from functools import lru_cache
 from collections import Counter 
 import wandb
 from tqdm.auto import tqdm
+tqdm.pandas()
 
 """# Data Preparation"""
 
@@ -108,7 +109,7 @@ def get_audio_length(s):
     t, sr = torchaudio.load(s)
     return len(t[0]) / sr, sr
 def prepare_df(df, audio_length=10):
-    df[["audio_length", "sr"]] = df["filename"].apply(
+    df[["audio_length", "sr"]] = df["filename"].progress_apply(
         lambda x: pd.Series(get_audio_length(x))
     )
     print("Longest clip: ", df["audio_length"].max())
@@ -191,14 +192,14 @@ def construct_augs(params) -> List[Union[None , Transform]]:
     augs.append(ToWave())
   return augs
 
-def write_csv(fname, columns, table):
+def write_csv(fname, columns, data):
   if not os.path.exists(fname.parent):
         os.makedirs(fname.parent, exist_ok=True)
   with open(fname, 'w', newline='') as csvfile:
       spamwriter = csv.writer(csvfile, delimiter=' ',
                               quotechar='|', quoting=csv.QUOTE_MINIMAL)
       spamwriter.writerow(columns)
-      spamwriter.writerows(table)
+      spamwriter.writerows(data)
   return fname
 
 def log_predictions(learn, dls, train: bool):
@@ -215,7 +216,9 @@ def log_predictions(learn, dls, train: bool):
     table_row.append([dec_y, dec_pred])
     csv_row.append([dec_y, dec_pred, logits])
   wandb.log({caption: wandb.Table(columns=["ys","acts"], data=table_row)})
-  write_csv(Path(datapath)  / "csv" / wandb.run.name)
+  write_csv(Path(datapath)  / "csv" / wandb.run.name,
+  columns=["ys", "preds", "logits"],
+  data=csv_row)
   return dec_y, dec_pred, logits
 
 """## Model"""
@@ -358,7 +361,7 @@ LOGGING_FRAMEWORK="wandb"
 """# Trial Suggestions"""
 
 def trial_suggestions(trial):
-    with_attentions = trial.suggest_categorical("with_attentions", [True, False])
+    with_attentions = trial.suggest_categorical("with_attentions", [False])
     loss_func = trial.suggest_categorical( "loss_func",
         [ "smooth_ctc_sum", "transformers_ctc",  "ctc_sum", "ctc_mean"])
     bs = trial.suggest_categorical("bs", [8])
@@ -371,12 +374,12 @@ def trial_suggestions(trial):
     arch = trial.suggest_categorical("arch", archlist) 
     freeze_feat = trial.suggest_categorical("freeze_feat",    [True])
 
-    feat_proj_dropout=trial.suggest_float("feat_proj_dropout", low=0, high=0.3)
-    hidden_dropout=trial.suggest_float("hidden_dropout",       low=0, high=0.3)
-    attention_dropout=trial.suggest_float("attention_dropout", low=0, high=0.3)
-    layerdrop=trial.suggest_float("layerdrop",                 low=0, high=0.3)
-    mask_time_prob=trial.suggest_float("mask_time_prob",       low=0, high=0.3)
-    mask_feature_prob=trial.suggest_float("mask_feature_prob", low=0, high=0.3)
+    feat_proj_dropout=trial.suggest_float("feat_proj_dropout", low=0, high=0.2)
+    hidden_dropout=trial.suggest_float("hidden_dropout",       low=0, high=0.2)
+    attention_dropout=trial.suggest_float("attention_dropout", low=0, high=0.2)
+    layerdrop=trial.suggest_float("layerdrop",                 low=0, high=0.2)
+    mask_time_prob=trial.suggest_float("mask_time_prob",       low=0, high=0.2)
+    mask_feature_prob=trial.suggest_float("mask_feature_prob", low=0, high=0.2)
     
     # Augmentations
     random_reverb = trial.suggest_categorical("RandomReverb", [True, False])
@@ -496,7 +499,7 @@ sentences = pd.Series(cv["train"]["sentence"])
 cv = pd.DataFrame({"filename": paths, "text": sentences })
 df = pd.concat([cv, df], ignore_index=True)
 
-# Commented out IPython magic to ensure Python compatibility.
+# Commented out IPython magic to ensure Python c/wrkompatibility.
 # %%capture
 # %%bash
 # if [ ! -f installed_mecab ]; then 
@@ -546,7 +549,7 @@ logpath = Path(logpath) / f"audio_{LANG}"
 storage_fname = f"opt_study_{LANG}"
 storage=f"{modelpath / storage_fname}"
 
-STUDY_NAME = f"{LANG}_study"
+STUDY_NAME = f"{LANG}_study_long_dset"
 
 from pprint import pprint
 def objective(trial):

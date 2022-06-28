@@ -45,7 +45,10 @@ class SeePreds(TensorBoardBaseCallback):
             x, y = b[0], b[-1]
             with torch.no_grad():
                 if i < self.n_vals:
-                    preds = np.argmax(self.model(x).logits.detach().cpu(), axis=-1)
+                    logits = self.model(x).logits.detach().cpu()
+                    # TODO
+                    # wandb.log("logits":, wandb.Histogram(logits))
+                    preds = np.argmax(logits, axis=-1)
                     decoded_preds += self.tok.batch_decode(preds, group_tokens=True)
                     decoded_ys += self.tok.batch_decode(y, group_tokens=False)
                     xs += [x.detach().clone().cpu().numpy()]

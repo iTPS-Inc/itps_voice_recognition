@@ -98,6 +98,8 @@ from functools import lru_cache
 from collections import Counter 
 import wandb
 from tqdm.auto import tqdm
+from tqdm import tqdm
+tqdm.pandas()
 
 """# Data Preparation"""
 
@@ -107,7 +109,7 @@ def get_audio_length(s):
     return len(t[0]) / sr, sr
 
 def prepare_df(df, audio_length=10):
-    df[["audio_length", "sr"]] = df["filename"].apply(
+    df[["audio_length", "sr"]] = df["filename"].progress_apply(
         lambda x: pd.Series(get_audio_length(x))
     )
     print("Longest clip: ", df["audio_length"].max())
@@ -175,12 +177,27 @@ def get_dls(df: pd.DataFrame,
         dl_kwargs=dl_kwargs
     )
     return dls
+
+
+def write_csv(fname, columns, data):
+  if not os.path.exists(fname.parent):
+        os.makedirs(fname.parent, exist_ok=True)
+  with open(fname, 'w', newline='') as csvfile:
+      spamwriter = csv.writer(csvfile, delimiter=' ',
+                              quotechar='|', quoting=csv.QUOTE_MINIMAL)
+      spamwriter.writerow(columns)
+      spamwriter.writerows(data)
+  return fname
+
+
 def log_predictions(learn, dls, train: bool):
   caption = "Train predicions" if train else "Test predictions"
   if train:
-    logits, ys, acts = learn.get_preds(dl=dls.train, with_input=False, with_decoded=True)
+    logits, ys = learn.get_preds(dl=dls.train, with_input=False, with_decoded=False)
+    acts = logits.map(lambda x: torch.argmax(x, dim=-1).detach())
   else:
-    logits, ys, acts = learn.get_preds(dl=dls.valid, with_input=False, with_decoded=True)
+    logits, ys = learn.get_preds(dl=dls.valid, with_input=False, with_decoded=False)
+    acts = logits.map(lambda x: torch.argmax(x, dim=-1).detach())
   table_row = []
   csv_row = []
   for y,pred,logits in tqdm(zip(ys, acts, logits), total=len(ys)):
@@ -188,9 +205,10 @@ def log_predictions(learn, dls, train: bool):
     dec_pred = tok.decode(pred,group_tokens=True, skip_special_tokens=False, skip_unk=True)
     table_row.append([dec_y, dec_pred])
     csv_row.append([dec_y, dec_pred, logits])
-  wandb.log({caption: wandb.Table(columns=["ys","acts"], data=table_row)})
-  write_csv(Path(datapath)  / "csv" / wandb.run.name)
+  wandb.log({caption: wandb.Table(columns=["ys","preds"], data=table_row)})
+  write_csv(Path(datapath)  / "csv" / f"{LANG}"  / wandb.run.name, columns=["ys", "preds", "logits"], data=csv_row)
   return dec_y, dec_pred, logits
+
 
 def construct_augs(params) -> List[Union[None , Transform]]:
   augs = []
@@ -205,17 +223,6 @@ def construct_augs(params) -> List[Union[None , Transform]]:
     if time_mask: augs.append(TimeMaskAugment(p=0.2))
     augs.append(ToWave())
   return augs
-
-def write_csv(fname, columns, table):
-  if not os.path.exists(fname.parent):
-        os.makedirs(fname.parent, exist_ok=True)
-  with open(fname, 'w', newline='') as csvfile:
-      spamwriter = csv.writer(csvfile, delimiter=' ',
-                              quotechar='|', quoting=csv.QUOTE_MINIMAL)
-      spamwriter.writerow(columns)
-      spamwriter.writerows(table)
-  return fname
-
 """## Model"""
 
 class DropPreds(Callback):
@@ -495,7 +502,6 @@ paths = pd.Series(cv["train"]["path"])
 sentences = pd.Series(cv["train"]["sentence"])
 cv = pd.DataFrame({"filename": paths, "text": sentences })
 df = pd.concat([cv, df], ignore_index=True)
-
 
 
 # Commented out IPython magic to ensure Python compatibility.
