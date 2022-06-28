@@ -21,7 +21,7 @@ OUTPATH = (
 
 DATAROOT = os.environ.get("PREPROCESS_DATAROOT", str(Path.home() / ".fastdownload"))
 OUTPATH = Path(DATAROOT)/ "out" / "NICT_SPREDS.tar.gz"
-FORCE_DOWNLOAD = True
+FORCE_DOWNLOAD = False
 
 
 def _make_destination(p, fn, test):

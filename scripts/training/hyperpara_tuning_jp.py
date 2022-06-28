@@ -563,6 +563,7 @@ study = optuna.create_study("sqlite:///{}.db".format(storage),
                             load_if_exists=True)
 
 all_studies = optuna.get_all_study_summaries("sqlite:///{}.db".format(storage))
+# %% 
 study.optimize(objective, n_trials=10)
 trial = study.best_trial
 

@@ -471,10 +471,6 @@ def run(input_pars, modelpath, logpath):
   wandb.finish()
   return x
 
-ENGLISH_DATASETS
-
-JAPANESE_DATASETS
-
 LANG="en"
 if LANG =="jp":
   datasets = JAPANESE_DATASETS[1:]
@@ -581,6 +577,8 @@ study = optuna.create_study("sqlite:///{}.db".format(storage),
 # study.enqueue_trial(params)
 
 all_studies = optuna.get_all_study_summaries("sqlite:///{}.db".format(storage))
+
+# %%
 study.optimize(objective, n_trials=10)
 trial = study.best_trial
 
