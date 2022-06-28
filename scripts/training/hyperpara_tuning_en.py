@@ -202,24 +202,26 @@ def write_csv(fname, columns, data):
       spamwriter.writerows(data)
   return fname
 
-def log_predictions(learn, dls, train: bool):
-  caption = "Train predicions" if train else "Test predictions"
+def log_predictions(learn, dls):
+  caption = "Predictions"
   tfms = TfmdLists(df, AudioBatchTransform())
-  if train:
-    logits, ys, acts = learn.get_preds(dl=dls.train, with_input=False, with_decoded=True)
-  else:
-    logits, ys, acts = learn.get_preds(dl=dls.valid, with_input=False, with_decoded=True)
+  dl = dls.test_dl(tfms,
+    shuffle=False,
+    val_res=df["audio_length"],
+    after_item=dls.after_item,
+    before_batch=dls.before_batch,
+   )
+  logits, ys = learn.get_preds(dl=dl, with_input=False, with_decoded=False)
+  acts = logits.map(lambda x: torch.argmax(x, dim=-1).detach())
   table_row = []
   csv_row = []
-  for y,pred,logits in tqdm(zip(ys, acts, logits), total=len(ys)):
+  for y,pred,logits,true_y in tqdm(zip(ys, acts, logits, df["text"].to_list()), total=len(ys)):
     dec_y = tok.decode(y,group_tokens=False, skip_special_tokens=False, skip_unk=True)
     dec_pred = tok.decode(pred,group_tokens=True, skip_special_tokens=False, skip_unk=True)
-    table_row.append([dec_y, dec_pred])
-    csv_row.append([dec_y, dec_pred, logits])
-  wandb.log({caption: wandb.Table(columns=["ys","acts"], data=table_row)})
-  write_csv(Path(datapath)  / "csv" / wandb.run.name,
-  columns=["ys", "preds", "logits"],
-  data=csv_row)
+    table_row.append([true_y, dec_y, dec_pred])
+    csv_row.append([true_y, dec_pred, dec_y, logits])
+  wandb.log({caption: wandb.Table(columns=["true_y", "tok_y","pred"], data=table_row)})
+  write_csv(Path(datapath)  / "csv" / f"{LANG}"  / (wandb.run.name+".csv"), columns=["true_y", "pred", "tok_y", "logits"], data=csv_row)
   return dec_y, dec_pred, logits
 
 """## Model"""
@@ -319,7 +321,7 @@ class TransformersLearnerOwnLoss(Learner):
 def get_logging_cbs(framework, valid_dl=None,params=None, **kwargs):
     if framework.lower() =="wandb":
         wandb.init(project="itps-gpu-real", config=params)
-        log_cbs =  [ WandbCallback(log="all", log_model=True, valid_dl=valid_dl, **kwargs) ]
+        log_cbs =  [ WandbCallback(log="all", log_preds=False, log_model=True, **kwargs) ]
     elif framework.lower() == "neptune":
         neptune.init("jjs/itps-language-model")
         log_cbs = [
@@ -462,13 +464,15 @@ def run(input_pars, modelpath, logpath):
       metrics=get_metrics(tok),
       modelpath=model_out_path,
       with_attentions=with_attentions,
-      cbs=[DropPreds(), SaveModelCallback(comp=np.less, monitor=MONITOR,min_delta=0.001, fname=arch.replace("/", "_")), ],
+      cbs=[
+        DropPreds(),
+        SaveModelCallback(comp=np.less, monitor=MONITOR,min_delta=0.001, fname=arch.replace("/", "_")), 
+       ],
       log_cbs=log_cbs,
   )
   learn.fit(100, lr=lr, cbs=fit_cbs)
   x = learn.validate()
-  log_predictions(learn, dls, "train")
-  log_predictions(learn, dls, "test")
+  log_predictions(learn, dls)
   wandb.finish()
   return x
 
@@ -540,7 +544,6 @@ else:
   )
 
 modelpath = Path(modelpath) / f"audio_{LANG}"
-
 logpath = Path(logpath) / f"audio_{LANG}"
 
 storage_fname = f"opt_study_{LANG}"
@@ -578,7 +581,6 @@ study = optuna.create_study("sqlite:///{}.db".format(storage),
 # study.enqueue_trial(params)
 
 all_studies = optuna.get_all_study_summaries("sqlite:///{}.db".format(storage))
-
 # %%
 study.optimize(objective, n_trials=10)
 trial = study.best_trial

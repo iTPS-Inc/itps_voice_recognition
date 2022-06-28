@@ -54,6 +54,7 @@ logpath = os.environ.get("AUDIOLOGDIR", f"/home/gdep-guest33/workarea/logs/voice
 
 # Imports
 """
+import csv
 import os 
 # os.chdir("/content/itps_voice_recognition/src/")
 
@@ -98,7 +99,6 @@ from functools import lru_cache
 from collections import Counter 
 import wandb
 from tqdm.auto import tqdm
-from tqdm import tqdm
 tqdm.pandas()
 
 """# Data Preparation"""
@@ -178,6 +178,19 @@ def get_dls(df: pd.DataFrame,
     )
     return dls
 
+def construct_augs(params) -> List[Union[None , Transform]]:
+  augs = []
+  random_reverb = params.pop("RandomReverb")
+  freq_mask = params.pop("FreqMask")
+  time_mask = params.pop("TimeMask")
+  if random_reverb:
+    augs += [RandomReverbration(p=0.1)]
+  if freq_mask or time_mask:
+    augs.append(ToSpec())
+    if freq_mask: augs.append(FrequencyMaskAugment(p=0.2))
+    if time_mask: augs.append(TimeMaskAugment(p=0.2))
+    augs.append(ToWave())
+  return augs
 
 def write_csv(fname, columns, data):
   if not os.path.exists(fname.parent):
@@ -211,19 +224,6 @@ def log_predictions(learn, dls):
   write_csv(Path(datapath)  / "csv" / f"{LANG}"  / (wandb.run.name+".csv"), columns=["true_y", "pred", "tok_y", "logits"], data=csv_row)
   return dec_y, dec_pred, logits
 
-def construct_augs(params) -> List[Union[None , Transform]]:
-  augs = []
-  random_reverb = params.pop("RandomReverb")
-  freq_mask = params.pop("FreqMask")
-  time_mask = params.pop("TimeMask")
-  if random_reverb:
-    augs += [RandomReverbration(p=0.1)]
-  if freq_mask or time_mask:
-    augs.append(ToSpec())
-    if freq_mask: augs.append(FrequencyMaskAugment(p=0.2))
-    if time_mask: augs.append(TimeMaskAugment(p=0.2))
-    augs.append(ToWave())
-  return augs
 """## Model"""
 
 class DropPreds(Callback):
@@ -321,7 +321,7 @@ class TransformersLearnerOwnLoss(Learner):
 def get_logging_cbs(framework, valid_dl=None,params=None, **kwargs):
     if framework.lower() =="wandb":
         wandb.init(project="itps-gpu-real", config=params)
-        log_cbs =  [ WandbCallback(log="all", log_model=True, valid_dl=valid_dl, **kwargs) ]
+        log_cbs =  [ WandbCallback(log="all", log_preds=False, log_model=True, **kwargs) ]
     elif framework.lower() == "neptune":
         neptune.init("jjs/itps-language-model")
         log_cbs = [
@@ -588,7 +588,7 @@ def quick_get_run(input_pars, modelpath, logpath):
     ParamScheduler({"lr": SchedExp(start=lr, end=lr/10)}),
     SeePreds(arch, tok, n_iters=500, log_dir=logdir, neptune=(LOGGING_FRAMEWORK.lower() == "neptune")),
     TensorBoardCallback(log_dir=logdir, trace_model=False, log_preds=False),
-    EarlyStoppingCallback(comp=np.less, monitor=MONITOR,min_delta=0.01, patience=2),
+    EarlyStoppingCallback(comp=np.less, monitor=MONITOR,min_delta=0, patience=2),
   ]
 
   model = get_model(arch, tok, with_attentions=with_attentions, **params)
