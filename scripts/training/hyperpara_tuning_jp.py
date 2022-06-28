@@ -208,7 +208,7 @@ def log_predictions(learn, dls):
     table_row.append([dec_y, dec_pred, true_y])
     csv_row.append([dec_y, dec_pred, logits, true_y])
   wandb.log({caption: wandb.Table(columns=["ys","preds", "true_y"], data=table_row)})
-  write_csv(Path(datapath)  / "csv" / f"{LANG}"  / wandb.run.name, columns=["ys", "preds", "logits","true_y"], data=csv_row)
+  write_csv(Path(datapath)  / "csv" / f"{LANG}"  / wandb.run.name+".csv", columns=["ys", "preds", "logits","true_y"], data=csv_row)
   return dec_y, dec_pred, logits
 
 def construct_augs(params) -> List[Union[None , Transform]]:
