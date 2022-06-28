@@ -70,7 +70,7 @@ class ENTransformersTokenizer(Transform):
             **kwargs,
         )
         if skip_unk:
-            outstr = bos_regex.sub(repl="", string=self.tokenizer.unk_token)
+            outstr = bos_regex.sub(repl="", string=outstr)
         return outstr
 
 
@@ -143,7 +143,7 @@ class JPTransformersTokenizer(Transform):
             **kwargs,
         )
         if skip_unk:
-            outstr = bos_regex.sub(repl="", string=self.tokenizer.unk_token)
+            outstr = bos_regex.sub(repl="", string=outstr)
         return TitledStr(outstr)
 
     @staticmethod
