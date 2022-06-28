@@ -204,6 +204,7 @@ def write_csv(fname, columns, data):
 
 def log_predictions(learn, dls, train: bool):
   caption = "Train predicions" if train else "Test predictions"
+  tfms = TfmdLists(df, AudioBatchTransform())
   if train:
     logits, ys, acts = learn.get_preds(dl=dls.train, with_input=False, with_decoded=True)
   else:

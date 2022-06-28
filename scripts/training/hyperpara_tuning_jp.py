@@ -189,26 +189,27 @@ def write_csv(fname, columns, data):
       spamwriter.writerows(data)
   return fname
 
-
-def log_predictions(learn, dls, train: bool):
-  caption = "Train predicions" if train else "Test predictions"
-  if train:
-    logits, ys = learn.get_preds(dl=dls.train, with_input=False, with_decoded=False)
-    acts = logits.map(lambda x: torch.argmax(x, dim=-1).detach())
-  else:
-    logits, ys = learn.get_preds(dl=dls.valid, with_input=False, with_decoded=False)
-    acts = logits.map(lambda x: torch.argmax(x, dim=-1).detach())
+def log_predictions(learn, dls):
+  caption = "Predictions"
+  tfms = TfmdLists(df, AudioBatchTransform())
+  dl = dls.test_dl(tfms,
+    shuffle=False,
+    val_res=df["audio_length"],
+    after_item=dls.after_item,
+    before_batch=dls.before_batch,
+   )
+  logits, ys = learn.get_preds(dl=dl, with_input=False, with_decoded=False)
+  acts = logits.map(lambda x: torch.argmax(x, dim=-1).detach())
   table_row = []
   csv_row = []
-  for y,pred,logits in tqdm(zip(ys, acts, logits), total=len(ys)):
+  for y,pred,logits,true_y in tqdm(zip(ys, acts, logits, df["text"].to_list()), total=len(ys)):
     dec_y = tok.decode(y,group_tokens=False, skip_special_tokens=False, skip_unk=True)
     dec_pred = tok.decode(pred,group_tokens=True, skip_special_tokens=False, skip_unk=True)
-    table_row.append([dec_y, dec_pred])
-    csv_row.append([dec_y, dec_pred, logits])
-  wandb.log({caption: wandb.Table(columns=["ys","preds"], data=table_row)})
-  write_csv(Path(datapath)  / "csv" / f"{LANG}"  / wandb.run.name, columns=["ys", "preds", "logits"], data=csv_row)
+    table_row.append([dec_y, dec_pred, true_y])
+    csv_row.append([dec_y, dec_pred, logits, true_y])
+  wandb.log({caption: wandb.Table(columns=["ys","preds", "true_y"], data=table_row)})
+  write_csv(Path(datapath)  / "csv" / f"{LANG}"  / wandb.run.name, columns=["ys", "preds", "logits","true_y"], data=csv_row)
   return dec_y, dec_pred, logits
-
 
 def construct_augs(params) -> List[Union[None , Transform]]:
   augs = []
