@@ -11,3 +11,4 @@
 /scripts/data/
 /notebooks/assets/
 /notebooks/models/
+*.wav

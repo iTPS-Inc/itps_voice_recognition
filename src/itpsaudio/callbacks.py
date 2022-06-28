@@ -9,6 +9,8 @@ from fastai.data.all import store_attr, to_float, join_path_file
 
 import os
 
+import wandb
+
 
 class MixedPrecisionTransformers(MixedPrecision):
     def after_pred(self):
@@ -17,69 +19,71 @@ class MixedPrecisionTransformers(MixedPrecision):
 
 
 class SeePreds(TensorBoardBaseCallback):
-    order=51
+    order = 51
+
     def __init__(
-        self, base_model_name, tok, n_iters=50, log_dir=None, neptune=False, n_vals=6
+        self,
+        base_model_name,
+        tok,
+        n_iters=50,
+        log_dir=None,
+        neptune=False,
+        n_vals=6,
+        wandb=True,
     ):
         super().__init__()
         store_attr()
 
     def before_fit(self):
         self._setup_writer()
-        if self.neptune:
-            self.experiment = neptune.get_experiment()
 
     def get_valid_preds(self):
         decoded_preds = []
         decoded_ys = []
+        xs = []
         for i, b in enumerate(iter(self.dls.valid)):
-            if len(b) == 4:
-                x, y = b[0], b[-1]
-            elif len(b) == 2:
-                x, y = b[0], b[-1]
-            else:
-                assert False, "Don't know how to See these preds"
-
-            if i < self.n_vals:
-                with torch.no_grad():
+            x, y = b[0], b[-1]
+            with torch.no_grad():
+                if i < self.n_vals:
                     preds = np.argmax(self.model(x).logits.detach().cpu(), axis=-1)
-                decoded_preds += self.tok.batch_decode(preds, group_tokens=True)
-                decoded_ys += self.tok.batch_decode(y, group_tokens=False)
-            else:
-                break
+                    decoded_preds += self.tok.batch_decode(preds, group_tokens=True)
+                    decoded_ys += self.tok.batch_decode(y, group_tokens=False)
+                    xs += [x.detach().clone().cpu().numpy()]
+                else:
+                    break
         return (
             decoded_preds[:200],
             decoded_ys[:200],
+            xs,
         )  # If the predictions are too long, neptune bugs
 
-    def _log_preds_to_path(self, p, y, path):
-        self.writer.add_text(
-            f"{self.base_model_name}/prediction/{path}",
-            f"Targets:{y}\nPredictions:{p}",
-            self.iter,
-        )
-        if self.neptune:
-            self.experiment.log_text(
-                f"text_predictions/{path}", f"{self.iter}: Targ: {y}"
+    @staticmethod
+    def _write_wandb_audio(x, y_pred, y_true, caption):
+        if not isinstance(x, list):
+            x = [x_ for x_ in x]
+        tab = []
+        for i, (x, y, pred) in enumerate(zip(x, y_true, y_pred)):
+            wandb.log(
+                {
+                    f"{caption} {i}: ": wandb.Audio(
+                        x,
+                        caption="True: {}<br>Pred: {}".format(y, pred),
+                        sample_rate=16000,
+                    )
+                }
             )
-            self.experiment.log_text(
-                f"text_predictions/{path}", f"{self.iter}: Pred: {p}"
-            )
+            tab += [[y, pred]]
+        wandb.log({caption: wandb.Table(columns=["y", "preds"], data=tab)})
 
     def after_pred(self):
         if self.iter % self.n_iters == 0:
             preds = np.argmax(self.pred.detach().cpu(), axis=-1)
             decoded_preds = self.tok.batch_decode(preds, group_tokens=True)
             decoded_ys = self.tok.batch_decode(self.yb[0], group_tokens=False)
-            dec_preds_valid, dec_ys_valid = self.get_valid_preds()
-            for x in self.xb[0]:
-                self.writer.add_audio(f"{self.iter}: Audio", x, self.iter, 16000)
-
-            for p, y in zip(decoded_preds, decoded_ys):
-                self._log_preds_to_path(p, y, "random")
-
-            for i, (p, y) in enumerate(zip(dec_preds_valid, dec_ys_valid)):
-                self._log_preds_to_path(p, y, f"valid_{i}")
+            xs = self.xb[0].detach().clone().cpu().numpy()
+            self._write_wandb_audio(xs, decoded_preds, decoded_ys, "random")
+            dec_preds_valid, dec_ys_valid, xs_valid = self.get_valid_preds()
+            self._write_wandb_audio(xs, dec_preds_valid, dec_ys_valid, "valid")
 
 
 class NeptuneSaveModel(Callback):
@@ -105,7 +109,9 @@ class NeptuneSaveModel(Callback):
                     f"Could find {_file}, thus couldn't upload it to Neptune.",
                 )
 
+
 class DropPreds(Callback):
     order = 50
+
     def after_pred(self):
         self.learn.pred = self.pred.logits
