@@ -37,6 +37,10 @@ class SeePreds(TensorBoardBaseCallback):
     def before_fit(self):
         self._setup_writer()
 
+#             table = wandb.Table(data=data, columns=["scores"])
+# wandb.log({'my_histogram': wandb.plot.histogram(table, "scores",
+#  	  title="Prediction Score Distribution")})
+
     def get_valid_preds(self):
         decoded_preds = []
         decoded_ys = []
@@ -46,8 +50,6 @@ class SeePreds(TensorBoardBaseCallback):
             with torch.no_grad():
                 if i < self.n_vals:
                     logits = self.model(x).logits.detach().cpu()
-                    # TODO
-                    # wandb.log("logits":, wandb.Histogram(logits))
                     preds = np.argmax(logits, axis=-1)
                     decoded_preds += self.tok.batch_decode(preds, group_tokens=True)
                     decoded_ys += self.tok.batch_decode(y, group_tokens=False)

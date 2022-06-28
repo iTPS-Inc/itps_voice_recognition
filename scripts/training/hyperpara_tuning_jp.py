@@ -319,7 +319,7 @@ class TransformersLearnerOwnLoss(Learner):
 
 def get_logging_cbs(framework, valid_dl=None,params=None, **kwargs):
     if framework.lower() =="wandb":
-        wandb.init(project="itps-gpu", config=params)
+        wandb.init(project="itps-gpu-real", config=params)
         log_cbs =  [ WandbCallback(log="all", log_model=True, valid_dl=valid_dl, **kwargs) ]
     elif framework.lower() == "neptune":
         neptune.init("jjs/itps-language-model")
@@ -376,12 +376,12 @@ def trial_suggestions(trial):
     arch = trial.suggest_categorical("arch", archlist) 
     freeze_feat = trial.suggest_categorical("freeze_feat",    [True])
 
-    feat_proj_dropout=trial.suggest_float("feat_proj_dropout", low=0, high=0.3)
-    hidden_dropout=trial.suggest_float("hidden_dropout",       low=0, high=0.3)
-    attention_dropout=trial.suggest_float("attention_dropout", low=0, high=0.3)
-    layerdrop=trial.suggest_float("layerdrop",                 low=0, high=0.3)
-    mask_time_prob=trial.suggest_float("mask_time_prob",       low=0, high=0.3)
-    mask_feature_prob=trial.suggest_float("mask_feature_prob", low=0, high=0.3)
+    feat_proj_dropout=trial.suggest_float("feat_proj_dropout", low=0.03, high=0.2)
+    hidden_dropout=trial.suggest_float("hidden_dropout",       low=0.03, high=0.2)
+    attention_dropout=trial.suggest_float("attention_dropout", low=0.03, high=0.2)
+    layerdrop=trial.suggest_float("layerdrop",                 low=0.03, high=0.2)
+    mask_time_prob=trial.suggest_float("mask_time_prob",       low=0.03, high=0.2)
+    mask_feature_prob=trial.suggest_float("mask_feature_prob", low=0.03, high=0.2)
     
     # Augmentations
     random_reverb = trial.suggest_categorical("RandomReverb", [True, False])
@@ -474,10 +474,6 @@ def run(input_pars, modelpath, logpath):
   log_predictions(learn, dls, "test")
   wandb.finish()
   return x
-
-ENGLISH_DATASETS
-
-JAPANESE_DATASETS
 
 LANG="jp"
 if LANG =="jp":

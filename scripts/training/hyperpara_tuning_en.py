@@ -317,7 +317,7 @@ class TransformersLearnerOwnLoss(Learner):
 
 def get_logging_cbs(framework, valid_dl=None,params=None, **kwargs):
     if framework.lower() =="wandb":
-        wandb.init(project="itps-gpu", config=params)
+        wandb.init(project="itps-gpu-real", config=params)
         log_cbs =  [ WandbCallback(log="all", log_model=True, valid_dl=valid_dl, **kwargs) ]
     elif framework.lower() == "neptune":
         neptune.init("jjs/itps-language-model")
@@ -374,12 +374,12 @@ def trial_suggestions(trial):
     arch = trial.suggest_categorical("arch", archlist) 
     freeze_feat = trial.suggest_categorical("freeze_feat",    [True])
 
-    feat_proj_dropout=trial.suggest_float("feat_proj_dropout", low=0, high=0.2)
-    hidden_dropout=trial.suggest_float("hidden_dropout",       low=0, high=0.2)
-    attention_dropout=trial.suggest_float("attention_dropout", low=0, high=0.2)
-    layerdrop=trial.suggest_float("layerdrop",                 low=0, high=0.2)
-    mask_time_prob=trial.suggest_float("mask_time_prob",       low=0, high=0.2)
-    mask_feature_prob=trial.suggest_float("mask_feature_prob", low=0, high=0.2)
+    feat_proj_dropout=trial.suggest_float("feat_proj_dropout", low=0.03, high=0.2)
+    hidden_dropout=trial.suggest_float("hidden_dropout",       low=0.03, high=0.2)
+    attention_dropout=trial.suggest_float("attention_dropout", low=0.03, high=0.2)
+    layerdrop=trial.suggest_float("layerdrop",                 low=0.03, high=0.2)
+    mask_time_prob=trial.suggest_float("mask_time_prob",       low=0.03, high=0.2)
+    mask_feature_prob=trial.suggest_float("mask_feature_prob", low=0.03, high=0.2)
     
     # Augmentations
     random_reverb = trial.suggest_categorical("RandomReverb", [True, False])
@@ -561,6 +561,24 @@ study = optuna.create_study("sqlite:///{}.db".format(storage),
                             direction="minimize",
                             study_name=STUDY_NAME,
                             load_if_exists=True)
+
+# Snippet for trying hyperparamters
+# params = {'with_attentions': False,
+# 'loss_func': 'ctc_sum',
+# 'bs': 8,
+# 'arch': 'facebook/hubert-large-ll60k',
+# 'freeze_feat': True,
+# 'feat_proj_dropout': 0.10,
+# 'hidden_dropout': 0.10,
+# 'attention_dropout': 0.10,
+# 'layerdrop': 0.10,
+# 'mask_time_prob': 0.10,
+# 'mask_feature_prob': 0.10,
+# 'RandomReverb': True,
+# 'FreqMask': False,
+# 'TimeMask': False,
+# 'lr': 1e-4}
+# study.enqueue_trial(params)
 
 all_studies = optuna.get_all_study_summaries("sqlite:///{}.db".format(storage))
 study.optimize(objective, n_trials=10)
