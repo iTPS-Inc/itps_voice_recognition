@@ -205,10 +205,10 @@ def log_predictions(learn, dls):
   for y,pred,logits,true_y in tqdm(zip(ys, acts, logits, df["text"].to_list()), total=len(ys)):
     dec_y = tok.decode(y,group_tokens=False, skip_special_tokens=False, skip_unk=True)
     dec_pred = tok.decode(pred,group_tokens=True, skip_special_tokens=False, skip_unk=True)
-    table_row.append([dec_y, dec_pred, true_y])
-    csv_row.append([dec_y, dec_pred, logits, true_y])
-  wandb.log({caption: wandb.Table(columns=["ys","preds", "true_y"], data=table_row)})
-  write_csv(Path(datapath)  / "csv" / f"{LANG}"  / (wandb.run.name+".csv"), columns=["ys", "preds", "logits","true_y"], data=csv_row)
+    table_row.append([true_y, dec_y, dec_pred])
+    csv_row.append([true_y, dec_pred, dec_y, logits])
+  wandb.log({caption: wandb.Table(columns=["true_y", "tok_y","pred"], data=table_row)})
+  write_csv(Path(datapath)  / "csv" / f"{LANG}"  / (wandb.run.name+".csv"), columns=["true_y", "pred", "tok_y", "logits"], data=csv_row)
   return dec_y, dec_pred, logits
 
 def construct_augs(params) -> List[Union[None , Transform]]:
