@@ -10,6 +10,17 @@ Original file is located at
 
 # Setup
 """
+import os 
+
+datapath = os.environ.get("DATADIR", f"/content/drive/MyDrive/data/")
+datapath = os.environ.get("DATADIR", f"/home/gdep-guest33/workarea/data/voice/")
+
+modelpath = os.environ.get("AUDIOMODELDIR", f"/content/drive/MyDrive/data/models/")
+modelpath = os.environ.get("AUDIOMODELDIR", f"/home/gdep-guest33/workarea/models/voice/")
+
+logpath = os.environ.get("AUDIOLOGDIR", f"/content/drive/MyDrive/data/logs/")
+logpath = os.environ.get("AUDIOLOGDIR", f"/home/gdep-guest33/workarea/logs/voice/")
+
 
 # from google.colab import drive
 # drive.mount('/content/drive')
@@ -44,6 +55,7 @@ Original file is located at
 
 # Imports
 """
+import csv
 import os 
 # os.chdir("/content/itps_voice_recognition/src/")
 
@@ -87,6 +99,7 @@ import datetime
 from functools import lru_cache
 from collections import Counter 
 import wandb
+from tqdm.auto import tqdm
 
 """# Data Preparation"""
 
@@ -177,6 +190,33 @@ def construct_augs(params) -> List[Union[None , Transform]]:
     if time_mask: augs.append(TimeMaskAugment(p=0.2))
     augs.append(ToWave())
   return augs
+
+def write_csv(fname, columns, table):
+  if not os.path.exists(fname.parent):
+        os.makedirs(fname.parent, exist_ok=True)
+  with open(fname, 'w', newline='') as csvfile:
+      spamwriter = csv.writer(csvfile, delimiter=' ',
+                              quotechar='|', quoting=csv.QUOTE_MINIMAL)
+      spamwriter.writerow(columns)
+      spamwriter.writerows(table)
+  return fname
+
+def log_predictions(learn, dls, train: bool):
+  caption = "Train predicions" if train else "Test predictions"
+  if train:
+    logits, ys, acts = learn.get_preds(dl=dls.train, with_input=False, with_decoded=True)
+  else:
+    logits, ys, acts = learn.get_preds(dl=dls.valid, with_input=False, with_decoded=True)
+  table_row = []
+  csv_row = []
+  for y,pred,logits in tqdm(zip(ys, acts, logits), total=len(ys)):
+    dec_y = tok.decode(y,group_tokens=False, skip_special_tokens=False, skip_unk=True)
+    dec_pred = tok.decode(pred,group_tokens=True, skip_special_tokens=False, skip_unk=True)
+    table_row.append([dec_y, dec_pred])
+    csv_row.append([dec_y, dec_pred, logits])
+  wandb.log({caption: wandb.Table(columns=["ys","acts"], data=table_row)})
+  write_csv(Path(datapath)  / "csv" / wandb.run.name)
+  return dec_y, dec_pred, logits
 
 """## Model"""
 
@@ -343,7 +383,8 @@ def trial_suggestions(trial):
     freq_mask     = trial.suggest_categorical("FreqMask",     [False])
     time_mask     = trial.suggest_categorical("TimeMask",     [False])
     # lr
-    lr = trial.suggest_float("lr", low=1e-5, high=1e-3)
+    lr = trial.suggest_float("lr", low=3e-4, high=1e-3)
+
 
 def get_loss_func(loss_func, num_classes, **kwargs):
   if loss_func == "ctc_mean":
@@ -421,9 +462,9 @@ def run(input_pars, modelpath, logpath):
       log_cbs=log_cbs,
   )
   learn.fit(100, lr=lr, cbs=fit_cbs)
-  learn.unfreeze()
-  learn.fit(100, lr=lr/10, cbs=fit_cbs)
   x = learn.validate()
+  log_predictions(learn, dls, "train")
+  log_predictions(learn, dls, "test")
   wandb.finish()
   return x
 
@@ -437,23 +478,23 @@ if LANG =="jp":
 if LANG =="en":
   datasets = [
     # DatasetConfig(name='itps', split='train', lang='en', kind=None),
-    DatasetConfig(name='librispeech', split='dev', lang=None, kind='clean'),
+    DatasetConfig(name='librispeech', split='train', lang=None, kind='clean'),
     DatasetConfig(name='ljl', split='train', lang=None, kind=None),
     DatasetConfig(name='nict_spreds', split='train', lang='en', kind=None)
 ]
 MONITOR="cer"
 NUM_EPOCHS=20
 AUDIO_LENGTH=15
-DSET_NAMES = "-".join(["cvjp"] + [d.name[:4]+ "-" + d.split[:4] for d in datasets])
+DSET_NAMES = "-".join([f"cv{LANG}"] + [d.name[:4]+ "-" + d.split[:4] for d in datasets])
 print(DSET_NAMES)
 
 p, df = get_datasets(datasets, base="~/.datasets")
 
-if LANG == "jp":
-  cv = load_dataset("common_voice", "")
-  cv = pd.DataFrame(cv["train"])[["audio", "sentence"]]
-  cv = cv.rename({"audio": "filename", "sentence": "text"}, axis=1)
-  df = pd.concat([cv, df], ignore_index=True)
+cv = load_dataset("common_voice", f"{'ja' if LANG == 'jp' else 'en'}")
+paths = pd.Series(cv["train"]["path"])
+sentences = pd.Series(cv["train"]["sentence"])
+cv = pd.DataFrame({"filename": paths, "text": sentences })
+df = pd.concat([cv, df], ignore_index=True)
 
 # Commented out IPython magic to ensure Python compatibility.
 # %%capture
@@ -498,17 +539,11 @@ else:
       )
   )
 
-modelpath = os.environ.get("AUDIOMODELDIR", f"/content/drive/MyDrive/data/models/")
-modelpath = os.environ.get("AUDIOMODELDIR", f"/home/gdep-guest33/workarea/models/voice/")
-
 modelpath = Path(modelpath) / f"audio_{LANG}"
-
-logpath = os.environ.get("AUDIOLOGDIR", f"/content/drive/MyDrive/data/logs/")
-logpath = os.environ.get("AUDIOLOGDIR", f"/home/gdep-guest33/workarea/logs/voice/")
 
 logpath = Path(logpath) / f"audio_{LANG}"
 
-storage_fname = f"testing_optuna_study_{LANG}_test_db"
+storage_fname = f"opt_study_{LANG}"
 storage=f"{modelpath / storage_fname}"
 
 STUDY_NAME = f"{LANG}_study"
