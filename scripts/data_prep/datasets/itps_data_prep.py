@@ -13,7 +13,6 @@ URL = "https://www.dropbox.com/s/qzvrx0c3rrmxxl3/annotation_data_initial.tar.gz?
 d = FastDownload()
 DATAROOT = d.get(URL, force=False)
 
-
 audio_files = get_files(DATAROOT, extensions=[".mp4"])
 if os.path.exists(DATAROOT / "annotation_data.csv"):
     os.unlink(DATAROOT / "annotation_data.csv")
@@ -37,6 +36,7 @@ def convert_to_wav(input_file, output_file):
             "-ac",
             "1",
             f"{output_file}",
+            "-y"
         ]
     )
     return output_file
@@ -95,30 +95,37 @@ df[["st", "text", "et"]] = df["Transcription"].str.extract(r"(\[.*\])(.*)(\[.*\]
 df["st"] = df["st"].str.extract(r"(\[[\d\.:]+\])(\[.*\])*")[0]
 
 
-def convert_time(time):
+def convert_time(time, start):
     # 61:32.117
-    if len(time) == 9:
+    if len(time) == 9 or len(time)==10:
         minutes = int(time[:2])
-        secs = time[3:]
+        secs = int(time[3:5])
+        if start:
+            if secs > 1:
+                secs -= 1
+        else: secs += 1
+        if secs == 60:
+            minutes += 1
+            secs = 0
+
         hours, mins = minutes // 60, minutes % 60
-        return f"{hours}:{mins}:{secs}"
+        return f"{hours:02d}:{mins:02d}:{secs:02d}.000"
     elif len(time) == 11:
         return time
 
 
 def cut_out_part_ffmpeg(inp, st, end, out):
     st, end = st[1:-1], end[1:-1]
-    st, end = convert_time(st), convert_time(end)
-
-    subprocess.run(
+    st_new, end_new = convert_time(st, start=True), convert_time(end, start=False)
+    x = subprocess.run(
         [
             "ffmpeg",
             "-i",
             f"{inp}",
             "-ss",
-            f"{st}",
+            f"{st_new}",
             "-to",
-            f"{end}",
+            f"{end_new}",
             "-vn",
             "-acodec",
             "pcm_s16le",
@@ -130,7 +137,8 @@ def cut_out_part_ffmpeg(inp, st, end, out):
             "-y",
         ]
     )
-    print("Return code: x")
+    if not x.returncode == 0:
+        print(st, end, st_new, end_new)
     return x
 
 # %%
@@ -191,9 +199,8 @@ df_out = df[
 ].copy()
 
 curdir = os.getcwd()
-os.chdir(DATAROOT.parent)
+os.chdir(outdir.parent)
 df_out.to_csv(outdir / "df.csv")
 subprocess.run(["zip", "-r", f"annotation_data.zip", f"annotation_data_out"])
 os.chdir(curdir)
 
-# %%
