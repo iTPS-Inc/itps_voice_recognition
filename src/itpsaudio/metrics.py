@@ -32,8 +32,8 @@ class WER(Metric):
 
   @property
   def value(self):
-      cer = jiwer.wer(self.pred_strs, self.label_strs)
-      return cer
+      wer = jiwer.wer(self.pred_strs, self.label_strs)
+      return wer
 
 class CER(Metric):
   def __init__(self, tok):
@@ -50,7 +50,7 @@ class CER(Metric):
       labels = learn.yb[-1].detach().cpu().numpy()
       pred_ids = np.argmax(pred_logits.detach().cpu().numpy(), axis=-1)
       pred_str = self.tok.batch_decode(
-          pred_ids, group_tokens=False, skip_special_tokens=False
+          pred_ids, group_tokens=True, skip_special_tokens=False
       )
       label_str = self.tok.batch_decode(
           labels, group_tokens=False, skip_special_tokens=False

@@ -15,6 +15,8 @@ KATA = (
 )
 
 
+bos_regex=re.compile("^(\[UNK\])+")
+
 class ENTransformersTokenizer(Transform):
     def __init__(self, tok=None):
         self.tokenizer = tok
@@ -53,7 +55,7 @@ class ENTransformersTokenizer(Transform):
             ]
             if skip_unk:
                 decoded = [
-                    outstr.lstrip(self.tokenizer.unk_token) for outstr in decoded
+                    bos_regex.sub(repl="", string=outstr) for outstr in decoded
                 ]
             return decoded
         raise Exception("xs should be a two dimensional vector if using batch_decode")
@@ -68,7 +70,7 @@ class ENTransformersTokenizer(Transform):
             **kwargs,
         )
         if skip_unk:
-            outstr = outstr.lstrip(self.tokenizer.unk_token)
+            outstr = bos_regex.sub(repl="", string=self.tokenizer.unk_token)
         return outstr
 
 
@@ -127,7 +129,7 @@ class JPTransformersTokenizer(Transform):
             ]
             if skip_unk:
                 decoded = [
-                    outstr.lstrip(self.tokenizer.unk_token)
+                    bos_regex.sub(repl="", string=outstr)
                     for outstr in decoded
                 ]
             return decoded
@@ -141,7 +143,7 @@ class JPTransformersTokenizer(Transform):
             **kwargs,
         )
         if skip_unk:
-            outstr = outstr.lstrip(self.tokenizer.unk_token)
+            outstr = bos_regex.sub(repl="", string=self.tokenizer.unk_token)
         return TitledStr(outstr)
 
     @staticmethod
