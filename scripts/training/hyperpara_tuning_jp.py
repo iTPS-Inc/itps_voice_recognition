@@ -391,6 +391,7 @@ def trial_suggestions(trial):
     # lr
     lr = trial.suggest_float("lr", low=3e-5, high=1e-3)
 
+
 def get_loss_func(loss_func, num_classes, **kwargs):
   if loss_func == "ctc_mean":
     return CTCLoss(num_classes, reduction="mean", **kwargs)
@@ -499,8 +500,6 @@ sentences = pd.Series(cv["train"]["sentence"])
 cv = pd.DataFrame({"filename": paths, "text": sentences })
 df = pd.concat([cv, df], ignore_index=True)
 
-
-# Commented out IPython magic to ensure Python compatibility.
 # %%capture
 # %%bash
 # if [ ! -f installed_mecab ]; then 
@@ -562,6 +561,25 @@ study = optuna.create_study("sqlite:///{}.db".format(storage),
                             study_name=STUDY_NAME,
                             load_if_exists=True)
 
+
+# Snippet for trying hyperparamters
+# params = {'with_attentions': False,
+# 'loss_func': 'ctc_sum',
+# 'bs': 8,
+# 'arch': 'facebook/hubert-large-ll60k',
+# 'freeze_feat': True,
+# 'feat_proj_dropout': 0.10,
+# 'hidden_dropout': 0.10,
+# 'attention_dropout': 0.10,
+# 'layerdrop': 0.10,
+# 'mask_time_prob': 0.10,
+# 'mask_feature_prob': 0.10,
+# 'RandomReverb': True,
+# 'FreqMask': False,
+# 'TimeMask': False,
+# 'lr': 1e-4}
+# study.enqueue_trial(params)
+
 all_studies = optuna.get_all_study_summaries("sqlite:///{}.db".format(storage))
 # %% 
 study.optimize(objective, n_trials=10)
@@ -588,7 +606,7 @@ def quick_get_run(input_pars, modelpath, logpath):
     ParamScheduler({"lr": SchedExp(start=lr, end=lr/10)}),
     SeePreds(arch, tok, n_iters=500, log_dir=logdir, neptune=(LOGGING_FRAMEWORK.lower() == "neptune")),
     TensorBoardCallback(log_dir=logdir, trace_model=False, log_preds=False),
-    EarlyStoppingCallback(comp=np.less, monitor=MONITOR,min_delta=0, patience=2),
+    EarlyStoppingCallback(comp=np.less, monitor=MONITOR,min_delta=0.01, patience=2),
   ]
 
   model = get_model(arch, tok, with_attentions=with_attentions, **params)
@@ -612,7 +630,7 @@ def quick_get_run(input_pars, modelpath, logpath):
       metrics=get_metrics(tok),
       modelpath=model_out_path,
       with_attentions=with_attentions,
-      cbs=[DropPreds(), ],
+      cbs=[DropPreds()],
       log_cbs=log_cbs,
   )
   return learn, dls
