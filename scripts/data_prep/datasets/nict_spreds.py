@@ -4,8 +4,10 @@ from pathlib import Path
 
 import pandas as pd
 from fastai.data.all import get_files, untar_data
+from fastdownload import FastDownload
 from fastai.data.transforms import RandomSplitter
 from tqdm import tqdm
+import torchaudio
 
 from dsets.helpers.helpers import make_tarfile, train_test_split
 
@@ -16,6 +18,10 @@ SPREDS_URL_ORIG = (
 OUTPATH = (
     "/home/jjs/.fastai/data/NICT_SPREDS.tar.gz"
 )
+
+DATAROOT = os.environ.get("PREPROCESS_DATAROOT", str(Path.home() / ".fastdownload"))
+OUTPATH = Path(DATAROOT)/ "out" / "NICT_SPREDS.tar.gz"
+FORCE_DOWNLOAD = True
 
 
 def _make_destination(p, fn, test):
@@ -78,8 +84,9 @@ def move_files_into_splits(df, p):
     )
     return df
 
-def get_nict_data(force_download=False):
-    p = untar_data(SPREDS_URL_ORIG, force_download=force_download)
+def get_nict_data(base, force_download=False):
+    d = FastDownload()
+    p = d.get(SPREDS_URL_ORIG, force=force_download)
     if os.path.exists(p / "doc"):
         shutil.rmtree(p / "doc")
     label_files = get_files(p, extensions=[".label"])
@@ -99,9 +106,10 @@ def get_frames_sr(f):
     no_frames = len(t.squeeze())
     return pd.Series([no_frames, sr])
 
-p, df = get_nict_data()
+p, df = get_nict_data("_")
 
 df[["no_frames", "sr"]] = df["filename"].apply(lambda x: get_frames_sr(p / x))
 df["audio_length"] = df["no_frames"] / df["sr"]
+
 df.to_csv(p / "metadata.csv")
 make_tarfile(OUTPATH, p)

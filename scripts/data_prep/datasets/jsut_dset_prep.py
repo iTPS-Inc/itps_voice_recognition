@@ -11,9 +11,9 @@ from fastdownload import FastDownload
 from dsets.helpers.helpers import make_tarfile, train_test_split
 
 JSUT_URL_ORIG = "https://www.dropbox.com/s/a2z6bklpaphiu1k/jsut_ver1.1.zip?dl=1"
-DATAROOT = os.environ.get("PREPROCESS_DATAROOT", str(Path.home() / ".fastai" / "data"))
-OUTPATH = Path(DATAROOT) / "jsut_ver1.1.tar.gz"
-FORCE_DOWNLOAD = False
+DATAROOT = os.environ.get("PREPROCESS_DATAROOT", str(Path.home() / ".fastdownload"))
+OUTPATH = Path(DATAROOT)/ "out" / "jsut_ver1.1.tar.gz"
+FORCE_DOWNLOAD = True
 
 
 def _get_info_file(fn):
@@ -40,7 +40,7 @@ def _get_info(text_files, kind="transcript_utf8", colname="text"):
 
 
 def get_jsut_data(base, force_download=True):
-    d = FastDownload(base=str(base))
+    d = FastDownload()
     p = d.get(JSUT_URL_ORIG, force=force_download)
     text_files = get_files(p, extensions=[".txt"])
     d = _get_info(text_files, kind="transcript_utf8", colname="text")
@@ -78,6 +78,7 @@ df["filename"] = df.apply(
     else r["filename"].parent / "train" / r["filename"].name,
     axis=1,
 )
+
 assert df["filename"].apply(os.path.exists).all()
 
 

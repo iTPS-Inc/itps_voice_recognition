@@ -11,9 +11,9 @@ import torchaudio
 LJ_SPEECH_URL_ORIG = (
     "https://www.dropbox.com/s/cwq264n040guqhj/LJSpeech-1.1.tar.bz2?dl=1"
 )
-DATAROOT = "/home/jjs/proj/work/itps/itps_transcription_model/scripts/data/"
+DATAROOT = os.environ.get("PREPROCESS_DATAROOT", str(Path.home() / ".fastdownload"))
 OUTPATH = Path(DATAROOT) / "LJSpeech-1.1.tar.gz"
-FORCE_DOWNLOAD = False
+FORCE_DOWNLOAD = True
 
 
 def get_ljl_data_init(base, force_download=False):
@@ -28,6 +28,14 @@ def get_ljl_data_init(base, force_download=False):
 p, df = get_ljl_data_init(Path(DATAROOT), force_download=FORCE_DOWNLOAD)
 df = train_test_split(df)
 
+def get_frames_sr(f):
+    t, sr = torchaudio.load(f)
+    no_frames = len(t.squeeze())
+    return pd.Series([no_frames, sr])
+
+df[["no_frames", "sr"]] = df["filename"].apply(get_frames_sr)
+df["audio_length"] = df["no_frames"] / df["sr"]
+
 os.mkdir(p / "wavs" / "train")
 os.mkdir(p / "wavs" / "test")
 
@@ -40,15 +48,6 @@ for i, r in df.iterrows():
         src = r["filename"]
         dest = r["filename"].parent / "train" / r["filename"].name
         shutil.move(src, dest)
-
-
-def get_frames_sr(f):
-    t, sr = torchaudio.load(f)
-    no_frames = len(t.squeeze())
-    return pd.Series([no_frames, sr])
-
-df[["no_frames", "sr"]] = df["filename"].apply(get_frames_sr)
-df["audio_length"] = df["no_frames"] / df["sr"]
 
 df["filename"] = df.apply(
     lambda r: Path("wavs") / "test" / r["filename"].name
