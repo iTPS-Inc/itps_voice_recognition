@@ -215,13 +215,13 @@ def log_predictions(learn, dls):
   acts = logits.map(lambda x: torch.argmax(x, dim=-1).detach())
   table_row = []
   csv_row = []
-  for y,pred,logits,true_y in tqdm(zip(ys, acts, logits, df["text"].to_list()), total=len(ys)):
+  for y,pred,true_y in tqdm(zip(ys, acts, df["text"].to_list()), total=len(ys)):
     dec_y = tok.decode(y,group_tokens=False, skip_special_tokens=False, skip_unk=True)
     dec_pred = tok.decode(pred,group_tokens=True, skip_special_tokens=False, skip_unk=True)
     table_row.append([true_y, dec_y, dec_pred])
-    csv_row.append([true_y, dec_pred, dec_y, logits])
+    csv_row.append([true_y, dec_pred, dec_y])
   wandb.log({caption: wandb.Table(columns=["true_y", "tok_y","pred"], data=table_row)})
-  write_csv(Path(datapath)  / "csv" / f"{LANG}"  / (wandb.run.name+".csv"), columns=["true_y", "pred", "tok_y", "logits"], data=csv_row)
+  write_csv(Path(datapath)  / "csv" / f"{LANG}"  / (wandb.run.name+".csv"), columns=["true_y", "pred", "tok_y"], data=csv_row)
   return dec_y, dec_pred, logits
 
 """## Model"""
@@ -318,7 +318,7 @@ class TransformersLearnerOwnLoss(Learner):
         self.loss_grad.backward()
         self._with_events(self.opt.step, "step", CancelStepException)
 
-def get_logging_cbs(framework, valid_dl=None,params=None, **kwargs):
+def get_logging_cbs(framework, params=None, **kwargs):
     if framework.lower() =="wandb":
         wandb.init(project="itps-gpu-real", config=params)
         log_cbs =  [ WandbCallback(log="all", log_preds=False, log_model=True, **kwargs) ]
@@ -441,9 +441,7 @@ def run(input_pars, modelpath, logpath):
 
   model.freeze_feature_extractor()
 
-  log_cbs = get_logging_cbs(framework=LOGGING_FRAMEWORK,
-                            params=input_pars,
-                            valid_dl=dls.valid)
+  log_cbs = get_logging_cbs(framework=LOGGING_FRAMEWORK, params=input_pars)
   if LOGGING_FRAMEWORK.lower() == "wandb":
     wandb.log(input_pars)
     wandb.run.summary["epoch"] = 0
