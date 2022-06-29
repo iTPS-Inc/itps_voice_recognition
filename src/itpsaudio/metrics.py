@@ -33,7 +33,7 @@ class WER(Metric):
   @property
   def value(self):
       wer = jiwer.wer(self.pred_strs, self.label_strs)
-      return wer
+      return np.clip(wer, 0, 1)
 
 class CER(Metric):
   def __init__(self, tok):
@@ -64,7 +64,7 @@ class CER(Metric):
   @property
   def value(self):
       cer = jiwer.cer(self.pred_strs, self.label_strs)
-      return cer
+      return np.clip(cer, 0, 1)
 
   def reset(self):
       self.pred_strs, self.label_strs = [], []
