@@ -321,7 +321,7 @@ class TransformersLearnerOwnLoss(Learner):
 def get_logging_cbs(framework, params=None, **kwargs):
     if framework.lower() =="wandb":
         wandb.init(project="itps-gpu-real", config=params)
-        log_cbs =  [ WandbCallback(log="all", log_preds=False, log_model=True, **kwargs) ]
+        log_cbs =  [ WandbCallback(log="all", log_preds=False, log_model=False, **kwargs) ]
     elif framework.lower() == "neptune":
         neptune.init("jjs/itps-language-model")
         log_cbs = [
@@ -441,9 +441,7 @@ def run(input_pars, modelpath, logpath):
 
   model.freeze_feature_extractor()
 
-  log_cbs = get_logging_cbs(framework=LOGGING_FRAMEWORK,
-                            params=input_pars,
-                            valid_dl=dls.valid)
+  log_cbs = get_logging_cbs(framework=LOGGING_FRAMEWORK, params=input_pars)
   if LOGGING_FRAMEWORK.lower() == "wandb":
     wandb.log(input_pars)
     wandb.run.summary["epoch"] = 0
@@ -466,7 +464,7 @@ def run(input_pars, modelpath, logpath):
       with_attentions=with_attentions,
       cbs=[
         DropPreds(),
-        SaveModelCallback(comp=np.less, monitor=MONITOR,min_delta=0.001, fname=arch.replace("/", "_")),
+        SaveModelCallback(comp=np.less, monitor=MONITOR,min_delta=0.001, fname=wandb.run.name.replace("/", "_")),
       ],
       log_cbs=log_cbs,
   )
@@ -476,7 +474,7 @@ def run(input_pars, modelpath, logpath):
   wandb.finish()
   return x
 
-LANG="jp"
+LANG=os.environ["TRAIN_LANG"]
 if LANG =="jp":
   datasets = JAPANESE_DATASETS[1:]
 if LANG =="en":

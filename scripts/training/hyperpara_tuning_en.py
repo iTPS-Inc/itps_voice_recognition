@@ -321,7 +321,7 @@ class TransformersLearnerOwnLoss(Learner):
 def get_logging_cbs(framework, params=None, **kwargs):
     if framework.lower() =="wandb":
         wandb.init(project="itps-gpu-real", config=params)
-        log_cbs =  [ WandbCallback(log="all", log_preds=False, log_model=True, **kwargs) ]
+        log_cbs =  [ WandbCallback(log="all", log_preds=False, log_model=False, **kwargs) ]
     elif framework.lower() == "neptune":
         neptune.init("jjs/itps-language-model")
         log_cbs = [
@@ -464,7 +464,7 @@ def run(input_pars, modelpath, logpath):
       with_attentions=with_attentions,
       cbs=[
         DropPreds(),
-        SaveModelCallback(comp=np.less, monitor=MONITOR,min_delta=0.001, fname=arch.replace("/", "_")), 
+        SaveModelCallback(comp=np.less, monitor=MONITOR, min_delta=0.001, fname=wandb.run.name.replace("/", "_")), 
        ],
       log_cbs=log_cbs,
   )
