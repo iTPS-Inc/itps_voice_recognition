@@ -6,7 +6,7 @@ import re
 from fastai.data.all import TitledStr, Transform, tensor
 from fastai.text.all import TensorText
 
-EXTRA_CHARS = " .?!|-,\"'"
+EXTRA_CHARS = " .?!|-,"
 HIRA = (
     "あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほまみむめもやゆよらりるれろわをんがぎぐげござじずぜぞだじづでどばびぶべぼぱぴぷぺぽゃゅょっぁぃぅぇぉ"
 )
