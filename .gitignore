@@ -12,3 +12,11 @@
 /notebooks/assets/
 /notebooks/models/
 *.wav
+notebooks/vocab.json
+scripts/training/wandb/*
+scripts/training/wandb/*.table.json
+wandb/*
+wandb/run-20220629_101608-3bdea5q4/files/wandb-summary.json
+scripts/wandb/*
+scripts/wandb/*.log
+scripts/training/notebooks/.ipynb_checkpoints/*
