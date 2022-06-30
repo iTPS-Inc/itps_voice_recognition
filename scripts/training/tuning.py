@@ -63,6 +63,7 @@ import os
 # os.chdir("/content/itps_voice_recognition/src/")
 
 from fastai.data.all import *
+from fastai.callback.wandb import WandbCallback
 from transformers import Wav2Vec2FeatureExtractor, Wav2Vec2ForMaskedLM, AutoTokenizer, Wav2Vec2Processor, Wav2Vec2ForCTC, AutoModelForCTC
 from transformers import Wav2Vec2CTCTokenizer
 from datasets import load_dataset
@@ -447,11 +448,10 @@ def trial_suggestions(trial):
         "facebook/wav2vec2-xls-r-1b",
         #  "facebook/wav2vec2-xls-r-2b"
     ]
-    smaller_archlist = [
-        "facebook/hubert-large-ll60k",
+    smaller_archlist = [ "facebook/hubert-large-ll60k",
         "facebook/wav2vec2-xls-r-300m",
     ]
-    arch = trial.suggest_categorical("arch", smaller_archlist)
+    arch = trial.suggest_categorical("arch", big_archlist)
 
     feat_proj_dropout = trial.suggest_float("feat_proj_dropout", low=0.03, high=0.2)
     hidden_dropout = trial.suggest_float("hidden_dropout", low=0.03, high=0.2)
@@ -469,9 +469,9 @@ def trial_suggestions(trial):
     if loss_func != "transformers_ctc":
         lr_finder = trial.suggest_categorical("lr_finder", [True, False])
 
-    # sched = trial.suggest_categorical("schedule", [
-    #   "fit_one_cycle", "exponential",# "ramp_quarter_pipe"
-    # ])
+    sched = trial.suggest_categorical("schedule", [
+      "fit_one_cycle", "exponential",# "ramp_quarter_pipe"
+    ])
 
     # def after_epoch(self):
     #     "Log validation loss and custom metrics & log prediction samples"
@@ -545,14 +545,11 @@ def run(input_pars, modelpath, logpath):
         MetricsToWandb(),
     ]
 
-    # sched = params.pop("schedule")
-    lr_max, lr_min = lr, lr / 10
-    schedule = ParamScheduler({"lr": SchedExp(start=lr_max, end=lr_min)})
-    fit_cbs.append(schedule)
-    # if sched == "exponential":
-    #     lr_min, lr_max = lr, lr/10
-    #     schedule = SchedExp(start=lr_max, end=lr_min)
-    #     fit_cbs.append(schedule)
+    sched = params.pop("schedule")
+    if sched == "exponential":
+        lr_max, lr_min = lr, lr / 10
+        schedule = ParamScheduler({"lr": SchedExp(start=lr_max, end=lr_min)})
+        fit_cbs.append(schedule)
     # elif sched == "ramp_quarter_pipe":
     #       lr_min, lr_max = lr, lr/10
     #       schedule = combine_scheds([0.3, 0.2, 0.5], [SchedLin(lr_min, lr_max), SchedNo(lr_max, lr_max), SchedCos(lr_max, lr_min)])
@@ -598,15 +595,15 @@ def run(input_pars, modelpath, logpath):
         log_cbs=log_cbs,
     )
     if TEST_RUN:
-        # if sched == "fit_one_cycle":
-        #   learn.fit_one_cycle(1, lr_max=lr, cbs=fit_cbs)
-        # else:
-        learn.fit(1, lr=lr, cbs=fit_cbs)
+        if sched == "fit_one_cycle":
+          learn.fit_one_cycle(1, lr_max=lr, cbs=fit_cbs)
+        else:
+          learn.fit(1, lr=lr, cbs=fit_cbs)
     else:
-        # if sched == "fit_one_cycle":
-        #   learn.fit_one_cycle(100, lr_max=lr, cbs=fit_cbs)
-        # else:
-        learn.fit(100, lr=lr, cbs=fit_cbs)
+        if sched == "fit_one_cycle":
+          learn.fit_one_cycle(100, lr_max=lr, cbs=fit_cbs)
+        else:
+          learn.fit(100, lr=lr, cbs=fit_cbs)
 
     valid_loss, perplexity, wer, cer = learn.validate()
 
@@ -754,7 +751,7 @@ else:
 modelpath = Path(modelpath) / f"audio_{LANG}"
 logpath = Path(logpath) / f"audio_{LANG}"
 
-storage_fname = f"opt_study_{LANG}"
+storage_fname = f"opt_study_{LANG}_big"
 storage = f"{modelpath / storage_fname}"
 
 STUDY_NAME = f"{LANG}_study"
