@@ -713,26 +713,18 @@ if LANG == "jp" and FLEURS:
 
 """# Actual Run"""
 
-dfpath = Path().home() / ".fastdownload" / "preprocessed" / f"{LANG}_df_{DSET_NAMES}.csv"
-if not os.path.exists(dfpath):
-  print('Preparing df')
-  df = prepare_df(df, audio_length=AUDIO_LENGTH)
-  df.to_pickle(dfpath)
-else:
-  print('reading df')
-  df = pd.read_pickle(dfpath)
-  df = df.iloc[:1000]
-
-if LANG=="jp":
-  vocab = JPTransformersTokenizer.create_vocab("vocab.json")
-  tok = JPTransformersTokenizer(
-      tok=Wav2Vec2CTCTokenizer( vocab,
-          bos_token="[BOS]",
-          eos_token="[EOS]",
-          unk_token="[UNK]",
-          pad_token="[PAD]",
-      )
-  )
+dfpath = (
+    Path().home() / ".fastdownload" / "preprocessed" / f"{LANG}_df_{DSET_NAMES}.csv"
+)
+# if not os.path.exists(dfpath):
+#   print('Preparing df')
+df = prepare_df(df, audio_length=AUDIO_LENGTH)
+df.to_pickle(dfpath)
+# else:
+#   print('reading df')
+#   df = pd.read_pickle(dfpath)
+#   if TEST_RUN:
+#     df = df.iloc[:100]
 
 print(DSET_NAMES)
 
