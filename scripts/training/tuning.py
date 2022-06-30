@@ -9,13 +9,17 @@ Original file is located at
 
 # Setup
 """
-import os 
+import os
+
+TEST_RUN = os.environ.get("TEST_RUN", False)
 
 datapath = os.environ.get("DATADIR", f"/content/drive/MyDrive/data/")
 datapath = os.environ.get("DATADIR", f"/home/gdep-guest33/workarea/data/voice/")
 
 modelpath = os.environ.get("AUDIOMODELDIR", f"/content/drive/MyDrive/data/models/")
-modelpath = os.environ.get("AUDIOMODELDIR", f"/home/gdep-guest33/workarea/models/voice/")
+modelpath = os.environ.get(
+    "AUDIOMODELDIR", f"/home/gdep-guest33/workarea/models/voice/"
+)
 
 logpath = os.environ.get("AUDIOLOGDIR", f"/content/drive/MyDrive/data/logs/")
 logpath = os.environ.get("AUDIOLOGDIR", f"/home/gdep-guest33/workarea/logs/voice/")
@@ -24,22 +28,22 @@ logpath = os.environ.get("AUDIOLOGDIR", f"/home/gdep-guest33/workarea/logs/voice
 # from google.colab import drive
 # drive.mount('/content/drive')
 # Commented out IPython magic to ensure Python compatibility.
-# %%bash 
+# %%bash
 # cd /content/
 # if [ -d itps_voice_recognition ]; then
 #   cd itps_voice_recognition
-#   git pull -r 
+#   git pull -r
 #   cd ..
-# else 
+# else
 #   git clone https://github.com/iTPS-Inc/itps_voice_recognition.git
 # fi
-# 
-# if [ ! -f installed ]; then 
-# 
+#
+# if [ ! -f installed ]; then
+#
 # pip install boto3 datasets==1.13.3 transformers==4.11.3 librosa jiwer sentencepiece japanize_matplotlib optuna
 # pip install neptune-client mecab-python3 wandb
 # pip install fastai -Uqq
-# 
+#
 # touch installed
 # fi
 
@@ -71,13 +75,18 @@ import torchaudio.transforms as T
 from itpsaudio.callbacks import SeePreds, NeptuneSaveModel
 from itpsaudio.aug_transforms import AddNoise, RandomReverbration
 from itpsaudio.callbacks import MixedPrecisionTransformers
-from itpsaudio.aug_transforms import FrequencyMaskAugment, TimeMaskAugment, ToSpec, ToWave
+from itpsaudio.aug_transforms import (
+    FrequencyMaskAugment,
+    TimeMaskAugment,
+    ToSpec,
+    ToWave,
+)
 from itpsaudio.metrics import CER, WER
 from dsets.dsets import ENGLISH_DATASETS, get_datasets, JAPANESE_DATASETS
 from dsets.dset_config.dset_config import DatasetConfig
 from dsets.helpers.helpers import apply_parallel, get_sampling_rates
-from itpsaudio.transforms import * 
-from itpsaudio.core import * 
+from itpsaudio.transforms import *
+from itpsaudio.core import *
 from itpsaudio.modelling import SmoothCTCLoss, CTCLoss
 from itpsaudio.tf_tokenizers import JPTransformersTokenizer, ENTransformersTokenizer
 
@@ -94,21 +103,24 @@ import json
 import pickle
 from datasets import load_metric
 import neptune as neptune
-import datetime 
+import datetime
 from functools import lru_cache
-from collections import Counter 
+from collections import Counter
 import wandb
 from tqdm.auto import tqdm
+
 tqdm.pandas()
 
 """# Data Preparation"""
+
 
 @lru_cache(maxsize=None)
 def get_audio_length(s):
     t, sr = torchaudio.load(s)
     return len(t[0]) / sr, sr
 
-def prepare_df(df, audio_length=10):
+
+def prepare_df(df, audio_length=10, min_audio_length=2):
     df[["audio_length", "sr"]] = df["filename"].progress_apply(
         lambda x: pd.Series(get_audio_length(x))
     )
@@ -117,40 +129,50 @@ def prepare_df(df, audio_length=10):
     plt.show()
     print("Length of datset before filtering:", df["audio_length"].sum() / 60 / 60)
     df = df[df["audio_length"] < audio_length].reset_index(drop=True)
+    # df = df[df["audio_length"] > min_audio_length].reset_index(drop=True)
     df = df[~df["text"].isna()].reset_index(drop=True)
     df["text"] = df["text"].str.lower()
     print("Length of dataset after filtering: ", df["audio_length"].sum() / 60 / 60)
     df["audio_length"].plot.hist()
     return df
 
+
 class Resampler(Transform):
     samplers = {16000: noop}
+
     def __init__(self, unique_srs):
-      for sr in unique_srs:
-        self.samplers[sr] = T.Resample(sr, 16000)
+        for sr in unique_srs:
+            self.samplers[sr] = T.Resample(sr, 16000)
 
     def encodes(self, x: TensorAudio):
         return TensorAudio(self.samplers[x.sr](x), sr=x.sr)
 
+
 @Transform
 def prepare_for_tokenizer(x: str):
     return x.lower().replace(" ", "|")
+
 
 """# Training
 
 ## Metrics
 """
 
+
 def get_metrics(tok):
     return [Perplexity(), CER(tok), WER(tok)]
 
+
 """## Dataloader"""
 
-def get_dls(df: pd.DataFrame,
-            augs: List[Union[Transform, None]],
-            with_attentions: bool,
-            bs=4,
-            text_pad_val=0):
+
+def get_dls(
+    df: pd.DataFrame,
+    augs: List[Union[Transform, None]],
+    with_attentions: bool,
+    bs=4,
+    text_pad_val=0,
+):
     splits = RandomSplitter(valid_pct=0.2)(df)
     tfms = TfmdLists(df, AudioBatchTransform(), splits=splits)
     train_text_lens = df.loc[splits[0], "audio_length"].to_list()
