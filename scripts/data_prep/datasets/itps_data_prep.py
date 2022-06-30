@@ -6,8 +6,9 @@ import pandas as pd
 import torchaudio
 from fastdownload import FastDownload
 from fastai.data.all import Path, get_files, untar_data
-#%%
-# DATAROOT = os.environ.get("PREPROCESS_DATAROOT")
+import logging as l
+
+DATAROOT = os.environ.get("PREPROCESS_DATAROOT")
 URL = "https://www.dropbox.com/s/qzvrx0c3rrmxxl3/annotation_data_initial.tar.gz?dl=1"
 
 d = FastDownload()
@@ -42,6 +43,7 @@ def convert_to_wav(input_file, output_file):
     return output_file
 
 
+
 for audio_file in audio_files:
     if not os.path.exists(outdir / "base_wavs"):
         os.mkdir(outdir / "base_wavs")
@@ -51,7 +53,6 @@ for audio_file in audio_files:
         prep = "jp"
     else:
         prep = "_"
-    print(audio_file)
     out_file_path = outdir / "base_wavs" / (f"{prep}_" + audio_file.stem)
     out_file_path = "_".join(str(out_file_path).split(" ")) + ".wav"
     convert_to_wav(audio_file, out_file_path)
@@ -165,6 +166,7 @@ for i, wav, test_string, st, end in df[
     outfile = outdir / out_name
     outfile_names.append(out_name)
     cut_out_part_ffmpeg(infile, st, end, outfile)
+    assert os.path.exists(outfile)
 
 df["file"] = outfile_names
 no_frames = []
@@ -203,4 +205,3 @@ os.chdir(outdir.parent)
 df_out.to_csv(outdir / "df.csv")
 subprocess.run(["zip", "-r", f"annotation_data.zip", f"annotation_data_out"])
 os.chdir(curdir)
-
