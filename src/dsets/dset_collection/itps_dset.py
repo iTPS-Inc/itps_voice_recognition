@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 from typing import Tuple
 
+import os
 import pandas as pd
 from dsets.dset_config.dset_config import DatasetConfig
 from pathlib import Path
 from fastdownload import FastDownload
 
 ANNOTATION_DATA_URL = (
-    "https://www.dropbox.com/s/92tbhcdlymk5s0w/annotation_data.tar.gz?dl=1"
+    "https://www.dropbox.com/s/0hlodcgrqjap68b/annotation_data_very_clean.zip?dl=1"
+    # "https://www.dropbox.com/s/92tbhcdlymk5s0w/annotation_data.tar.gz?dl=1",
 )
 
 
@@ -39,9 +41,15 @@ def get_annotation_data(
     p = d.get(ANNOTATION_DATA_URL, force=force_download)
     if not isinstance(p, Path):
         raise AttributeError(f"Failed to unzip URL dataset under {ANNOTATION_DATA_URL}")
-    df = pd.read_csv(p / "annotation_data.csv", index_col=0)
+    if os.path.exists(p / "annotation_data.csv"):
+        df = pd.read_csv(p / "annotation_data.csv", index_col=0)
+    else:
+        df = pd.read_csv(p / "df.csv", index_col=0)
     if not isinstance(df, pd.DataFrame):
         raise AttributeError("Failed to read csv after untaring dataset.")
+    df["train"] = ~df["test"]
+    df["lang"] = df["wav_file_name"].apply(lambda x: x[:2])
+    df["filename"] = df["file"]
     df = _subset_data(df, dset.split)
     if dset.lang is None:
         lang = "both"
