@@ -14,16 +14,12 @@ import os
 TEST_RUN = os.environ.get("TEST_RUN", False)
 
 datapath = os.environ.get("DATADIR", f"/content/drive/MyDrive/data/")
-datapath = os.environ.get("DATADIR", f"/home/gdep-guest33/workarea/data/voice/")
+
+storagepath = os.environ.get("STORAGE", f"/content/drive/MyDrive/data/")
 
 modelpath = os.environ.get("AUDIOMODELDIR", f"/content/drive/MyDrive/data/models/")
-modelpath = os.environ.get(
-    "AUDIOMODELDIR", f"/home/gdep-guest33/workarea/models/voice/"
-)
 
 logpath = os.environ.get("AUDIOLOGDIR", f"/content/drive/MyDrive/data/logs/")
-logpath = os.environ.get("AUDIOLOGDIR", f"/home/gdep-guest33/workarea/logs/voice/")
-
 
 # from google.colab import drive
 # drive.mount('/content/drive')
@@ -114,6 +110,7 @@ tqdm.pandas()
 
 """# Data Preparation"""
 
+SAMPLE_NOISE_URL = "https://pytorch-tutorial-assets.s3.amazonaws.com/VOiCES_devkit/distant-16k/distractors/rm1/babb/Lab41-SRI-VOiCES-rm1-babb-mc01-stu-clo.wav"
 
 @lru_cache(maxsize=None)
 def get_audio_length(s):
@@ -467,7 +464,7 @@ def trial_suggestions(trial):
     smaller_archlist = [ "facebook/hubert-large-ll60k",
         "facebook/wav2vec2-xls-r-300m",
     ]
-    arch = trial.suggest_categorical("arch", big_archlist)
+    arch = trial.suggest_categorical("arch", smaller_archlist)
     do_normalize = trial.suggest_categorical("do_normalize", [True, False])
 
     feat_proj_dropout = trial.suggest_float("feat_proj_dropout", low=0.03, high=0.2)
