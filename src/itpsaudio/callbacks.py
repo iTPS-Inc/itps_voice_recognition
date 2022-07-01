@@ -67,16 +67,16 @@ class SeePreds(TensorBoardBaseCallback):
         if not isinstance(x, list):
             x = [x_ for x_ in x]
         tab = []
-        for i, (x, y, pred) in enumerate(zip(x, y_true, y_pred)):
-            wandb.log(
-                {
-                    f"{caption} {i}: ": wandb.Audio(
-                        x,
-                        caption="True: {}<br>Pred: {}".format(y, pred),
-                        sample_rate=16000,
-                    )
-                }
-            )
+        for i, (x_, y, pred) in enumerate(zip(x, y_true, y_pred)):
+            # wandb.log(
+            #     {
+            #         f"{caption} {i}: ": wandb.Audio(
+            #             x_,
+            #             caption="True: {}<br>Pred: {}".format(y, pred),
+            #             sample_rate=16000,
+            #         )
+            #     }
+            # )
             tab += [[y, pred]]
         wandb.log({caption: wandb.Table(columns=["y", "preds"], data=tab)})
 
@@ -87,8 +87,10 @@ class SeePreds(TensorBoardBaseCallback):
             decoded_ys = self.tok.batch_decode(self.yb[0], group_tokens=False)
             xs = self.xb[0].detach().clone().cpu().numpy()
             self._write_wandb_audio(xs, decoded_preds, decoded_ys, "random")
-            dec_preds_valid, dec_ys_valid, xs_valid = self.get_valid_preds()
-            self._write_wandb_audio(xs, dec_preds_valid, dec_ys_valid, "valid")
+
+    def after_epoch(self):
+        dec_preds_valid, dec_ys_valid, xs_valid = self.get_valid_preds()
+        self._write_wandb_audio(xs_valid, dec_preds_valid, dec_ys_valid, "valid")
 
 
 class NeptuneSaveModel(Callback):

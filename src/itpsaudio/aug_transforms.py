@@ -21,9 +21,10 @@ class RandomReverbration(RandTransform):
 
 
 class AddNoise(RandTransform):
-    def __init__(self, db_range, noise, power=2, **kwargs):
+    def __init__(self, db_start, db_end, noise, power=2, **kwargs):
         super().__init__(**kwargs)
-        self.db_range = db_range
+        self.db_start = db_start
+        self.db_end = db_end
         self.noise = noise
         self.power = power
         self.noise_power = torch.norm(noise, p=power)
@@ -37,8 +38,8 @@ class AddNoise(RandTransform):
         noise_sample_start = random.randrange(0, noise_start)
 
         # Randomly determine loudness of the noise
-        db = random.uniform(self.db_range.start, self.db_range.stop)
-        snr = math.exp(db / 10)
+        db = random.uniform(self.db_start, self.db_end)
+        snr = 10 * math.exp(db / 20)
         if for_show:
             print("Signal Noise Ratio: ", snr)
         speech_power = torch.norm(speech, p=self.power)

@@ -200,12 +200,12 @@ def get_dls(
     )
     return dls
 
-
 def construct_augs(params) -> List[Union[None, Transform]]:
     augs = []
     random_reverb = params.pop("RandomReverb")
     freq_mask = params.pop("FreqMask")
     time_mask = params.pop("TimeMask")
+    add_noise = params.pop("AddNoise")
     if random_reverb:
         augs += [RandomReverbration(p=0.1)]
     if freq_mask or time_mask:
@@ -215,8 +215,16 @@ def construct_augs(params) -> List[Union[None, Transform]]:
         if time_mask:
             augs.append(TimeMaskAugment(p=0.2))
         augs.append(ToWave())
+    if add_noise:
+        if not os.path.exists("noise_sample.wav"):
+            with open("noise_sample.wav", "wb") as f:
+                r = requests.get(SAMPLE_NOISE_URL)
+                f.write(r.content)
+        noise, sr = torchaudio.load("noise_sample.wav")
+        noise = TensorAudio(noise, sr=sr)
+        noise_t = AddNoise(1, 2, noise, p=0.2, power=2)
+        augs.append(noise_t)
     return augs
-
 
 def write_csv(fname, columns, data):
     with open(fname, "w") as csvfile:
@@ -323,6 +331,11 @@ def log_predictions(learn, dls, cer, thresh=0.2):
 
 """## Model"""
 
+class AudioNormalize(Transform):
+    def encodes(self, x: TensorAudio):
+        with torch.no_grad():
+            feats = F.layer_norm(x, x.shape)
+        return feats
 
 class MetricsToWandb(Callback):
     def after_epoch(self):
@@ -385,7 +398,10 @@ def get_model(
 
 def get_logging_cbs(framework, params=None, **kwargs):
     if framework.lower() == "wandb":
-        wandb.init(project="itps-gpu-real", config=params)
+        if TEST_RUN:
+            wandb.init(project="itps-gpu-real-testing", config=params)
+        else:
+            wandb.init(project="itps-gpu-real-big", config=params)
         log_cbs = [WandbCallback(log="all", log_preds=False, log_model=False, **kwargs)]
     elif framework.lower() == "neptune":
         neptune.init("jjs/itps-language-model")
@@ -440,7 +456,7 @@ def trial_suggestions(trial):
     loss_func = trial.suggest_categorical(
         "loss_func", ["smooth_ctc_sum", "transformers_ctc", "ctc_sum", "ctc_mean"]
     )
-    bs = trial.suggest_categorical("bs", [8])
+    bs = trial.suggest_categorical("bs", [4])
     # This is weird but I wanna have the augs in the trial object
     # Achitecture hyperparams
     big_archlist = [
@@ -452,6 +468,7 @@ def trial_suggestions(trial):
         "facebook/wav2vec2-xls-r-300m",
     ]
     arch = trial.suggest_categorical("arch", big_archlist)
+    do_normalize = trial.suggest_categorical("do_normalize", [True, False])
 
     feat_proj_dropout = trial.suggest_float("feat_proj_dropout", low=0.03, high=0.2)
     hidden_dropout = trial.suggest_float("hidden_dropout", low=0.03, high=0.2)
@@ -464,8 +481,9 @@ def trial_suggestions(trial):
     random_reverb = trial.suggest_categorical("RandomReverb", [True, False])
     freq_mask = trial.suggest_categorical("FreqMask", [False])
     time_mask = trial.suggest_categorical("TimeMask", [False])
+    add_noise = trial.suggest_categorical("AddNoise", [True])
     # lr
-    lr = trial.suggest_float("lr", low=3e-5, high=1e-3)
+    lr = trial.suggest_float("lr", low=1e-4, high=1e-3)
     if loss_func != "transformers_ctc":
         lr_finder = trial.suggest_categorical("lr_finder", [True, False])
 
@@ -511,6 +529,10 @@ def run(input_pars, modelpath, logpath):
     lr = params.pop("lr")
     bs = params.pop("bs")
     augs = construct_augs(params)
+    do_normalize = params.pop("do_normalize")
+
+    if do_normalize:
+        augs.append(AudioNormalize())
 
     timestamp = datetime.datetime.now().strftime("%y%m%d%H%M")
     date = datetime.datetime.now().strftime("%y%m%d%H%MD")
@@ -540,7 +562,7 @@ def run(input_pars, modelpath, logpath):
         ),
         TensorBoardCallback(log_dir=logdir, trace_model=False, log_preds=False),
         EarlyStoppingCallback(
-            comp=np.less, monitor=MONITOR, patience=2, min_delta=0.001
+            comp=np.less, monitor=MONITOR, patience=3, min_delta=0
         ),
         MetricsToWandb(),
     ]
@@ -588,7 +610,7 @@ def run(input_pars, modelpath, logpath):
             SaveModelCallback(
                 comp=np.less,
                 monitor=MONITOR,
-                min_delta=0.001,
+                min_delta=0,
                 fname=arch.replace("/", "_"),
             ),
         ],
@@ -596,14 +618,14 @@ def run(input_pars, modelpath, logpath):
     )
     if TEST_RUN:
         if sched == "fit_one_cycle":
-          learn.fit_one_cycle(1, lr_max=lr, cbs=fit_cbs)
+            learn.fit_one_cycle(12, lr_max=lr, cbs=fit_cbs, div=2)
         else:
-          learn.fit(1, lr=lr, cbs=fit_cbs)
+            learn.fit(12, lr=lr, cbs=fit_cbs)
     else:
         if sched == "fit_one_cycle":
-          learn.fit_one_cycle(100, lr_max=lr, cbs=fit_cbs)
+            learn.fit_one_cycle(12, lr_max=lr, cbs=fit_cbs, div=2)
         else:
-          learn.fit(100, lr=lr, cbs=fit_cbs)
+            learn.fit(12, lr=lr, cbs=fit_cbs)
 
     valid_loss, perplexity, wer, cer = learn.validate()
 
@@ -626,8 +648,8 @@ def run(input_pars, modelpath, logpath):
         {
             "itps_valid_loss": valid_loss,
             "itps_perplexity": perplexity,
-            "wer": wer,
-            "cer": cer,
+            "itps_wer": wer,
+            "itps_cer": cer,
         }
     )
 
@@ -641,10 +663,10 @@ def run(input_pars, modelpath, logpath):
 
 LANG = os.environ.get("TRAIN_LANG", "jp")
 if LANG == "jp":
-    datasets = JAPANESE_DATASETS[1:]
+    datasets = JAPANESE_DATASETS
 if LANG == "en":
     datasets = [
-        # DatasetConfig(name='itps', split='train', lang='en', kind=None),
+        DatasetConfig(name='itps', split='train', lang='en', kind=None),
         DatasetConfig(name="librispeech", split="dev", lang=None, kind="clean"),
         DatasetConfig(name="ljl", split="train", lang=None, kind=None),
         DatasetConfig(name="nict_spreds", split="train", lang="en", kind=None),
@@ -672,8 +694,7 @@ df = pd.concat([cv, df], ignore_index=True).reset_index(drop=True)
 DSET_NAMES += "-cv"
 
 
-FLEURS = False
-if LANG == "jp" and FLEURS:
+if LANG == "jp":
     fleurs_asr = load_dataset("google/xtreme_s", "fleurs.ja_jp")
     fl_tr = pd.DataFrame(
         {
@@ -713,15 +734,15 @@ if LANG == "jp" and FLEURS:
 dfpath = (
     Path().home() / ".fastdownload" / "preprocessed" / f"{LANG}_df_{DSET_NAMES}.csv"
 )
-# if not os.path.exists(dfpath):
-#   print('Preparing df')
-df = prepare_df(df, audio_length=AUDIO_LENGTH)
-df.to_pickle(dfpath)
-# else:
-#   print('reading df')
-#   df = pd.read_pickle(dfpath)
-#   if TEST_RUN:
-#     df = df.iloc[:100]
+if not os.path.exists(dfpath):
+  print('Preparing df')
+  df = prepare_df(df, audio_length=AUDIO_LENGTH)
+  df.to_pickle(dfpath)
+else:
+  print('reading df')
+  df = pd.read_pickle(dfpath)
+  if TEST_RUN:
+    df = df.iloc[:100]
 
 print(DSET_NAMES)
 
@@ -791,7 +812,7 @@ study = optuna.create_study(
 
 all_studies = optuna.get_all_study_summaries("sqlite:///{}.db".format(storage))
 # %%
-study.optimize(objective, n_trials=10)
+study.optimize(objective, n_trials=10, gc_after_trial=True)
 trial = study.best_trial
 # %%
 def quick_get_run(input_pars, modelpath, logpath):
@@ -822,7 +843,7 @@ def quick_get_run(input_pars, modelpath, logpath):
         ),
         TensorBoardCallback(log_dir=logdir, trace_model=False, log_preds=False),
         EarlyStoppingCallback(
-            comp=np.less, monitor=MONITOR, min_delta=0.01, patience=2
+            comp=np.less, monitor=MONITOR, min_delta=0, patience=3
         ),
     ]
 
