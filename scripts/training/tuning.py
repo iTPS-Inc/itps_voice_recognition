@@ -809,8 +809,18 @@ study = optuna.create_study(
 
 all_studies = optuna.get_all_study_summaries("sqlite:///{}.db".format(storage))
 # %%
+
+if os.path.exists("config_to_try.json"):
+    with open("config_to_try.json", "r") as f:
+        config_to_try = json.load(f)
+        study.enqueue_trial(config_to_try)
+
 study.optimize(objective, n_trials=10, gc_after_trial=True)
 trial = study.best_trial
+
+if os.path.exists("config_to_try.json"):
+    os.unlink("config_to_try.json")
+
 # %%
 def quick_get_run(input_pars, modelpath, logpath):
     params = input_pars.copy()
