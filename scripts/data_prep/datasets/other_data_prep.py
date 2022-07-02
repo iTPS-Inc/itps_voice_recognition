@@ -14,10 +14,10 @@ import uuid
 
 tqdm.pandas()
 
-logger = logging.getLogger("video processor")
+logger = logging.getLogger(__name__)
 logger.addHandler(logging.FileHandler(filename="info_file.log"))
-logger.setLevel(logging.DEBUG)
-
+logger.addHandler(logging.StreamHandler())
+logger.info("test logging")
 
 df = pd.read_csv(
     "other_data.csv",
@@ -64,11 +64,11 @@ def get_subtitles(subtitle_file):
 
 def cut_clip_from_subtitle(subtitle, video_file, out_name):
     inp = video_file
-    if subtitle.start > datetime.timedelta(milliseconds=2000):
-        start = str(subtitle.start - datetime.timedelta(milliseconds=2000))
+    if subtitle.start > datetime.timedelta(milliseconds=500):
+        start = str(subtitle.start - datetime.timedelta(milliseconds=500))
     else:
         start = str(subtitle.start)
-    end = str((subtitle.end - subtitle.start) + datetime.timedelta(milliseconds=2000))
+    end = str((subtitle.end - subtitle.start) + datetime.timedelta(milliseconds=500))
     x = subprocess.run(
         [
             "ffmpeg",
@@ -90,12 +90,9 @@ def cut_clip_from_subtitle(subtitle, video_file, out_name):
         ] ,
         stderr=subprocess.STDOUT,
         stdout=subprocess.DEVNULL
-
     )
     if not x.returncode == 0:
-        logger.info(msg=f"start at {start}")
-        logger.info(msg=f"end at {end}")
-        print(f"start at {start} end at {end}, error: {x}")
+        logger.warning(f"Failed to cut out subtitles {subtitle} at {start}:{end} from {inp} to {out_name}")
     return x
 
 
@@ -126,8 +123,11 @@ def do_subtitle_file(subtitle, subtitle_file, video):
         _ = cut_clip_from_subtitle(out_name=out_file, subtitle=subtitle, video_file=video)
     logger.info("Subtitle file,video fil e,contents,outfile")
     logger.info(f"{subtitle_file},{video},{subtitle.content},{out_file}")
-    return [subtitle_file, video, subtitle.content, out_file]
+    return [subtitle_file, video, subtitle.content.replace("\n", " "), out_file]
 
+
+def find_video(s):
+    return clip_frame[clip_frame["file_names"].apply(lambda x: x.split("/")[-1].startswith(s))]
 
 def process_video(video):
     subtitle_file = file_to_subtitle.get(video, None)
@@ -154,6 +154,7 @@ def try_loading(s):
         no_frames = t.squeeze().shape[0]
         return pd.Series((no_frames, sr))
     except Exception as e:
+        logger.debug(e)
         return pd.Series((None, None))
 
 clip_frame[["no_frames", "sr"]] = clip_frame["file"].progress_apply(try_loading)
@@ -161,7 +162,6 @@ clip_frame["audio_length"] = clip_frame["no_frames"] / clip_frame["sr"]
 
 clip_frame = clip_frame[clip_frame["no_frames"] > 0]
 clip_frame["split"] = clip_frame["test"].apply(lambda x: "test" if x else "train")
-
 
 def move_file(s):
     after_move_name = s["file"].name.strip()
@@ -176,29 +176,8 @@ def move_file(s):
 
 clip_frame["file_names"] = clip_frame[["file", "split"]].progress_apply(move_file, axis=1)
 
-clip_frame["file"]
-
-
-
 curdir = os.getcwd()
 os.chdir(OUTPATH.parent)
 clip_frame.to_csv(OUTPATH / "clip_frame.csv")
 subprocess.run(["tar", "-zcvf", "other_data.zip", "other_data"])
 os.chdir(curdir)
-
-
-# for video_file in  video_files:
-
-#     subtitle_file = file_to_subtitle.get(video_file, None)
-#     if not subtitle_file:
-#         continue
-#     out_list =[]
-#     for i, subtitle in enumerate(get_subtitles(subtitle_file)):
-#         out_file = WORKDIR / (f"{i:012d}" + ".wav")
-#         out = cut_clip_from_subtitle(out_name=out_file,
-#                                     subtitle=subtitle,
-#                                      video_file=video_file)
-#         print("Subtitle file,video file,contents,outfile")
-#         print(f"{subtitle_file},{video_file},{subtitle.content},{out_file}")
-#         out_list.append([subtitle_file, video_file, subtitle.content, out_file])
-#     super_out_list += out_list
