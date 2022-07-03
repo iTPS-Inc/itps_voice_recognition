@@ -93,6 +93,7 @@ def prep_other_data(df: pd.DataFrame, dset: DatasetConfig):
             "test",
             "train",
             "no_frames",
+            "file_names",
             "sr",
             "audio_length",
             "split",
