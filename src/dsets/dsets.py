@@ -21,7 +21,7 @@ datasets = {
     "jsut": get_jsut_data,
     "nict_spreds": get_nictspreds_data,
     "testing_data": get_test_data,
-    "other_data": get_other_data,
+    "other": get_other_data,
 }
 
 
