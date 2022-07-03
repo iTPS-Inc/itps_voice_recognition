@@ -634,7 +634,6 @@ def run(input_pars, modelpath, logpath):
         }
     )
 
-    valid_loss, perplexity, wer, cer
     log_predictions(learn, dls, cer)
 
     _, itps_data = get_datasets(
@@ -658,9 +657,10 @@ def run(input_pars, modelpath, logpath):
         }
     )
 
-    if cer < 0.2:
+    if cer < 0.5:
         learn.model.save_pretrained(model_out_path)
-        save_json(Path(model_out_path) / "vocab.json", tok.tokenizer.get_vocab())
+
+    save_json(Path(model_out_path) / "vocab.json", tok.tokenizer.get_vocab())
 
     wandb.finish()
     return cer
