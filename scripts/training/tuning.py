@@ -58,6 +58,7 @@ import csv
 import os 
 # os.chdir("/content/itps_voice_recognition/src/")
 
+import pprint
 from fastai.data.all import *
 from fastai.callback.wandb import WandbCallback
 from transformers import Wav2Vec2FeatureExtractor, Wav2Vec2ForMaskedLM, AutoTokenizer, Wav2Vec2Processor, Wav2Vec2ForCTC, AutoModelForCTC
@@ -824,6 +825,9 @@ if os.path.exists("config_to_try.json"):
     with open("config_to_try.json", "r") as f:
         config_to_try = json.load(f)
         study.enqueue_trial(config_to_try)
+    print("Trying config")
+    pprint.pprint(config_to_try)
+    print("First")
 
 study.optimize(objective, n_trials=10, gc_after_trial=True)
 trial = study.best_trial
