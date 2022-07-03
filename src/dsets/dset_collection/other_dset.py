@@ -72,6 +72,7 @@ def get_other_data(dset: DatasetConfig, base="~/.fastdownload", force_download=F
     if not isinstance(df, pd.DataFrame):
         raise AttributeError("Failed to read csv after untaring dataset.")
     df = prep_other_data(df, dset)
+    df["filename"] = df["file"].apply(lambda x: p / x)
     return p, df
 
 
