@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+
+from dsets.dset_collection.other_dset import get_other_data
 from dsets.dset_collection.itps_dset import get_annotation_data
 from dsets.dset_collection.librispeech_dset import get_librispeech
 from dsets.dset_collection.simple_dsets import (
@@ -19,6 +21,7 @@ datasets = {
     "jsut": get_jsut_data,
     "nict_spreds": get_nictspreds_data,
     "testing_data": get_test_data,
+    "other_data": get_other_data
 }
 
 
@@ -48,6 +51,7 @@ JAPANESE_DATASETS = [
     DatasetConfig(name="itps", split="train", lang="jp"),
     DatasetConfig(name="jsut", split="train"),
     DatasetConfig(name="nict_spreds", split="train", lang="jp"),
+    DatasetConfig(name="other", split="train", lang="jp",kind="clean"),
 ]
 
 ALL_DATASETS = [
