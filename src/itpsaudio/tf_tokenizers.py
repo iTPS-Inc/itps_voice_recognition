@@ -85,7 +85,6 @@ class JPTransformersTokenizer(Transform):
 
     def __init__(self, tok=None, mcb=None, neologd_available=True, replace_unk=False):
         import MeCab
-
         self.neologd_available = True
         self.tokenizer = tok
         self.mcb = mcb
