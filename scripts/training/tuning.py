@@ -615,16 +615,24 @@ def run(input_pars, modelpath, logpath):
     )
     if TEST_RUN:
         if sched == "fit_one_cycle":
-            learn.fit_one_cycle(12, lr_max=lr, cbs=fit_cbs, div=2)
+            learn.fit_one_cycle(NUM_EPOCHS, lr_max=lr, cbs=fit_cbs, div=2)
         else:
-            learn.fit(12, lr=lr, cbs=fit_cbs)
+            learn.fit(NUM_EPOCHS, lr=lr, cbs=fit_cbs)
     else:
         if sched == "fit_one_cycle":
-            learn.fit_one_cycle(12, lr_max=lr, cbs=fit_cbs, div=2)
+            learn.fit_one_cycle(NUM_EPOCHS, lr_max=lr, cbs=fit_cbs, div=2)
         else:
-            learn.fit(12, lr=lr, cbs=fit_cbs)
+            learn.fit(NUM_EPOCHS, lr=lr, cbs=fit_cbs)
 
     valid_loss, perplexity, wer, cer = learn.validate()
+    wandb.log(
+        {
+            "complete_valid_loss": valid_loss,
+            "complete_valid_perplexity": perplexity,
+            "complete_valid_wer": wer,
+            "complete_valid_cer": cer,
+        }
+    )
 
     valid_loss, perplexity, wer, cer
     log_predictions(learn, dls, cer)
@@ -658,7 +666,11 @@ def run(input_pars, modelpath, logpath):
     return cer
 
 
+MONITOR = os.environ.get("MONITOR", "cer")
+NUM_EPOCHS = os.environ.get("NUM_EPOCHS", 20)
+AUDIO_LENGTH = os.environ.get("AUDIO_LENGTH", 10)
 LANG = os.environ.get("TRAIN_LANG", "jp")
+
 if LANG == "jp":
     datasets = JAPANESE_DATASETS
 if LANG == "en":
@@ -668,9 +680,7 @@ if LANG == "en":
         DatasetConfig(name="ljl", split="train", lang=None, kind=None),
         DatasetConfig(name="nict_spreds", split="train", lang="en", kind=None),
     ]
-MONITOR = "cer"
-NUM_EPOCHS = 20
-AUDIO_LENGTH = 10
+
 
 p, df = get_datasets(datasets, base="~/.datasets")
 
