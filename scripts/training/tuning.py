@@ -128,9 +128,11 @@ def prepare_df(df, audio_length=10, min_audio_length=2):
     plt.show()
     print("Length of datset before filtering:", df["audio_length"].sum() / 60 / 60)
     df = df[df["audio_length"] < audio_length].reset_index(drop=True)
-    # df = df[df["audio_length"] > min_audio_length].reset_index(drop=True)
+    df = df[df["audio_length"] > min_audio_length].reset_index(drop=True)
     df = df[df["text"] != "[NO SPEECH]"]
+    df = df[df["text"].apply(len) > 5]
     df = df[~df["text"].isna()].reset_index(drop=True)
+
     df["text"] = df["text"].str.lower()
     print("Length of dataset after filtering: ", df["audio_length"].sum() / 60 / 60)
     df["audio_length"].plot.hist()
