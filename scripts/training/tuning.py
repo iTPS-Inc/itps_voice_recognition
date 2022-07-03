@@ -119,7 +119,7 @@ def get_audio_length(s):
     return len(t[0]) / sr, sr
 
 
-def prepare_df(df, audio_length=10, min_audio_length=2):
+def prepare_df(df, audio_length=10, min_audio_length=3):
     df[["audio_length", "sr"]] = df["filename"].progress_apply(
         lambda x: pd.Series(get_audio_length(x))
     )
@@ -130,12 +130,13 @@ def prepare_df(df, audio_length=10, min_audio_length=2):
     df = df[df["audio_length"] < audio_length].reset_index(drop=True)
     df = df[df["audio_length"] > min_audio_length].reset_index(drop=True)
     df = df[df["text"] != "[NO SPEECH]"]
-    df = df[df["text"].apply(len) > 5]
+    df = df[df["text"].apply(len) > 10] # more than 10 characters
     df = df[~df["text"].isna()].reset_index(drop=True)
 
     df["text"] = df["text"].str.lower()
     print("Length of dataset after filtering: ", df["audio_length"].sum() / 60 / 60)
     df["audio_length"].plot.hist()
+    plt.show()
     return df
 
 
