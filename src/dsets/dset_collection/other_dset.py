@@ -12,40 +12,50 @@ import re
 tqdm.pandas()
 
 OTHER_DATA_URL = "https://www.dropbox.com/s/353u1azv4k5kjbo/other_data.tar.gz?dl=1"
+# Use zip for now, until tgz is there
+#
+OTHER_DATA_URL = "https://www.dropbox.com/s/353u1azv4k5kjbo/other_data.zip?dl=1"
 
-CHARACTERS= ( "a-zA-Z" +          # Alphabet
-              "\u3040-\u309F" +   # Hiragana
-              "\u30A0-\u30FF" +   # Katakana
-              "\u4E00-\u9FAF" +   # Kanji
-              "\u3400-\u4DB5" +   # Extended Kanji
-              "\u4E00-\u9FCB" +
-              "\uF900-\uFA6A")
-chars = re.compile(f"[{CHARACTERS}]+")
-              #
+CHARACTERS = (
+    "a-zA-Z"
+    + "\u3040-\u309F"  # Alphabet
+    + "\u30A0-\u30FF"  # Hiragana
+    + "\u4E00-\u9FAF"  # Katakana
+    + "\u3400-\u4DB5"  # Kanji
+    + "\u4E00-\u9FCB"  # Extended Kanji
+    + "\uF900-\uFA6A"  # Extended Kanji  # Extended Kanji
+)
+CHARS = re.compile(f"[{CHARACTERS}]+")
+
 
 def super_clean(s):
     s = unicodedata.normalize("NFKC", s)  # Normalize
-    s = re.sub(r"(\(.*\))", "", s)        # Replace text in parens
-    s = re.sub(r"\s+", "", s)             # No spaces, since mecab does it
-    s = re.sub("[^" +
-               CHARACTERS +
-               "0-9"      +
-                "\u3002\u30FC"  +
-                "\u300C\u300D"  +
-                "\uFF08\uFF09"  +
-                "\uFF01\uFF1F"  +
-                "\u3000-\u303F" +
-                "\uFF01-\uFF60" +
-                string.punctuation+
-                "]",
-               "", s)
-    if not chars.findall(s):
+    s = re.sub(r"(\(.*\))", "", s)  # Replace text in parens
+    s = re.sub(r"\s+", "", s)  # No spaces, since mecab does it
+    s = re.sub(
+        "[^"
+        + CHARACTERS
+        + "0-9"
+        + "\u3000-\u3002"
+        + "\u30FC"  # 　、。
+        + "\u300C\u300D"  # ー
+        + "\uFF08\uFF09"  # ｢｣
+        + "\uFF01\uFF1F"  # （）
+        + "\u3000-\u303F"  # Full width punctuation, numbers, latin
+        + "\uFF01-\uFF60"  # Japanese symbols, punctuation
+        + string.punctuation  # Full-width sumbols and punctuation！？
+        + "]",
+        "",
+        s,
+    )
+    if not CHARS.findall(s):
         return "[NO SPEECH]"
     return s
 
+
 def regular_clean(s):
     s = unicodedata.normalize("NFKC", s)  # Normalize
-    s = re.sub(r"\s+", "", s)             # No spaces, since mecab does it
+    s = re.sub(r"\s+", "", s)  # No spaces, since mecab does it
     return s
 
 
@@ -90,16 +100,7 @@ def prep_other_data(df: pd.DataFrame, dset: DatasetConfig):
             "split",
             "text",
             "kinda_clean",
-            "super_clean"
+            "super_clean",
         ]
     ].reset_index(drop=True)
     return df
-
-
-p = Path.home() / ".fastai" / "data" / "other_data"
-df = pd.read_csv(p / "clip_frame.csv", index_col=0)
-
-dset = DatasetConfig(name="other",
-                     split="train",
-                     kind="clean")
-

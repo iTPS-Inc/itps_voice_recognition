@@ -21,7 +21,7 @@ datasets = {
     "jsut": get_jsut_data,
     "nict_spreds": get_nictspreds_data,
     "testing_data": get_test_data,
-    "other_data": get_other_data
+    "other_data": get_other_data,
 }
 
 
@@ -51,7 +51,7 @@ JAPANESE_DATASETS = [
     DatasetConfig(name="itps", split="train", lang="jp"),
     DatasetConfig(name="jsut", split="train"),
     DatasetConfig(name="nict_spreds", split="train", lang="jp"),
-    DatasetConfig(name="other", split="train", lang="jp",kind="clean"),
+    DatasetConfig(name="other", split="train", lang="jp", kind="clean"),
 ]
 
 ALL_DATASETS = [
