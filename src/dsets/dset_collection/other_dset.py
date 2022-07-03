@@ -79,7 +79,7 @@ def prep_other_data(df: pd.DataFrame, dset: DatasetConfig):
     df = _subset_data(df, dset.split)
     df["super_clean"] = df["content"].apply(super_clean)
     df["kinda_clean"] = df["content"].apply(regular_clean)
-    df["filename"] = df["file_names"].copy()
+    df["file"] = df["file_names"]
     if dset.kind == "clean":
         df["text"] = df["super_clean"].copy()
     elif dset.kind == "other":
