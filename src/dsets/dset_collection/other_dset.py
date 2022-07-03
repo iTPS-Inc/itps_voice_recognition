@@ -11,10 +11,7 @@ import re
 
 tqdm.pandas()
 
-OTHER_DATA_URL = "https://www.dropbox.com/s/353u1azv4k5kjbo/other_data.tar.gz?dl=1"
-# Use zip for now, until tgz is there
-#
-OTHER_DATA_URL = "https://www.dropbox.com/s/353u1azv4k5kjbo/other_data.zip?dl=1"
+OTHER_DATA_URL = "https://www.dropbox.com/s/5lqvn6gkte73vbm/other_data.tar.gz?dl=1"
 
 CHARACTERS = (
     "a-zA-Z"
