@@ -107,6 +107,7 @@ from collections import Counter
 import wandb
 from tqdm.auto import tqdm
 import logging
+import pandas as pd
 import sys
 
 logger = logging.getLogger(__name__)
@@ -130,10 +131,10 @@ def prepare_df(df, audio_length=10, min_audio_length=3):
     df[["audio_length", "sr"]] = df["filename"].progress_apply(
         lambda x: pd.Series(get_audio_length(x))
     )
-    logger.info("Longest clip: ", df["audio_length"].max())
+    logger.info("Longest clip: {}".format(df["audio_length"].max()))
     df["audio_length"].plot.hist()
     plt.show()
-    logger.info("Length of datset before filtering:", df["audio_length"].sum() / 60 / 60)
+    logger.info("Length of datset before filtering: {}".format(df["audio_length"].sum() / 60 / 60))
     df = df[df["audio_length"] < audio_length].reset_index(drop=True)
     df = df[df["audio_length"] > min_audio_length].reset_index(drop=True)
     df = df[df["text"] != "[NO SPEECH]"]
@@ -141,7 +142,7 @@ def prepare_df(df, audio_length=10, min_audio_length=3):
     df = df[~df["text"].isna()].reset_index(drop=True)
 
     df["text"] = df["text"].str.lower()
-    logger.info("Length of dataset after filtering: ", df["audio_length"].sum() / 60 / 60)
+    logger.info("Length of dataset after filtering: {}".format(df["audio_length"].sum() / 60 / 60))
     df["audio_length"].plot.hist()
     plt.show()
     return df
@@ -715,7 +716,7 @@ if LANG == "en":
     frac = 0.01
     cv = cv.sample(frac=frac)
     DSET_NAMES += f"{frac:.2f}".replace(".", "_")
-    logger.info(f"{frac:.2f}")
+    logger.info(f"Using {frac:.2f} of Common voice datset")
 
 df = pd.concat([cv, df], ignore_index=True).reset_index(drop=True)
 DSET_NAMES += "-cv"
@@ -762,16 +763,16 @@ dfpath = (
     Path().home() / ".fastdownload" / "preprocessed" / f"{LANG}_df_{DSET_NAMES}.csv"
 )
 if not os.path.exists(dfpath):
-  logger.info('Preparing df')
+  logger.debug('Preparing df')
   df = prepare_df(df, audio_length=AUDIO_LENGTH)
   df.to_pickle(dfpath)
 else:
-  logger.info('reading df')
+  logger.debug('Re-using df')
   df = pd.read_pickle(dfpath)
   if TEST_RUN:
     df = df.iloc[:100]
 
-logger.info(DSET_NAMES)
+logger.debug(f"Dataset Names: {DSET_NAMES}")
 
 if LANG == "jp":
     vocab = JPTransformersTokenizer.create_vocab("vocab.json")
