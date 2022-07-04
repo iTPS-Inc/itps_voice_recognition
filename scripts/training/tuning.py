@@ -675,9 +675,13 @@ MONITOR = os.environ.get("MONITOR", "cer")
 NUM_EPOCHS = os.environ.get("NUM_EPOCHS", 20)
 AUDIO_LENGTH = os.environ.get("AUDIO_LENGTH", 10)
 LANG = os.environ.get("TRAIN_LANG", "jp")
+USE_OTHER = os.environ.get("USE_OTHER", "true")
 
 if LANG == "jp":
-    datasets = JAPANESE_DATASETS
+    if USE_OTHER == "true":
+        datasets = JAPANESE_DATASETS
+    else:
+        datasets = JAPANESE_DATASETS[:-1]
 if LANG == "en":
     datasets = [
         DatasetConfig(name='itps', split='train', lang='en', kind=None),
