@@ -111,6 +111,7 @@ import sys
 
 logger = logging.getLogger(__name__)
 logger.setLevel(level=logging.DEBUG)
+logger.addHandler(hdlr=logging.FileHandler(filename=Path(logpath) / "runs.log"))
 
 tqdm.pandas()
 
