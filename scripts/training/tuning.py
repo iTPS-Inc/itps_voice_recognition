@@ -10,6 +10,7 @@ Original file is located at
 # Setup
 """
 import os
+from sys import stdout
 
 TEST_RUN = os.environ.get("TEST_RUN", False)
 
@@ -58,7 +59,6 @@ import csv
 import os 
 # os.chdir("/content/itps_voice_recognition/src/")
 
-import plogger.info
 from fastai.data.all import *
 from fastai.callback.wandb import WandbCallback
 from transformers import Wav2Vec2FeatureExtractor, Wav2Vec2ForMaskedLM, AutoTokenizer, Wav2Vec2Processor, Wav2Vec2ForCTC, AutoModelForCTC
@@ -107,7 +107,12 @@ from collections import Counter
 import wandb
 from tqdm.auto import tqdm
 import logging
+import sys
+
 logger = logging.getLogger(__name__)
+logger.setLevel(level=logging.DEBUG)
+logger.addHandler(hdlr=logging.StreamHandler(stream=sys.stdout))
+logger.addHandler(hdlr=logging.FileHandler(filename=Path(logpath) / "complete.log"))
 
 tqdm.pandas()
 
@@ -682,8 +687,12 @@ USE_OTHER = os.environ.get("USE_OTHER", "true")
 if LANG == "jp":
     if USE_OTHER == "true":
         datasets = JAPANESE_DATASETS
+        _dsets = ", ".join(list(map(lambda x: x.name + "-" + x.split, datasets)))
+        logger.info("Using all available datasets {}".format(_dsets))
     else:
         datasets = JAPANESE_DATASETS[:-1]
+        _dsets = ", ".join(list(map(lambda x: x.name + "-" + x.split, datasets)))
+        logger.info("Not using 'Other' dataset: {}".format(_dsets))
 if LANG == "en":
     datasets = [
         DatasetConfig(name='itps', split='train', lang='en', kind=None),
