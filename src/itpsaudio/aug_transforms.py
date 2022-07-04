@@ -35,6 +35,9 @@ class AddNoise(RandTransform):
             self.noise = torch.concat([self.noise, self.noise], dim=-1)
         speech_length = speech.shape[-1]
         noise_start = self.noise.shape[-1] - speech_length
+        if noise_start == 0:
+            return TensorAudio(speech, sr=speech.sr)
+
         noise_sample_start = random.randrange(0, noise_start)
 
         # Randomly determine loudness of the noise
