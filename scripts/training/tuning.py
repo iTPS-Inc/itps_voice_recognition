@@ -134,11 +134,10 @@ def prepare_df(df, audio_length=10, min_audio_length=3):
     plt.show()
     logger.info("Length of datset before filtering: {}".format(df["audio_length"].sum() / 60 / 60))
     df = df[df["audio_length"] < audio_length].reset_index(drop=True)
-    df = df[df["audio_length"] > min_audio_length].reset_index(drop=True)
-    df = df[df["text"] != "[NO SPEECH]"]
-    df = df[df["text"].apply(len) > 10] # more than 10 characters
+    # df = df[df["audio_length"] > min_audio_length].reset_index(drop=True)
+    # df = df[df["text"] != "[NO SPEECH]"]
+    # df = df[df["text"].apply(len) > 10] # more than 10 characters
     df = df[~df["text"].isna()].reset_index(drop=True)
-
     df["text"] = df["text"].str.lower()
     logger.info("Length of dataset after filtering: {}".format(df["audio_length"].sum() / 60 / 60))
     df["audio_length"].plot.hist()
@@ -666,10 +665,8 @@ def run(input_pars, modelpath, logpath):
             "itps_cer": cer,
         }
     )
-
     learn.model.save_pretrained(model_out_path)
     save_json(Path(model_out_path) / "vocab.json", tok.tokenizer.get_vocab())
-
     wandb.finish()
     return cer
 
@@ -840,7 +837,7 @@ if os.path.exists("config_to_try.json"):
     with open("config_to_try.json", "r") as f:
         config_to_try = json.load(f)
         study.enqueue_trial(config_to_try)
-    logger.info(f"Trying config {logger.info(config_to_try)} First.")
+    logger.info(f"Trying config {config_to_try} First.")
 
 study.optimize(objective, n_trials=10, gc_after_trial=True)
 trial = study.best_trial
