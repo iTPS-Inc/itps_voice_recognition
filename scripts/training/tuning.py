@@ -58,7 +58,7 @@ import csv
 import os 
 # os.chdir("/content/itps_voice_recognition/src/")
 
-import pprint
+import plogger.info
 from fastai.data.all import *
 from fastai.callback.wandb import WandbCallback
 from transformers import Wav2Vec2FeatureExtractor, Wav2Vec2ForMaskedLM, AutoTokenizer, Wav2Vec2Processor, Wav2Vec2ForCTC, AutoModelForCTC
@@ -106,6 +106,8 @@ from functools import lru_cache
 from collections import Counter
 import wandb
 from tqdm.auto import tqdm
+import logging
+logger = logging.getLogger(__name__)
 
 tqdm.pandas()
 
@@ -123,10 +125,10 @@ def prepare_df(df, audio_length=10, min_audio_length=3):
     df[["audio_length", "sr"]] = df["filename"].progress_apply(
         lambda x: pd.Series(get_audio_length(x))
     )
-    print("Longest clip: ", df["audio_length"].max())
+    logger.info("Longest clip: ", df["audio_length"].max())
     df["audio_length"].plot.hist()
     plt.show()
-    print("Length of datset before filtering:", df["audio_length"].sum() / 60 / 60)
+    logger.info("Length of datset before filtering:", df["audio_length"].sum() / 60 / 60)
     df = df[df["audio_length"] < audio_length].reset_index(drop=True)
     df = df[df["audio_length"] > min_audio_length].reset_index(drop=True)
     df = df[df["text"] != "[NO SPEECH]"]
@@ -134,7 +136,7 @@ def prepare_df(df, audio_length=10, min_audio_length=3):
     df = df[~df["text"].isna()].reset_index(drop=True)
 
     df["text"] = df["text"].str.lower()
-    print("Length of dataset after filtering: ", df["audio_length"].sum() / 60 / 60)
+    logger.info("Length of dataset after filtering: ", df["audio_length"].sum() / 60 / 60)
     df["audio_length"].plot.hist()
     plt.show()
     return df
@@ -649,10 +651,10 @@ def run(input_pars, modelpath, logpath):
     else:
         itps_df = pd.read_pickle(datapath / f"itps_data_{LANG}.pkl")
     _, _, _, itps_dl = log_itps_predictions(learn, dls, itps_df)
-    print("Got all the predictions for itps")
+    logger.info("Got all the predictions for itps")
 
     valid_loss, perplexity, wer, cer = learn.validate(dl=itps_dl)
-    print(f"Got evaluation for itps WER: {wer}, CER: {cer}")
+    logger.info(f"Got evaluation for itps WER: {wer}, CER: {cer}")
     wandb.log(
         {
             "itps_valid_loss": valid_loss,
@@ -704,7 +706,7 @@ if LANG == "en":
     frac = 0.01
     cv = cv.sample(frac=frac)
     DSET_NAMES += f"{frac:.2f}".replace(".", "_")
-    print(f"{frac:.2f}")
+    logger.info(f"{frac:.2f}")
 
 df = pd.concat([cv, df], ignore_index=True).reset_index(drop=True)
 DSET_NAMES += "-cv"
@@ -751,16 +753,16 @@ dfpath = (
     Path().home() / ".fastdownload" / "preprocessed" / f"{LANG}_df_{DSET_NAMES}.csv"
 )
 if not os.path.exists(dfpath):
-  print('Preparing df')
+  logger.info('Preparing df')
   df = prepare_df(df, audio_length=AUDIO_LENGTH)
   df.to_pickle(dfpath)
 else:
-  print('reading df')
+  logger.info('reading df')
   df = pd.read_pickle(dfpath)
   if TEST_RUN:
     df = df.iloc[:100]
 
-print(DSET_NAMES)
+logger.info(DSET_NAMES)
 
 if LANG == "jp":
     vocab = JPTransformersTokenizer.create_vocab("vocab.json")
@@ -833,9 +835,9 @@ if os.path.exists("config_to_try.json"):
     with open("config_to_try.json", "r") as f:
         config_to_try = json.load(f)
         study.enqueue_trial(config_to_try)
-    print("Trying config")
-    pprint.pprint(config_to_try)
-    print("First")
+    logger.info("Trying config")
+    logger.info(config_to_try)
+    logger.info("First")
 
 study.optimize(objective, n_trials=10, gc_after_trial=True)
 trial = study.best_trial
