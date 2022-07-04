@@ -10,7 +10,6 @@ Original file is located at
 # Setup
 """
 import os
-from sys import stdout
 
 TEST_RUN = os.environ.get("TEST_RUN", False)
 
@@ -112,8 +111,6 @@ import sys
 
 logger = logging.getLogger(__name__)
 logger.setLevel(level=logging.DEBUG)
-logger.addHandler(hdlr=logging.StreamHandler(stream=sys.stdout))
-logger.addHandler(hdlr=logging.FileHandler(filename=Path(logpath) / "complete.log"))
 
 tqdm.pandas()
 
@@ -249,8 +246,7 @@ def after_epoch(self: WandbCallback):
     "Log validation loss and custom metrics & log prediction samples"
     # Correct any epoch rounding error and overwrite value
     self._wandb_epoch = round(self._wandb_epoch)
-    if self.log_preds and self.log_preds_every_epoch:
-        self.log_predictions()
+    if self.log_preds and self.log_preds_every_epoch: self.log_predictions()
     wandb.log({"epoch": self._wandb_epoch}, step=self._wandb_step)
     wandb.log(
         {
@@ -655,12 +651,12 @@ def run(input_pars, modelpath, logpath):
     if not os.path.exists(Path(datapath) / f"itps_data_{LANG}.pkl"):
         itps_df = prepare_df(itps_data, audio_length=AUDIO_LENGTH)
     else:
-        itps_df = pd.read_pickle(datapath / f"itps_data_{LANG}.pkl")
+        itps_df = pd.read_pickle(Path(datapath) / f"itps_data_{LANG}.pkl")
     _, _, _, itps_dl = log_itps_predictions(learn, dls, itps_df)
     logger.info("Got all the predictions for itps")
 
     valid_loss, perplexity, wer, cer = learn.validate(dl=itps_dl)
-    logger.info(f"Got evaluation for itps WER: {wer}, CER: {cer}")
+    logger.info(f"{wandb.run.name}: Got evaluation for itps WER: {wer}, CER: {cer}")
     wandb.log(
         {
             "itps_valid_loss": valid_loss,
@@ -670,9 +666,7 @@ def run(input_pars, modelpath, logpath):
         }
     )
 
-    if cer < 0.5:
-        learn.model.save_pretrained(model_out_path)
-
+    learn.model.save_pretrained(model_out_path)
     save_json(Path(model_out_path) / "vocab.json", tok.tokenizer.get_vocab())
 
     wandb.finish()
@@ -680,8 +674,8 @@ def run(input_pars, modelpath, logpath):
 
 
 MONITOR = os.environ.get("MONITOR", "cer")
-NUM_EPOCHS = os.environ.get("NUM_EPOCHS", 20)
-AUDIO_LENGTH = os.environ.get("AUDIO_LENGTH", 10)
+NUM_EPOCHS = int(os.environ.get("NUM_EPOCHS", 20))
+AUDIO_LENGTH = int(os.environ.get("AUDIO_LENGTH", 10))
 LANG = os.environ.get("TRAIN_LANG", "jp")
 USE_OTHER = os.environ.get("USE_OTHER", "true")
 
@@ -845,9 +839,7 @@ if os.path.exists("config_to_try.json"):
     with open("config_to_try.json", "r") as f:
         config_to_try = json.load(f)
         study.enqueue_trial(config_to_try)
-    logger.info("Trying config")
-    logger.info(config_to_try)
-    logger.info("First")
+    logger.info(f"Trying config {logger.info(config_to_try)} First.")
 
 study.optimize(objective, n_trials=10, gc_after_trial=True)
 trial = study.best_trial
