@@ -528,7 +528,7 @@ def save_json(fname, obj):
 def run(input_pars, modelpath, logpath):
     params = input_pars.copy()
     log_cbs = get_logging_cbs(framework=LOGGING_FRAMEWORK, params=input_pars)
-
+    wandb.log({"dataset": DSET_NAMES})
     with_attentions = params.pop("with_attentions")
     loss_func_name = params.pop("loss_func")
     arch = params.pop("arch")
