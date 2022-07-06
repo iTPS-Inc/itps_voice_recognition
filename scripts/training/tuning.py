@@ -630,7 +630,7 @@ def run(input_pars, modelpath, logpath):
         else:
             learn.fit(NUM_EPOCHS, lr=lr, cbs=fit_cbs)
 
-    valid_loss, perplexity, wer, cer = learn.validate()
+    valid_loss, perplexity, cer, wer = learn.validate()
     wandb.log(
         {
             "complete_valid_loss": valid_loss,
@@ -651,7 +651,7 @@ def run(input_pars, modelpath, logpath):
         itps_df = pd.read_pickle(Path(datapath) / f"itps_data_{LANG}.pkl")
     _, _, _, itps_dl = log_itps_predictions(learn, dls, itps_df)
     logger.info("Got all the predictions for itps")
-    valid_loss, perplexity, wer, cer = learn.validate(dl=itps_dl)
+    valid_loss, perplexity, cer, wer = learn.validate(dl=itps_dl)
     logger.info(f"{wandb.run.name}: Got evaluation for itps WER: {wer}, CER: {cer}")
     wandb.log(
         {
