@@ -673,9 +673,9 @@ def run(input_pars, modelpath, logpath):
     )
     if TEST_RUN:
         if sched == "fit_one_cycle":
-            learn.fit_one_cycle(NUM_EPOCHS, lr_max=lr, cbs=fit_cbs, div=2)
+            learn.fit_one_cycle(1, lr_max=lr, cbs=fit_cbs, div=2)
         else:
-            learn.fit(NUM_EPOCHS, lr=lr, cbs=fit_cbs)
+            learn.fit(1, lr=lr, cbs=fit_cbs)
     else:
         if sched == "fit_one_cycle":
             learn.fit_one_cycle(NUM_EPOCHS, lr_max=lr, cbs=fit_cbs, div=2)
