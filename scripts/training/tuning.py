@@ -692,8 +692,10 @@ def run(input_pars, modelpath, logpath):
     )
     if not os.path.exists(Path(datapath) / f"itps_data_{LANG}.pkl"):
         itps_df = prepare_df(itps_data, audio_length=AUDIO_LENGTH)
+        itps_df["split"] = df["train"].apply(lambda x: "train" if x else "test")
     else:
         itps_df = pd.read_pickle(Path(datapath) / f"itps_data_{LANG}.pkl")
+        itps_df["split"] = df["train"].apply(lambda x: "train" if x else "test")
 
     itps_test_df = itps_data[itps_data["split"] == "test"].reset_index(drop=True)
 
