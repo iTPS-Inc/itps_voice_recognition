@@ -558,12 +558,11 @@ def save_json(fname, obj):
 def log_preds_for_df(learn, dls, df, title):
     if df is not None:
         _, _, _, dl = log_itps_predictions(learn, dls, df)
-        logger.info("Got all the predictions for itps test")
         valid_loss, perplexity, cer, wer = learn.validate(dl=dl)
     else:
-        logger.info("Got all the predictions for itps test")
+        # Above and below have to have different order
         valid_loss, perplexity, cer, wer = learn.validate()
-        _, _, _, dl = log_predictions(learn, dls, cer)
+        _ = log_predictions(learn, dls, cer)
 
     logger.info(
         f"{wandb.run.name}: Got evaluation for {title}: WER: {wer}, test CER: {cer}"
