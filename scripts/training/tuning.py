@@ -55,15 +55,23 @@ logpath = os.environ.get("AUDIOLOGDIR", f"/content/drive/MyDrive/data/logs/")
 # Imports
 """
 import csv
-import os 
+import os
+
 # os.chdir("/content/itps_voice_recognition/src/")
 
 from fastai.data.all import *
 from fastai.callback.wandb import WandbCallback
-from transformers import Wav2Vec2FeatureExtractor, Wav2Vec2ForMaskedLM, AutoTokenizer, Wav2Vec2Processor, Wav2Vec2ForCTC, AutoModelForCTC
+from transformers import (
+    Wav2Vec2FeatureExtractor,
+    Wav2Vec2ForMaskedLM,
+    AutoTokenizer,
+    Wav2Vec2Processor,
+    Wav2Vec2ForCTC,
+    AutoModelForCTC,
+)
 from transformers import Wav2Vec2CTCTokenizer
 from datasets import load_dataset
-from fastai.text.all import * 
+from fastai.text.all import *
 from fastai.vision.all import *
 from fastai.callback.tensorboard import *
 from fastai.callback.neptune import *
@@ -119,6 +127,7 @@ tqdm.pandas()
 
 SAMPLE_NOISE_URL = "https://pytorch-tutorial-assets.s3.amazonaws.com/VOiCES_devkit/distant-16k/distractors/rm1/babb/Lab41-SRI-VOiCES-rm1-babb-mc01-stu-clo.wav"
 
+
 @lru_cache(maxsize=None)
 def get_audio_length(s):
     t, sr = torchaudio.load(s)
@@ -132,14 +141,22 @@ def prepare_df(df, audio_length=10, min_audio_length=3):
     logger.info("Longest clip: {}".format(df["audio_length"].max()))
     df["audio_length"].plot.hist()
     plt.show()
-    logger.info("Length of datset before filtering: {}".format(df["audio_length"].sum() / 60 / 60))
+    logger.info(
+        "Length of datset before filtering: {}".format(
+            df["audio_length"].sum() / 60 / 60
+        )
+    )
     df = df[df["audio_length"] < audio_length].reset_index(drop=True)
     df = df[df["audio_length"] > min_audio_length].reset_index(drop=True)
     df = df[df["text"] != "[NO SPEECH]"]
-    df = df[df["text"].apply(len) > 10] # more than 10 characters
+    df = df[df["text"].apply(len) > 10]  # more than 10 characters
     df = df[~df["text"].isna()].reset_index(drop=True)
     df["text"] = df["text"].str.lower()
-    logger.info("Length of dataset after filtering: {}".format(df["audio_length"].sum() / 60 / 60))
+    logger.info(
+        "Length of dataset after filtering: {}".format(
+            df["audio_length"].sum() / 60 / 60
+        )
+    )
     df["audio_length"].plot.hist()
     plt.show()
     return df
@@ -207,6 +224,7 @@ def get_dls(
     )
     return dls
 
+
 def construct_augs(params) -> List[Union[None, Transform]]:
     augs = []
     random_reverb = params.pop("RandomReverb")
@@ -233,6 +251,7 @@ def construct_augs(params) -> List[Union[None, Transform]]:
         augs.append(noise_t)
     return augs
 
+
 def write_csv(fname, columns, data):
     with open(fname, "w") as csvfile:
         spamwriter = csv.writer(csvfile)
@@ -246,7 +265,8 @@ def after_epoch(self: WandbCallback):
     "Log validation loss and custom metrics & log prediction samples"
     # Correct any epoch rounding error and overwrite value
     self._wandb_epoch = round(self._wandb_epoch)
-    if self.log_preds and self.log_preds_every_epoch: self.log_predictions()
+    if self.log_preds and self.log_preds_every_epoch:
+        self.log_predictions()
     wandb.log({"epoch": self._wandb_epoch}, step=self._wandb_step)
     wandb.log(
         {
@@ -337,11 +357,13 @@ def log_predictions(learn, dls, cer, thresh=0.2):
 
 """## Model"""
 
+
 class AudioNormalize(Transform):
     def encodes(self, x: TensorAudio):
         with torch.no_grad():
             feats = F.layer_norm(x, x.shape)
         return feats
+
 
 class MetricsToWandb(Callback):
     def after_epoch(self):
@@ -470,7 +492,8 @@ def trial_suggestions(trial):
         "facebook/wav2vec2-xls-r-1b",
         #  "facebook/wav2vec2-xls-r-2b"
     ]
-    smaller_archlist = [ "facebook/hubert-large-ll60k",
+    smaller_archlist = [
+        "facebook/hubert-large-ll60k",
         "facebook/wav2vec2-xls-r-300m",
     ]
     arch = trial.suggest_categorical("arch", smaller_archlist)
@@ -482,7 +505,9 @@ def trial_suggestions(trial):
     layerdrop = trial.suggest_float("layerdrop", low=0.03, high=0.2)
     mask_time_prob = trial.suggest_float("mask_time_prob", low=0.03, high=0.3)
     mask_feature_prob = trial.suggest_float("mask_feature_prob", low=0.03, high=0.3)
-    early_stopping_monitor = trial.suggest_categorical("early_stopping_monitor", ["valid_loss", "cer"])
+    early_stopping_monitor = trial.suggest_categorical(
+        "early_stopping_monitor", ["valid_loss", "cer"]
+    )
 
     # Augmentations
     random_reverb = trial.suggest_categorical("RandomReverb", [True, False])
@@ -494,9 +519,13 @@ def trial_suggestions(trial):
     if loss_func != "transformers_ctc":
         lr_finder = trial.suggest_categorical("lr_finder", [True, False])
 
-    sched = trial.suggest_categorical("schedule", [
-      "fit_one_cycle", "exponential",# "ramp_quarter_pipe"
-    ])
+    sched = trial.suggest_categorical(
+        "schedule",
+        [
+            "fit_one_cycle",
+            "exponential",  # "ramp_quarter_pipe"
+        ],
+    )
 
     # def after_epoch(self):
     #     "Log validation loss and custom metrics & log prediction samples"
