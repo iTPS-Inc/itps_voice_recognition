@@ -476,12 +476,13 @@ def trial_suggestions(trial):
     arch = trial.suggest_categorical("arch", smaller_archlist)
     do_normalize = trial.suggest_categorical("do_normalize", [True, False])
 
-    feat_proj_dropout = trial.suggest_float("feat_proj_dropout", low=0.03, high=0.2)
-    hidden_dropout = trial.suggest_float("hidden_dropout", low=0.03, high=0.2)
-    attention_dropout = trial.suggest_float("attention_dropout", low=0.03, high=0.2)
+    feat_proj_dropout = trial.suggest_float("feat_proj_dropout", low=0.03, high=0.3)
+    hidden_dropout = trial.suggest_float("hidden_dropout", low=0.03, high=0.3)
+    attention_dropout = trial.suggest_float("attention_dropout", low=0.03, high=0.3)
     layerdrop = trial.suggest_float("layerdrop", low=0.03, high=0.2)
     mask_time_prob = trial.suggest_float("mask_time_prob", low=0.03, high=0.3)
     mask_feature_prob = trial.suggest_float("mask_feature_prob", low=0.03, high=0.3)
+    early_stopping_monitor = trial.suggest_categorical(["valid_loss", "cer"])
 
     # Augmentations
     random_reverb = trial.suggest_categorical("RandomReverb", [True, False])
@@ -534,6 +535,7 @@ def run(input_pars, modelpath, logpath):
     arch = params.pop("arch")
     lr = params.pop("lr")
     bs = params.pop("bs")
+    early_stopping_monitor = params.pop("early_stopping_monitor")
     augs = construct_augs(params)
     do_normalize = params.pop("do_normalize")
 
@@ -568,7 +570,7 @@ def run(input_pars, modelpath, logpath):
         ),
         TensorBoardCallback(log_dir=logdir, trace_model=False, log_preds=False),
         EarlyStoppingCallback(
-            comp=np.less, monitor=MONITOR, patience=3, min_delta=0
+            comp=np.less, monitor=early_stopping_monitor, patience=3, min_delta=0
         ),
         MetricsToWandb(),
     ]
@@ -578,11 +580,6 @@ def run(input_pars, modelpath, logpath):
         lr_max, lr_min = lr, lr / 10
         schedule = ParamScheduler({"lr": SchedExp(start=lr_max, end=lr_min)})
         fit_cbs.append(schedule)
-    # elif sched == "ramp_quarter_pipe":
-    #       lr_min, lr_max = lr, lr/10
-    #       schedule = combine_scheds([0.3, 0.2, 0.5], [SchedLin(lr_min, lr_max), SchedNo(lr_max, lr_max), SchedCos(lr_max, lr_min)])
-    #       fit_cbs.append(schedule)
-
     model.freeze_feature_extractor()
 
     if LOGGING_FRAMEWORK.lower() == "wandb":
@@ -615,7 +612,7 @@ def run(input_pars, modelpath, logpath):
             DropPreds(),
             SaveModelCallback(
                 comp=np.less,
-                monitor=MONITOR,
+                monitor=early_stopping_monitor,
                 min_delta=0,
                 fname=arch.replace("/", "_"),
             ),
@@ -794,7 +791,7 @@ logpath = Path(logpath) / f"audio_{LANG}"
 storage_fname = f"opt_study_{LANG}_big"
 storage = f"{modelpath / storage_fname}"
 
-STUDY_NAME = f"{LANG}_study"
+STUDY_NAME = f"{LANG}_study_colab"
 
 
 def objective(trial):
@@ -873,7 +870,7 @@ def quick_get_run(input_pars, modelpath, logpath):
         ),
         TensorBoardCallback(log_dir=logdir, trace_model=False, log_preds=False),
         EarlyStoppingCallback(
-            comp=np.less, monitor=MONITOR, min_delta=0, patience=3
+            comp=np.less, monitor=early_stopping_monitor, min_delta=0, patience=3
         ),
     ]
 
