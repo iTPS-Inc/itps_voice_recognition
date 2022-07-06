@@ -405,9 +405,9 @@ def get_model(
 def get_logging_cbs(framework, params=None, **kwargs):
     if framework.lower() == "wandb":
         if TEST_RUN:
-            wandb.init(project="itps-gpu-real-testing", config=params)
+            wandb.init(project=f"itps-colab-{LANG}-testing", config=params)
         else:
-            wandb.init(project="itps-gpu-real-big", config=params)
+            wandb.init(project=f"itps-colab-{LANG}", config=params)
         log_cbs = [WandbCallback(log="all", log_preds=False, log_model=False, **kwargs)]
     elif framework.lower() == "neptune":
         neptune.init("jjs/itps-language-model")
