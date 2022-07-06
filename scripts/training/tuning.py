@@ -643,12 +643,16 @@ def run(input_pars, modelpath, logpath):
     log_predictions(learn, dls, cer)
 
     _, itps_data = get_datasets(
-        [DatasetConfig(name="itps", lang=LANG, split="test")], base="~/.fastdownload"
+        [DatasetConfig(name="itps", lang=LANG, split="test"),
+         DatasetConfig(name="itps", lang=LANG, split="train"),
+         ], base="~/.fastdownload"
     )
+
     if not os.path.exists(Path(datapath) / f"itps_data_{LANG}.pkl"):
         itps_df = prepare_df(itps_data, audio_length=AUDIO_LENGTH)
     else:
         itps_df = pd.read_pickle(Path(datapath) / f"itps_data_{LANG}.pkl")
+
     _, _, _, itps_dl = log_itps_predictions(learn, dls, itps_df)
     logger.info("Got all the predictions for itps")
     valid_loss, perplexity, cer, wer = learn.validate(dl=itps_dl)
