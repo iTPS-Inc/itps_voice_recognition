@@ -482,7 +482,7 @@ def trial_suggestions(trial):
     layerdrop = trial.suggest_float("layerdrop", low=0.03, high=0.2)
     mask_time_prob = trial.suggest_float("mask_time_prob", low=0.03, high=0.3)
     mask_feature_prob = trial.suggest_float("mask_feature_prob", low=0.03, high=0.3)
-    early_stopping_monitor = trial.suggest_categorical(["valid_loss", "cer"])
+    early_stopping_monitor = trial.suggest_categorical("early_stopping_monitor", ["valid_loss", "cer"])
 
     # Augmentations
     random_reverb = trial.suggest_categorical("RandomReverb", [True, False])
