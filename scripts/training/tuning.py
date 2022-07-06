@@ -683,7 +683,7 @@ def run(input_pars, modelpath, logpath):
             learn.fit(NUM_EPOCHS, lr=lr, cbs=fit_cbs)
 
     # From here on is validation
-    _, itps_data = get_datasets(
+    _, itps_df = get_datasets(
         [
             DatasetConfig(name="itps", lang=LANG, split="test"),
             DatasetConfig(name="itps", lang=LANG, split="train"),
@@ -691,13 +691,13 @@ def run(input_pars, modelpath, logpath):
         base="~/.fastdownload",
     )
     if not os.path.exists(Path(datapath) / f"itps_data_{LANG}.pkl"):
-        itps_df = prepare_df(itps_data, audio_length=AUDIO_LENGTH)
-        itps_df["split"] = df["train"].apply(lambda x: "train" if x else "test")
+        itps_df = prepare_df(itps_df, audio_length=AUDIO_LENGTH)
+        itps_df["split"] = itps_df["train"].apply(lambda x: "train" if x else "test")
     else:
         itps_df = pd.read_pickle(Path(datapath) / f"itps_data_{LANG}.pkl")
-        itps_df["split"] = df["train"].apply(lambda x: "train" if x else "test")
+        itps_df["split"] = itps_df["train"].apply(lambda x: "train" if x else "test")
 
-    itps_test_df = itps_data[itps_data["split"] == "test"].reset_index(drop=True)
+    itps_test_df = itps_df[itps_df["split"] == "test"].reset_index(drop=True)
 
     _ = log_preds_for_df(learn, dls, None, "complete_valid")
     _loss, _perp, cer, _wer = log_preds_for_df(learn, dls, itps_df, "itps")
