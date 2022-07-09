@@ -47,7 +47,7 @@ logpath = os.environ.get("AUDIOLOGDIR", f"/content/drive/MyDrive/data/logs/")
 # %load_ext autoreload
 # %load_ext tensorboard
 # %autoreload 2
-# import os
+# import os 
 # os.chdir("/content/itps_voice_recognition")
 
 """# Tensorboard
@@ -55,23 +55,15 @@ logpath = os.environ.get("AUDIOLOGDIR", f"/content/drive/MyDrive/data/logs/")
 # Imports
 """
 import csv
-import os
-
+import os 
 # os.chdir("/content/itps_voice_recognition/src/")
 
 from fastai.data.all import *
 from fastai.callback.wandb import WandbCallback
-from transformers import (
-    Wav2Vec2FeatureExtractor,
-    Wav2Vec2ForMaskedLM,
-    AutoTokenizer,
-    Wav2Vec2Processor,
-    Wav2Vec2ForCTC,
-    AutoModelForCTC,
-)
+from transformers import Wav2Vec2FeatureExtractor, Wav2Vec2ForMaskedLM, AutoTokenizer, Wav2Vec2Processor, Wav2Vec2ForCTC, AutoModelForCTC
 from transformers import Wav2Vec2CTCTokenizer
 from datasets import load_dataset
-from fastai.text.all import *
+from fastai.text.all import * 
 from fastai.vision.all import *
 from fastai.callback.tensorboard import *
 from fastai.callback.neptune import *
@@ -127,7 +119,6 @@ tqdm.pandas()
 
 SAMPLE_NOISE_URL = "https://pytorch-tutorial-assets.s3.amazonaws.com/VOiCES_devkit/distant-16k/distractors/rm1/babb/Lab41-SRI-VOiCES-rm1-babb-mc01-stu-clo.wav"
 
-
 @lru_cache(maxsize=None)
 def get_audio_length(s):
     t, sr = torchaudio.load(s)
@@ -141,22 +132,14 @@ def prepare_df(df, audio_length=10, min_audio_length=3):
     logger.info("Longest clip: {}".format(df["audio_length"].max()))
     df["audio_length"].plot.hist()
     plt.show()
-    logger.info(
-        "Length of datset before filtering: {}".format(
-            df["audio_length"].sum() / 60 / 60
-        )
-    )
+    logger.info("Length of datset before filtering: {}".format(df["audio_length"].sum() / 60 / 60))
     df = df[df["audio_length"] < audio_length].reset_index(drop=True)
     df = df[df["audio_length"] > min_audio_length].reset_index(drop=True)
     df = df[df["text"] != "[NO SPEECH]"]
-    df = df[df["text"].apply(len) > 10]  # more than 10 characters
+    df = df[df["text"].apply(len) > 10] # more than 10 characters
     df = df[~df["text"].isna()].reset_index(drop=True)
     df["text"] = df["text"].str.lower()
-    logger.info(
-        "Length of dataset after filtering: {}".format(
-            df["audio_length"].sum() / 60 / 60
-        )
-    )
+    logger.info("Length of dataset after filtering: {}".format(df["audio_length"].sum() / 60 / 60))
     df["audio_length"].plot.hist()
     plt.show()
     return df
@@ -224,7 +207,6 @@ def get_dls(
     )
     return dls
 
-
 def construct_augs(params) -> List[Union[None, Transform]]:
     augs = []
     random_reverb = params.pop("RandomReverb")
@@ -251,7 +233,6 @@ def construct_augs(params) -> List[Union[None, Transform]]:
         augs.append(noise_t)
     return augs
 
-
 def write_csv(fname, columns, data):
     with open(fname, "w") as csvfile:
         spamwriter = csv.writer(csvfile)
@@ -265,8 +246,7 @@ def after_epoch(self: WandbCallback):
     "Log validation loss and custom metrics & log prediction samples"
     # Correct any epoch rounding error and overwrite value
     self._wandb_epoch = round(self._wandb_epoch)
-    if self.log_preds and self.log_preds_every_epoch:
-        self.log_predictions()
+    if self.log_preds and self.log_preds_every_epoch: self.log_predictions()
     wandb.log({"epoch": self._wandb_epoch}, step=self._wandb_step)
     wandb.log(
         {
@@ -357,13 +337,11 @@ def log_predictions(learn, dls, cer, thresh=0.2):
 
 """## Model"""
 
-
 class AudioNormalize(Transform):
     def encodes(self, x: TensorAudio):
         with torch.no_grad():
             feats = F.layer_norm(x, x.shape)
         return feats
-
 
 class MetricsToWandb(Callback):
     def after_epoch(self):
@@ -492,8 +470,7 @@ def trial_suggestions(trial):
         "facebook/wav2vec2-xls-r-1b",
         #  "facebook/wav2vec2-xls-r-2b"
     ]
-    smaller_archlist = [
-        "facebook/hubert-large-ll60k",
+    smaller_archlist = [ "facebook/hubert-large-ll60k",
         "facebook/wav2vec2-xls-r-300m",
     ]
     arch = trial.suggest_categorical("arch", smaller_archlist)
@@ -505,9 +482,7 @@ def trial_suggestions(trial):
     layerdrop = trial.suggest_float("layerdrop", low=0.03, high=0.2)
     mask_time_prob = trial.suggest_float("mask_time_prob", low=0.03, high=0.3)
     mask_feature_prob = trial.suggest_float("mask_feature_prob", low=0.03, high=0.3)
-    early_stopping_monitor = trial.suggest_categorical(
-        "early_stopping_monitor", ["perplexity", "cer"]
-    )
+    early_stopping_monitor = trial.suggest_categorical("early_stopping_monitor", ["valid_loss", "cer"])
 
     # Augmentations
     random_reverb = trial.suggest_categorical("RandomReverb", [True, False])
@@ -519,13 +494,9 @@ def trial_suggestions(trial):
     if loss_func != "transformers_ctc":
         lr_finder = trial.suggest_categorical("lr_finder", [True, False])
 
-    sched = trial.suggest_categorical(
-        "schedule",
-        [
-            "fit_one_cycle",
-            "exponential",  # "ramp_quarter_pipe"
-        ],
-    )
+    sched = trial.suggest_categorical("schedule", [
+      "fit_one_cycle", "exponential",# "ramp_quarter_pipe"
+    ])
 
     # def after_epoch(self):
     #     "Log validation loss and custom metrics & log prediction samples"
@@ -555,29 +526,6 @@ def save_json(fname, obj):
         json.dump(obj, f)
 
 
-def log_preds_for_df(learn, dls, df, title):
-    if df is not None:
-        _, _, _, dl = log_itps_predictions(learn, dls, df)
-        valid_loss, perplexity, cer, wer = learn.validate(dl=dl)
-    else:
-        # Above and below have to have different order
-        valid_loss, perplexity, cer, wer = learn.validate()
-        _ = log_predictions(learn, dls, cer)
-
-    logger.info(
-        f"{wandb.run.name}: Got evaluation for {title}: WER: {wer}, test CER: {cer}"
-    )
-    wandb.log(
-        {
-            f"{title}_loss": valid_loss,
-            f"{title}_perplexity": perplexity,
-            f"{title}_wer": wer,
-            f"{title}_cer": cer,
-        }
-    )
-    return valid_loss, perplexity, cer, wer
-
-
 def run(input_pars, modelpath, logpath):
     params = input_pars.copy()
     log_cbs = get_logging_cbs(framework=LOGGING_FRAMEWORK, params=input_pars)
@@ -588,6 +536,8 @@ def run(input_pars, modelpath, logpath):
     lr = params.pop("lr")
     bs = params.pop("bs")
     early_stopping_monitor = params.pop("early_stopping_monitor")
+    if early_stopping_monitor == "valid_loss":
+        early_stopping_monitor = "perplexity"
     augs = construct_augs(params)
     do_normalize = params.pop("do_normalize")
 
@@ -673,40 +623,48 @@ def run(input_pars, modelpath, logpath):
     )
     if TEST_RUN:
         if sched == "fit_one_cycle":
-            learn.fit_one_cycle(1, lr_max=lr, cbs=fit_cbs, div=2)
+            learn.fit_one_cycle(NUM_EPOCHS, lr_max=lr, cbs=fit_cbs, div=2)
         else:
-            learn.fit(1, lr=lr, cbs=fit_cbs)
+            learn.fit(NUM_EPOCHS, lr=lr, cbs=fit_cbs)
     else:
         if sched == "fit_one_cycle":
             learn.fit_one_cycle(NUM_EPOCHS, lr_max=lr, cbs=fit_cbs, div=2)
         else:
             learn.fit(NUM_EPOCHS, lr=lr, cbs=fit_cbs)
 
-    # From here on is validation
-    _, itps_df = get_datasets(
-        [
-            DatasetConfig(name="itps", lang=LANG, split="test"),
-            DatasetConfig(name="itps", lang=LANG, split="train"),
-        ],
-        base="~/.fastdownload",
+    valid_loss, perplexity, wer, cer = learn.validate()
+    wandb.log(
+        {
+            "complete_valid_loss": valid_loss,
+            "complete_valid_perplexity": perplexity,
+            "complete_valid_wer": wer,
+            "complete_valid_cer": cer,
+        }
+    )
+
+    log_predictions(learn, dls, cer)
+
+    _, itps_data = get_datasets(
+        [DatasetConfig(name="itps", lang=LANG, split="test")], base="~/.fastdownload"
     )
     if not os.path.exists(Path(datapath) / f"itps_data_{LANG}.pkl"):
-        itps_df = prepare_df(itps_df, audio_length=AUDIO_LENGTH)
-        itps_df["split"] = itps_df["train"].apply(lambda x: "train" if x else "test")
+        itps_df = prepare_df(itps_data, audio_length=AUDIO_LENGTH)
     else:
         itps_df = pd.read_pickle(Path(datapath) / f"itps_data_{LANG}.pkl")
-        itps_df["split"] = itps_df["train"].apply(lambda x: "train" if x else "test")
-
-    itps_test_df = itps_df[itps_df["split"] == "test"].reset_index(drop=True)
-
-    _ = log_preds_for_df(learn, dls, None, "complete_valid")
-    _loss, _perp, cer, _wer = log_preds_for_df(learn, dls, itps_df, "itps")
-    _ = log_preds_for_df(learn, dls, itps_test_df, "itps_test")
-
+    _, _, _, itps_dl = log_itps_predictions(learn, dls, itps_df)
+    logger.info("Got all the predictions for itps")
+    valid_loss, perplexity, wer, cer = learn.validate(dl=itps_dl)
+    logger.info(f"{wandb.run.name}: Got evaluation for itps WER: {wer}, CER: {cer}")
+    wandb.log(
+        {
+            "itps_valid_loss": valid_loss,
+            "itps_perplexity": perplexity,
+            "itps_wer": wer,
+            "itps_cer": cer,
+        }
+    )
     learn.model.save_pretrained(model_out_path)
     save_json(Path(model_out_path) / "vocab.json", tok.tokenizer.get_vocab())
-    save_json(Path(model_out_path) / "vocab.json", input_pars)
-
     wandb.finish()
     return cer
 
@@ -728,7 +686,7 @@ if LANG == "jp":
         logger.info("Not using 'Other' dataset: {}".format(_dsets))
 if LANG == "en":
     datasets = [
-        DatasetConfig(name="itps", split="train", lang="en", kind=None),
+        DatasetConfig(name='itps', split='train', lang='en', kind=None),
         DatasetConfig(name="librispeech", split="dev", lang=None, kind="clean"),
         DatasetConfig(name="ljl", split="train", lang=None, kind=None),
         DatasetConfig(name="nict_spreds", split="train", lang="en", kind=None),
@@ -795,14 +753,14 @@ dfpath = (
     Path().home() / ".fastdownload" / "preprocessed" / f"{LANG}_df_{DSET_NAMES}.csv"
 )
 if not os.path.exists(dfpath):
-    logger.debug("Preparing df")
-    df = prepare_df(df, audio_length=AUDIO_LENGTH)
-    df.to_pickle(dfpath)
+  logger.debug('Preparing df')
+  df = prepare_df(df, audio_length=AUDIO_LENGTH)
+  df.to_pickle(dfpath)
 else:
-    logger.debug("Re-using df")
-    df = pd.read_pickle(dfpath)
-    if TEST_RUN:
-        df = df.iloc[:100]
+  logger.debug('Re-using df')
+  df = pd.read_pickle(dfpath)
+  if TEST_RUN:
+    df = df.iloc[:100]
 
 logger.debug(f"Dataset Names: {DSET_NAMES}")
 
@@ -943,3 +901,4 @@ def quick_get_run(input_pars, modelpath, logpath):
         log_cbs=log_cbs,
     )
     return learn, dls
+
