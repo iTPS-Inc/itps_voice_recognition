@@ -536,8 +536,6 @@ def run(input_pars, modelpath, logpath):
     lr = params.pop("lr")
     bs = params.pop("bs")
     early_stopping_monitor = params.pop("early_stopping_monitor")
-    if early_stopping_monitor == "valid_loss":
-        early_stopping_monitor = "perplexity"
     augs = construct_augs(params)
     do_normalize = params.pop("do_normalize")
 
