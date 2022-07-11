@@ -551,7 +551,9 @@ def run(input_pars, modelpath, logpath):
     archname = f"{arch.replace('/', '_')}_{timestamp}"
 
     model_out_path = f"{modelpath / wandb.run.name}"
+    os.makedirs(model_out_path, exist_ok=True)
     logdir = Path(f"{log_base_path / wandb.run.name}")
+    os.makedirs(logdir, exist_ok=True)
 
     model = get_model(arch, tok, with_attentions=with_attentions, **params)
     loss_func = get_loss_func(loss_func_name, len(tok.tokenizer))
