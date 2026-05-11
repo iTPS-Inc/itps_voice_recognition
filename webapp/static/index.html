@@ -3,38 +3,87 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Lecture Translator (EN → JA)</title>
+  <title>Lecture Translator · EN → 日本語</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
-  <header class="bar">
-    <h1>講演リアルタイム翻訳 <span class="muted">English → 日本語</span></h1>
-    <div class="controls">
-      <button id="startBtn" type="button">▶ Start</button>
-      <button id="stopBtn" type="button" disabled>■ Stop</button>
-      <label class="ctrl" title="Minimum chunk length. After this many seconds, the recorder waits for the first silence (speech break) before cutting the chunk.">
-        Min chunk
-        <input id="chunkSec" type="number" min="5" max="180" step="1" value="30" />
-        s
-      </label>
-      <label class="ctrl">
-        <input id="autoscroll" type="checkbox" checked />
-        Auto-scroll
-      </label>
-      <span id="status" class="status idle">idle</span>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true">
+        <span class="mark-dot"></span>
+        <span class="mark-dot"></span>
+        <span class="mark-dot"></span>
+      </div>
+      <div class="brand-text">
+        <h1>Lecture Translator</h1>
+        <p class="brand-sub">English → 日本語 · Powered by gpt-realtime</p>
+      </div>
+    </div>
+
+    <div class="hud">
+      <div class="meter" aria-hidden="true" title="microphone level">
+        <span></span><span></span><span></span><span></span>
+        <span></span><span></span><span></span><span></span>
+      </div>
+      <div id="status" class="status idle">
+        <span class="status-dot"></span>
+        <span class="status-text">idle</span>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button id="startBtn" class="btn btn-primary" type="button">
+        <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+          <path fill="currentColor" d="M8 5v14l11-7z"/>
+        </svg>
+        Start
+      </button>
+      <button id="stopBtn" class="btn btn-secondary" type="button" disabled>
+        <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+          <rect x="6" y="6" width="12" height="12" fill="currentColor" rx="2"/>
+        </svg>
+        Stop
+      </button>
+      <button id="clearBtn" class="btn btn-ghost" type="button" title="Clear transcript">
+        Clear
+      </button>
     </div>
   </header>
 
   <main class="panes">
-    <section class="pane">
-      <h2>English transcript</h2>
+    <section class="pane pane-en">
+      <header class="pane-head">
+        <div class="pane-title">
+          <span class="pane-tag">EN</span>
+          <h2>English transcript</h2>
+        </div>
+        <div class="pane-meta" id="enMeta">—</div>
+      </header>
       <div id="enLog" class="log" aria-live="polite"></div>
     </section>
-    <section class="pane ja">
-      <h2>日本語訳</h2>
+
+    <section class="pane pane-ja">
+      <header class="pane-head">
+        <div class="pane-title">
+          <span class="pane-tag">JA</span>
+          <h2>日本語訳</h2>
+        </div>
+        <div class="pane-meta" id="jaMeta">—</div>
+      </header>
       <div id="jaLog" class="log" aria-live="polite"></div>
     </section>
   </main>
+
+  <footer class="footbar">
+    <span class="hint">
+      Hold a steady pace. Server VAD detects each utterance and streams the
+      English transcript and Japanese translation in real time.
+    </span>
+    <span id="errorBanner" class="error-banner" hidden></span>
+  </footer>
 
   <script src="/static/app.js"></script>
 </body>

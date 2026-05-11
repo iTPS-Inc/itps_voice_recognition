@@ -1,237 +1,303 @@
-// Real-time English -> Japanese lecture translator (browser side).
+// Real-time English -> Japanese lecture translator (Option B, browser side).
 //
-// Captures microphone audio, slices it into variable-length chunks (a
-// minimum duration, then cut at the first detected silence / speech
-// break), ships each chunk over a WebSocket, and live-updates a
-// two-pane (EN / JA) transcript view.
+// Architecture:
+//   1. Fetch an ephemeral session token from our /session endpoint.
+//   2. Open a WebRTC peer connection directly to the OpenAI Realtime API,
+//      attaching the microphone track and a data channel.
+//   3. Stream incoming events through the data channel and render the
+//      English transcript and Japanese translation in two live panes.
 
 (() => {
   const startBtn = document.getElementById('startBtn');
   const stopBtn = document.getElementById('stopBtn');
-  const chunkSecInput = document.getElementById('chunkSec');
-  const autoscrollInput = document.getElementById('autoscroll');
+  const clearBtn = document.getElementById('clearBtn');
   const statusEl = document.getElementById('status');
+  const statusText = statusEl.querySelector('.status-text');
   const enLog = document.getElementById('enLog');
   const jaLog = document.getElementById('jaLog');
+  const enMeta = document.getElementById('enMeta');
+  const jaMeta = document.getElementById('jaMeta');
+  const errorBanner = document.getElementById('errorBanner');
+  const meterBars = Array.from(document.querySelectorAll('.meter span'));
 
-  // Silence detection params.
-  const SILENCE_RMS = 0.012;        // RMS amplitude below this counts as "quiet".
-  const SILENCE_HOLD_MS = 600;      // continuous quiet duration that defines a "break".
-  const VAD_POLL_MS = 80;           // RMS sampling cadence.
-  const MAX_CHUNK_MULTIPLIER = 2;   // safety: hard-cut after min * this many seconds.
-  const MAX_CHUNK_CEILING_S = 300;  // absolute upper bound (5 min).
-
-  /** @type {WebSocket | null} */ let ws = null;
+  /** @type {RTCPeerConnection | null} */ let pc = null;
+  /** @type {RTCDataChannel | null} */ let dc = null;
   /** @type {MediaStream | null} */ let mediaStream = null;
-  /** @type {MediaRecorder | null} */ let recorder = null;
   /** @type {AudioContext | null} */ let audioCtx = null;
   /** @type {AnalyserNode | null} */ let analyser = null;
-  /** @type {Float32Array | null} */ let vadBuf = null;
-  /** @type {number | null} */ let safetyTimer = null;
-  /** @type {number | null} */ let vadTimer = null;
-  let chunkId = 0;
+  /** @type {Float32Array | null} */ let meterBuf = null;
+  /** @type {number | null} */ let meterRaf = null;
+  /** @type {HTMLAudioElement | null} */ let remoteAudioEl = null;
   let running = false;
-  /** @type {Map<number, {en: HTMLElement, ja: HTMLElement}>} */
-  const segments = new Map();
+
+  // ----- segment state -----
+  /** @typedef {{enEl: HTMLElement, jaEl: HTMLElement, time: string}} Row */
+  /** @type {Map<string, Row>} */ const rowsByItem = new Map();
+  /** @type {string[]} */ const pendingItemQueue = [];
+  /** @type {Map<string, string>} */ const responseToItem = new Map();
+
+  let enChars = 0;
+  let jaChars = 0;
+
+  // ---------- ui helpers ----------
 
   const setStatus = (text, klass) => {
-    statusEl.textContent = text;
-    statusEl.className = 'status ' + (klass || '');
+    statusText.textContent = text;
+    statusEl.className = 'status ' + (klass || 'idle');
   };
 
-  const pickMime = () => {
-    const candidates = [
-      'audio/webm;codecs=opus',
-      'audio/webm',
-      'audio/ogg;codecs=opus',
-      'audio/mp4',
-    ];
-    for (const m of candidates) {
-      if (window.MediaRecorder && MediaRecorder.isTypeSupported(m)) return m;
-    }
-    return '';
+  const setError = (msg) => {
+    if (!msg) { errorBanner.hidden = true; errorBanner.textContent = ''; return; }
+    errorBanner.hidden = false;
+    errorBanner.textContent = msg;
   };
 
-  const minChunkSec = () => {
-    const raw = Number(chunkSecInput.value);
-    if (!Number.isFinite(raw)) return 30;
-    return Math.max(5, Math.min(180, Math.round(raw)));
+  const stampNow = () => {
+    const d = new Date();
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mm = String(d.getMinutes()).padStart(2, '0');
+    const ss = String(d.getSeconds()).padStart(2, '0');
+    return `${hh}:${mm}:${ss}`;
   };
 
-  const appendSegment = (id) => {
-    const en = document.createElement('div');
-    en.className = 'segment pending';
-    en.dataset.id = String(id);
-    en.textContent = '…';
-    enLog.appendChild(en);
-
-    const ja = document.createElement('div');
-    ja.className = 'segment pending';
-    ja.dataset.id = String(id);
-    ja.textContent = '…';
-    jaLog.appendChild(ja);
-
-    segments.set(id, { en, ja });
-    scrollLogs();
+  const updateMeta = () => {
+    enMeta.textContent = enChars ? `${enChars.toLocaleString()} chars` : '—';
+    jaMeta.textContent = jaChars ? `${jaChars.toLocaleString()} chars` : '—';
   };
 
-  const scrollLogs = () => {
-    if (!autoscrollInput.checked) return;
+  const newSegment = (kind, time) => {
+    const el = document.createElement('div');
+    el.className = 'segment pending';
+    el.dataset.time = time;
+    el.textContent = '';
+    (kind === 'en' ? enLog : jaLog).appendChild(el);
+    autoscroll();
+    return el;
+  };
+
+  const autoscroll = () => {
     enLog.scrollTop = enLog.scrollHeight;
     jaLog.scrollTop = jaLog.scrollHeight;
   };
 
-  const handleMessage = (raw) => {
-    let data;
-    try { data = JSON.parse(raw); } catch { return; }
-    const seg = segments.get(data.id);
-    if (!seg) return;
-    if (data.type === 'english') {
-      if (data.text) {
-        seg.en.textContent = data.text;
-        seg.en.classList.remove('pending', 'empty');
-      } else {
-        seg.en.textContent = '(silence)';
-        seg.en.classList.remove('pending');
-        seg.en.classList.add('empty');
-      }
-    } else if (data.type === 'japanese') {
-      if (data.text) {
-        seg.ja.textContent = data.text;
-        seg.ja.classList.remove('pending', 'empty');
-      } else {
-        seg.ja.textContent = '(無音)';
-        seg.ja.classList.remove('pending');
-        seg.ja.classList.add('empty');
-      }
-    } else if (data.type === 'error') {
-      seg.en.classList.add('error');
-      seg.ja.classList.add('error');
-      const msg = 'Error: ' + (data.message || 'unknown');
-      if (seg.en.classList.contains('pending')) seg.en.textContent = msg;
-      if (seg.ja.classList.contains('pending')) seg.ja.textContent = msg;
-    }
-    scrollLogs();
+  const getOrCreateRow = (itemId) => {
+    let row = rowsByItem.get(itemId);
+    if (row) return row;
+    const time = stampNow();
+    row = {
+      enEl: newSegment('en', time),
+      jaEl: newSegment('ja', time),
+      time,
+    };
+    rowsByItem.set(itemId, row);
+    pendingItemQueue.push(itemId);
+    return row;
   };
 
-  const openWs = () => new Promise((resolve, reject) => {
-    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-    const sock = new WebSocket(`${proto}://${location.host}/ws`);
-    sock.binaryType = 'arraybuffer';
-    sock.addEventListener('open', () => resolve(sock), { once: true });
-    sock.addEventListener('error', (e) => reject(e), { once: true });
-    sock.addEventListener('message', (ev) => handleMessage(ev.data));
-    sock.addEventListener('close', () => {
-      if (running) setStatus('disconnected', 'error');
-    });
-  });
+  // ---------- event handling ----------
 
-  const setupVad = (stream) => {
+  const handleEvent = (ev) => {
+    switch (ev.type) {
+      case 'session.created':
+      case 'session.updated':
+        // No-op; session is configured server-side via /session.
+        break;
+
+      case 'input_audio_buffer.speech_started':
+        setStatus('speaking', 'speaking');
+        break;
+
+      case 'input_audio_buffer.speech_stopped':
+        setStatus('listening', 'listening');
+        break;
+
+      case 'conversation.item.created': {
+        const item = ev.item;
+        if (item && item.type === 'message' && item.role === 'user') {
+          getOrCreateRow(item.id);
+        }
+        break;
+      }
+
+      case 'conversation.item.input_audio_transcription.delta': {
+        const row = getOrCreateRow(ev.item_id);
+        const delta = ev.delta || '';
+        row.enEl.textContent += delta;
+        enChars += delta.length;
+        updateMeta();
+        autoscroll();
+        break;
+      }
+
+      case 'conversation.item.input_audio_transcription.completed': {
+        const row = getOrCreateRow(ev.item_id);
+        if (ev.transcript) {
+          if (row.enEl.textContent !== ev.transcript) {
+            enChars += Math.max(0, ev.transcript.length - row.enEl.textContent.length);
+            row.enEl.textContent = ev.transcript;
+          }
+        }
+        row.enEl.classList.remove('pending');
+        if (!row.enEl.textContent.trim()) {
+          row.enEl.classList.add('empty');
+          row.enEl.textContent = '(silence)';
+        }
+        updateMeta();
+        autoscroll();
+        break;
+      }
+
+      case 'conversation.item.input_audio_transcription.failed': {
+        const row = getOrCreateRow(ev.item_id);
+        row.enEl.classList.remove('pending');
+        row.enEl.classList.add('error');
+        row.enEl.textContent = 'Transcription failed';
+        break;
+      }
+
+      case 'response.created': {
+        const responseId = ev.response && ev.response.id;
+        const itemId = pendingItemQueue.shift();
+        if (responseId && itemId) responseToItem.set(responseId, itemId);
+        break;
+      }
+
+      case 'response.text.delta':
+      case 'response.output_text.delta': {
+        const itemId = responseToItem.get(ev.response_id);
+        const row = itemId ? rowsByItem.get(itemId) : null;
+        if (!row) break;
+        const delta = ev.delta || '';
+        row.jaEl.textContent += delta;
+        jaChars += delta.length;
+        updateMeta();
+        autoscroll();
+        break;
+      }
+
+      case 'response.text.done':
+      case 'response.output_text.done': {
+        const itemId = responseToItem.get(ev.response_id);
+        const row = itemId ? rowsByItem.get(itemId) : null;
+        if (!row) break;
+        if (ev.text && row.jaEl.textContent !== ev.text) {
+          row.jaEl.textContent = ev.text;
+        }
+        row.jaEl.classList.remove('pending');
+        if (!row.jaEl.textContent.trim()) {
+          row.jaEl.classList.add('empty');
+          row.jaEl.textContent = '(無音)';
+        }
+        autoscroll();
+        break;
+      }
+
+      case 'response.done': {
+        const responseId = ev.response && ev.response.id;
+        if (!responseId) break;
+        const itemId = responseToItem.get(responseId);
+        const row = itemId ? rowsByItem.get(itemId) : null;
+        if (row && row.jaEl.classList.contains('pending')) {
+          row.jaEl.classList.remove('pending');
+          if (!row.jaEl.textContent.trim()) {
+            row.jaEl.classList.add('empty');
+            row.jaEl.textContent = '(無音)';
+          }
+        }
+        responseToItem.delete(responseId);
+        break;
+      }
+
+      case 'error': {
+        const msg = (ev.error && (ev.error.message || ev.error.code)) || 'Unknown error';
+        console.error('Realtime error:', ev);
+        setError('Realtime error: ' + msg);
+        break;
+      }
+
+      default:
+        // Many other events are informational; ignore.
+        break;
+    }
+  };
+
+  // ---------- mic level meter ----------
+
+  const startMeter = (stream) => {
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     const src = audioCtx.createMediaStreamSource(stream);
     analyser = audioCtx.createAnalyser();
-    analyser.fftSize = 2048;
-    analyser.smoothingTimeConstant = 0;
+    analyser.fftSize = 1024;
+    analyser.smoothingTimeConstant = 0.5;
     src.connect(analyser);
-    vadBuf = new Float32Array(analyser.fftSize);
+    meterBuf = new Float32Array(analyser.fftSize);
+    const tick = () => {
+      if (!analyser || !meterBuf) return;
+      analyser.getFloatTimeDomainData(meterBuf);
+      let sumSq = 0;
+      for (let i = 0; i < meterBuf.length; i++) sumSq += meterBuf[i] * meterBuf[i];
+      const rms = Math.sqrt(sumSq / meterBuf.length);
+      const level = Math.min(1, rms * 12); // 0..1
+      meterBars.forEach((bar, i) => {
+        const threshold = (i + 1) / meterBars.length;
+        const active = level >= threshold * 0.6;
+        const h = active ? 4 + (i + 1) * 2 : 4;
+        bar.style.height = h + 'px';
+        bar.style.background = active
+          ? (i < 5 ? 'rgba(90,169,255,0.9)' : i < 7 ? 'rgba(255,168,115,0.9)' : 'rgba(248,113,113,0.95)')
+          : 'var(--bg-3)';
+      });
+      meterRaf = requestAnimationFrame(tick);
+    };
+    tick();
   };
 
-  const teardownVad = () => {
-    if (vadTimer != null) { clearInterval(vadTimer); vadTimer = null; }
+  const stopMeter = () => {
+    if (meterRaf != null) cancelAnimationFrame(meterRaf);
+    meterRaf = null;
     analyser = null;
-    vadBuf = null;
+    meterBuf = null;
     if (audioCtx) {
       try { audioCtx.close(); } catch { /* ignore */ }
       audioCtx = null;
     }
-  };
-
-  const readRms = () => {
-    if (!analyser || !vadBuf) return 0;
-    analyser.getFloatTimeDomainData(vadBuf);
-    let sumSq = 0;
-    for (let i = 0; i < vadBuf.length; i++) sumSq += vadBuf[i] * vadBuf[i];
-    return Math.sqrt(sumSq / vadBuf.length);
-  };
-
-  const startRecorderCycle = (mime) => {
-    if (!mediaStream || !running) return;
-
-    const id = ++chunkId;
-    const rec = new MediaRecorder(mediaStream, mime ? { mimeType: mime } : undefined);
-    /** @type {Blob[]} */ const parts = [];
-
-    rec.addEventListener('dataavailable', (e) => {
-      if (e.data && e.data.size) parts.push(e.data);
+    meterBars.forEach((bar) => {
+      bar.style.height = '4px';
+      bar.style.background = 'var(--bg-3)';
     });
-
-    rec.addEventListener('stop', async () => {
-      try {
-        const blob = new Blob(parts, { type: rec.mimeType || mime || 'audio/webm' });
-        if (blob.size && ws && ws.readyState === WebSocket.OPEN) {
-          appendSegment(id);
-          ws.send(JSON.stringify({ type: 'chunk', id, mime: blob.type }));
-          ws.send(await blob.arrayBuffer());
-        }
-      } catch (err) {
-        console.error('chunk send failed', err);
-      }
-      if (running) startRecorderCycle(mime);
-    });
-
-    rec.start();
-    recorder = rec;
-
-    const minSec = minChunkSec();
-    const minMs = minSec * 1000;
-    const maxSec = Math.min(MAX_CHUNK_CEILING_S, minSec * MAX_CHUNK_MULTIPLIER);
-    const cycleStart = performance.now();
-    let silenceStart = null;
-
-    const stopThisCycle = () => {
-      if (vadTimer != null) { clearInterval(vadTimer); vadTimer = null; }
-      if (safetyTimer != null) { clearTimeout(safetyTimer); safetyTimer = null; }
-      if (rec.state !== 'inactive') {
-        try { rec.stop(); } catch { /* ignore */ }
-      }
-    };
-
-    safetyTimer = window.setTimeout(stopThisCycle, maxSec * 1000);
-    setStatus(`recording (waiting min ${minSec}s)`, 'listening');
-
-    vadTimer = window.setInterval(() => {
-      if (!running || recorder !== rec) return;
-      const elapsed = performance.now() - cycleStart;
-      if (elapsed < minMs) return;
-
-      if (silenceStart == null) {
-        setStatus('recording (listening for break)', 'listening');
-      }
-      const rms = readRms();
-      if (rms < SILENCE_RMS) {
-        if (silenceStart == null) silenceStart = performance.now();
-        if (performance.now() - silenceStart >= SILENCE_HOLD_MS) {
-          stopThisCycle();
-        }
-      } else {
-        silenceStart = null;
-      }
-    }, VAD_POLL_MS);
   };
+
+  // ---------- lifecycle ----------
 
   const start = async () => {
     if (running) return;
+    setError('');
     startBtn.disabled = true;
     setStatus('connecting…', 'connecting');
+
+    // 1. ephemeral session token
+    let session;
     try {
-      ws = await openWs();
+      const r = await fetch('/session');
+      if (!r.ok) throw new Error('HTTP ' + r.status + ' ' + (await r.text()));
+      session = await r.json();
     } catch (err) {
       console.error(err);
-      setStatus('ws error', 'error');
+      setStatus('session error', 'error');
+      setError('Failed to fetch session: ' + err.message);
+      startBtn.disabled = false;
+      return;
+    }
+    const ephemeralKey = session.client_secret && session.client_secret.value;
+    const model = session.model || 'gpt-realtime';
+    if (!ephemeralKey) {
+      setStatus('session error', 'error');
+      setError('No client_secret in session response');
       startBtn.disabled = false;
       return;
     }
 
+    // 2. microphone
     try {
       mediaStream = await navigator.mediaDevices.getUserMedia({
         audio: {
@@ -244,62 +310,162 @@
     } catch (err) {
       console.error(err);
       setStatus('mic denied', 'error');
-      ws.close();
-      ws = null;
+      setError('Microphone access denied');
       startBtn.disabled = false;
+      return;
+    }
+    startMeter(mediaStream);
+
+    // 3. peer connection
+    pc = new RTCPeerConnection();
+    pc.oniceconnectionstatechange = () => {
+      if (!pc) return;
+      const s = pc.iceConnectionState;
+      if (s === 'failed' || s === 'disconnected') {
+        setStatus('disconnected', 'error');
+      }
+    };
+
+    // The Realtime API will emit a single audio track on the answer.
+    // Even though we asked for text-only, attaching it keeps SDP happy.
+    remoteAudioEl = new Audio();
+    remoteAudioEl.autoplay = true;
+    remoteAudioEl.muted = true;
+    pc.ontrack = (ev) => { remoteAudioEl.srcObject = ev.streams[0]; };
+
+    mediaStream.getTracks().forEach((t) => pc.addTrack(t, mediaStream));
+
+    // 4. data channel for events (must be created before the offer)
+    dc = pc.createDataChannel('oai-events');
+    dc.addEventListener('open', () => {
+      // Re-assert session config in case the server-side defaults need
+      // overriding (model already configured via /session).
+      try {
+        dc.send(JSON.stringify({
+          type: 'session.update',
+          session: {
+            modalities: ['text'],
+            input_audio_transcription: { model: 'whisper-1', language: 'en' },
+            turn_detection: {
+              type: 'server_vad',
+              threshold: 0.5,
+              prefix_padding_ms: 300,
+              silence_duration_ms: 700,
+              create_response: true,
+            },
+          },
+        }));
+      } catch (err) {
+        console.warn('session.update send failed', err);
+      }
+      setStatus('listening', 'listening');
+    });
+    dc.addEventListener('message', (e) => {
+      try { handleEvent(JSON.parse(e.data)); }
+      catch (err) { console.warn('bad event json', err, e.data); }
+    });
+    dc.addEventListener('close', () => {
+      if (running) setStatus('disconnected', 'error');
+    });
+
+    // 5. SDP offer/answer with OpenAI
+    let offer;
+    try {
+      offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+    } catch (err) {
+      console.error(err);
+      setStatus('webrtc error', 'error');
+      setError('createOffer failed: ' + err.message);
+      stop();
+      return;
+    }
+
+    let answerSdp;
+    try {
+      const url = `https://api.openai.com/v1/realtime?model=${encodeURIComponent(model)}`;
+      const r = await fetch(url, {
+        method: 'POST',
+        body: offer.sdp,
+        headers: {
+          Authorization: `Bearer ${ephemeralKey}`,
+          'Content-Type': 'application/sdp',
+          'OpenAI-Beta': 'realtime=v1',
+        },
+      });
+      if (!r.ok) throw new Error('HTTP ' + r.status + ' ' + (await r.text()));
+      answerSdp = await r.text();
+    } catch (err) {
+      console.error(err);
+      setStatus('sdp error', 'error');
+      setError('SDP exchange failed: ' + err.message);
+      stop();
       return;
     }
 
     try {
-      setupVad(mediaStream);
+      await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp });
     } catch (err) {
       console.error(err);
-      setStatus('audio init failed', 'error');
-      mediaStream.getTracks().forEach((t) => t.stop());
-      mediaStream = null;
-      ws.close();
-      ws = null;
-      startBtn.disabled = false;
+      setStatus('webrtc error', 'error');
+      setError('setRemoteDescription failed: ' + err.message);
+      stop();
       return;
     }
 
     running = true;
     stopBtn.disabled = false;
-    setStatus('listening', 'listening');
-    const mime = pickMime();
-    startRecorderCycle(mime);
   };
 
   const stop = () => {
     running = false;
-    if (vadTimer != null) { clearInterval(vadTimer); vadTimer = null; }
-    if (safetyTimer != null) { clearTimeout(safetyTimer); safetyTimer = null; }
-    if (recorder && recorder.state !== 'inactive') {
-      try { recorder.stop(); } catch { /* ignore */ }
+    setStatus('stopped', 'idle');
+    try { if (dc && dc.readyState === 'open') dc.close(); } catch { /* ignore */ }
+    dc = null;
+    if (pc) {
+      try { pc.getSenders().forEach((s) => { try { s.track && s.track.stop(); } catch { /* ignore */ } }); } catch { /* ignore */ }
+      try { pc.close(); } catch { /* ignore */ }
     }
-    recorder = null;
-    teardownVad();
+    pc = null;
     if (mediaStream) {
       mediaStream.getTracks().forEach((t) => t.stop());
       mediaStream = null;
     }
-    if (ws && ws.readyState === WebSocket.OPEN) ws.close();
-    ws = null;
+    if (remoteAudioEl) { remoteAudioEl.srcObject = null; remoteAudioEl = null; }
+    stopMeter();
     startBtn.disabled = false;
     stopBtn.disabled = true;
-    setStatus('stopped', '');
   };
 
-  startBtn.addEventListener('click', () => { start().catch((e) => {
+  const clear = () => {
+    enLog.innerHTML = '';
+    jaLog.innerHTML = '';
+    rowsByItem.clear();
+    responseToItem.clear();
+    pendingItemQueue.length = 0;
+    enChars = 0;
+    jaChars = 0;
+    updateMeta();
+    setError('');
+  };
+
+  // ---------- wire up ----------
+
+  startBtn.addEventListener('click', () => start().catch((e) => {
     console.error(e);
     setStatus('error', 'error');
+    setError(String(e.message || e));
     stop();
-  }); });
+  }));
   stopBtn.addEventListener('click', stop);
+  clearBtn.addEventListener('click', clear);
   window.addEventListener('beforeunload', stop);
 
-  if (!navigator.mediaDevices || !window.MediaRecorder) {
+  if (!navigator.mediaDevices || !window.RTCPeerConnection) {
     setStatus('browser unsupported', 'error');
+    setError('This browser does not support WebRTC + getUserMedia.');
     startBtn.disabled = true;
+  } else {
+    setStatus('idle', 'idle');
   }
 })();
