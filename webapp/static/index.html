@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Lecture Translator (EN → JA)</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header class="bar">
+    <h1>講演リアルタイム翻訳 <span class="muted">English → 日本語</span></h1>
+    <div class="controls">
+      <button id="startBtn" type="button">▶ Start</button>
+      <button id="stopBtn" type="button" disabled>■ Stop</button>
+      <label class="ctrl">
+        Chunk
+        <input id="chunkSec" type="number" min="2" max="15" step="1" value="5" />
+        s
+      </label>
+      <label class="ctrl">
+        <input id="autoscroll" type="checkbox" checked />
+        Auto-scroll
+      </label>
+      <span id="status" class="status idle">idle</span>
+    </div>
+  </header>
+
+  <main class="panes">
+    <section class="pane">
+      <h2>English transcript</h2>
+      <div id="enLog" class="log" aria-live="polite"></div>
+    </section>
+    <section class="pane ja">
+      <h2>日本語訳</h2>
+      <div id="jaLog" class="log" aria-live="polite"></div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
