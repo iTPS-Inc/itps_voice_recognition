@@ -1,0 +1,773 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Lecture Translator (Desktop) · EN → 日本語</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-0: #07090f;
+      --bg-1: #0d111c;
+      --bg-2: #131826;
+      --bg-3: #1a2030;
+      --surface: rgba(255, 255, 255, 0.02);
+      --surface-2: rgba(255, 255, 255, 0.04);
+      --border: rgba(255, 255, 255, 0.06);
+      --border-strong: rgba(255, 255, 255, 0.12);
+      --text-1: #e8edf7;
+      --text-2: #a8b1c5;
+      --text-3: #6b758c;
+      --en: #5aa9ff;
+      --en-soft: rgba(90, 169, 255, 0.12);
+      --ja: #ffa873;
+      --ja-soft: rgba(255, 168, 115, 0.12);
+      --good: #4ade80;
+      --warn: #fbbf24;
+      --bad: #f87171;
+      --pending: #6b758c;
+      --radius: 10px;
+      --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      --font-ja: "Noto Sans JP", "Hiragino Sans", "Hiragino Kaku Gothic ProN", Meiryo, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; height: 100%;
+      background:
+        radial-gradient(1200px 600px at 80% -200px, rgba(90,169,255,.08), transparent 60%),
+        radial-gradient(900px 500px at -10% 110%, rgba(255,168,115,.06), transparent 60%),
+        var(--bg-0);
+      color: var(--text-1);
+      font-family: var(--font-sans);
+      font-size: 15px;
+      line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
+    }
+    body { display: flex; flex-direction: column; min-height: 100vh; }
+
+    /* topbar */
+    .topbar {
+      display: grid; grid-template-columns: 1fr auto auto;
+      align-items: center; gap: 24px;
+      padding: 14px 24px;
+      background: linear-gradient(180deg, rgba(255,255,255,.025), rgba(255,255,255,0)) , var(--bg-1);
+      border-bottom: 1px solid var(--border);
+    }
+    .brand { display: flex; align-items: center; gap: 14px; min-width: 0; }
+    .brand-mark {
+      width: 36px; height: 36px; border-radius: 10px;
+      background: linear-gradient(135deg, rgba(90,169,255,.35), rgba(255,168,115,.35));
+      display: flex; align-items: center; justify-content: center; gap: 3px;
+      border: 1px solid rgba(255,255,255,.08);
+    }
+    .brand-mark span {
+      width: 4px; background: rgba(255,255,255,.85);
+      border-radius: 2px; animation: pulse 1.6s ease-in-out infinite;
+    }
+    .brand-mark span:nth-child(1) { height: 14px; }
+    .brand-mark span:nth-child(2) { height: 10px; animation-delay: .2s; }
+    .brand-mark span:nth-child(3) { height: 16px; animation-delay: .4s; }
+    @keyframes pulse {
+      0%, 100% { opacity: .45; transform: scaleY(.7); }
+      50% { opacity: 1; transform: scaleY(1); }
+    }
+    .brand-text h1 { margin: 0; font-size: 16px; font-weight: 600; }
+    .brand-sub { margin: 1px 0 0; font-size: 12px; color: var(--text-3); }
+    .desktop-tag {
+      display: inline-block; margin-left: 8px;
+      padding: 1px 7px; font-size: 10px; font-weight: 700;
+      letter-spacing: 1px; border-radius: 4px;
+      color: var(--ja); background: var(--ja-soft);
+      border: 1px solid rgba(255,168,115,.25);
+      vertical-align: middle;
+    }
+
+    .hud { display: flex; align-items: center; gap: 14px; }
+    .meter { display: flex; align-items: flex-end; gap: 3px; height: 22px; }
+    .meter span {
+      display: block; width: 4px; height: 4px;
+      background: var(--bg-3); border-radius: 2px;
+      transition: height 80ms linear, background-color 200ms ease;
+    }
+    .status {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 6px 12px; font-size: 12px; font-weight: 500;
+      border-radius: 999px;
+      background: var(--surface); border: 1px solid var(--border);
+      color: var(--text-2); white-space: nowrap;
+    }
+    .status-dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: var(--text-3);
+      transition: background-color 200ms ease;
+    }
+    .status.idle .status-dot { background: var(--text-3); }
+    .status.connecting .status-dot { background: var(--warn); animation: glow 1.2s ease-in-out infinite; }
+    .status.listening .status-dot { background: var(--good); animation: glow 1.6s ease-in-out infinite; }
+    .status.speaking .status-dot { background: var(--en); animation: glow .9s ease-in-out infinite; }
+    .status.error .status-dot { background: var(--bad); }
+    .status.error { color: var(--bad); border-color: rgba(248,113,113,.4); }
+    @keyframes glow {
+      0%, 100% { box-shadow: 0 0 0 0 currentColor; opacity: .85; }
+      50% { box-shadow: 0 0 0 6px transparent; opacity: 1; }
+    }
+
+    .actions { display: flex; gap: 8px; align-items: center; }
+    .btn {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 8px 14px;
+      font-family: inherit; font-size: 13px; font-weight: 600;
+      letter-spacing: .2px;
+      border: 1px solid transparent; border-radius: 8px; cursor: pointer;
+      transition: background-color 120ms ease, border-color 120ms ease, transform 80ms ease;
+    }
+    .btn:active { transform: translateY(1px); }
+    .btn:disabled { opacity: .45; cursor: not-allowed; }
+    .btn-primary {
+      background: linear-gradient(180deg, #5aa9ff, #3d8df0);
+      color: #061226;
+      box-shadow: 0 1px 0 rgba(255,255,255,.15) inset, 0 6px 16px rgba(61,141,240,.25);
+    }
+    .btn-primary:hover:not(:disabled) { filter: brightness(1.05); }
+    .btn-secondary {
+      background: rgba(248,113,113,.12);
+      color: #ffb4b4;
+      border-color: rgba(248,113,113,.3);
+    }
+    .btn-ghost {
+      background: transparent; color: var(--text-2);
+      border-color: var(--border-strong);
+    }
+    .btn-ghost:hover { background: var(--surface-2); color: var(--text-1); }
+
+    /* panes */
+    .panes {
+      flex: 1 1 auto;
+      display: grid; grid-template-columns: 1fr 1fr;
+      gap: 1px; background: var(--border);
+      min-height: 0; overflow: hidden;
+    }
+    .pane { display: flex; flex-direction: column; background: var(--bg-1); min-height: 0; position: relative; }
+    .pane-ja { background: var(--bg-2); }
+    .pane::before {
+      content: ""; position: absolute; inset: 0 0 auto 0;
+      height: 2px; background: var(--en); opacity: .5;
+    }
+    .pane-ja::before { background: var(--ja); }
+    .pane-head {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 14px 20px; border-bottom: 1px solid var(--border);
+    }
+    .pane-title { display: flex; align-items: center; gap: 10px; }
+    .pane-tag {
+      display: inline-block; padding: 2px 8px;
+      font-size: 10px; font-weight: 700; letter-spacing: 1px;
+      border-radius: 4px;
+      background: var(--en-soft); color: var(--en);
+      border: 1px solid rgba(90,169,255,.25);
+    }
+    .pane-ja .pane-tag {
+      background: var(--ja-soft); color: var(--ja);
+      border-color: rgba(255,168,115,.25);
+    }
+    .pane-head h2 { margin: 0; font-size: 14px; font-weight: 600; }
+    .pane-meta { font-size: 12px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+    .log {
+      flex: 1 1 auto; overflow-y: auto;
+      padding: 18px 22px 80px;
+      display: flex; flex-direction: column; gap: 14px;
+      scroll-behavior: smooth;
+    }
+    .log::-webkit-scrollbar { width: 10px; }
+    .log::-webkit-scrollbar-thumb { background: var(--bg-3); border-radius: 8px; }
+    .log::-webkit-scrollbar-track { background: transparent; }
+
+    .segment {
+      position: relative;
+      padding: 12px 14px 12px 16px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      font-size: 17px; line-height: 1.65;
+      white-space: pre-wrap; word-break: break-word;
+    }
+    .pane-ja .segment { font-family: var(--font-ja); font-size: 18px; line-height: 1.85; }
+    .segment::before {
+      content: attr(data-time);
+      position: absolute; top: -8px; left: 12px;
+      padding: 1px 8px; font-size: 10px; font-weight: 600;
+      letter-spacing: .5px; color: var(--text-3);
+      background: var(--bg-1); border: 1px solid var(--border);
+      border-radius: 4px; font-variant-numeric: tabular-nums;
+    }
+    .pane-ja .segment::before { background: var(--bg-2); }
+    .segment.pending {
+      background: var(--en-soft);
+      border-color: rgba(90,169,255,.3);
+    }
+    .pane-ja .segment.pending {
+      background: var(--ja-soft);
+      border-color: rgba(255,168,115,.3);
+    }
+    .segment.pending::after {
+      content: "▎"; display: inline-block; margin-left: 2px;
+      color: currentColor; animation: blink 1s steps(2, start) infinite;
+    }
+    @keyframes blink { to { visibility: hidden; } }
+    .segment.empty { color: var(--text-3); font-style: italic; }
+    .segment.error {
+      border-color: rgba(248,113,113,.4); color: var(--bad);
+      background: rgba(248,113,113,.06);
+    }
+
+    .footbar {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 20px; padding: 10px 24px;
+      border-top: 1px solid var(--border);
+      background: var(--bg-1);
+      font-size: 12px; color: var(--text-3);
+    }
+    .error-banner { color: var(--bad); font-weight: 500; }
+
+    /* modal */
+    .modal-backdrop {
+      position: fixed; inset: 0;
+      background: rgba(7, 9, 15, .72);
+      backdrop-filter: blur(8px);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 50;
+    }
+    .modal-backdrop[hidden] { display: none; }
+    .modal {
+      width: min(520px, calc(100% - 32px));
+      background: var(--bg-2);
+      border: 1px solid var(--border-strong);
+      border-radius: 16px;
+      padding: 26px;
+      box-shadow: 0 30px 80px rgba(0,0,0,.55);
+    }
+    .modal h2 { margin: 0 0 6px; font-size: 18px; }
+    .modal p { margin: 0 0 16px; color: var(--text-2); font-size: 13px; line-height: 1.6; }
+    .modal label { display: block; font-size: 12px; color: var(--text-3); margin-bottom: 6px; }
+    .modal input[type="password"], .modal input[type="text"], .modal select {
+      width: 100%; padding: 10px 12px;
+      font-family: inherit; font-size: 14px;
+      background: var(--bg-1); color: var(--text-1);
+      border: 1px solid var(--border-strong); border-radius: 8px;
+      outline: none;
+    }
+    .modal input:focus, .modal select:focus { border-color: var(--en); }
+    .modal-row + .modal-row { margin-top: 14px; }
+    .modal-actions { display: flex; justify-content: space-between; align-items: center; margin-top: 22px; gap: 10px; }
+    .modal-actions .left { color: var(--text-3); font-size: 12px; }
+    .modal-warn {
+      margin-top: 14px;
+      padding: 10px 12px;
+      font-size: 12px;
+      background: rgba(251,191,36,.08);
+      border: 1px solid rgba(251,191,36,.25);
+      color: #f8d77b;
+      border-radius: 8px;
+      line-height: 1.5;
+    }
+
+    @media (max-width: 900px) {
+      .topbar { grid-template-columns: 1fr; gap: 12px; }
+      .hud { justify-content: space-between; }
+      .panes { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+    <div class="brand-text">
+      <h1>Lecture Translator <span class="desktop-tag">DESKTOP</span></h1>
+      <p class="brand-sub">English → 日本語 · gpt-realtime · runs locally from this file</p>
+    </div>
+  </div>
+
+  <div class="hud">
+    <div class="meter" aria-hidden="true" title="microphone level">
+      <span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+    </div>
+    <div id="status" class="status idle">
+      <span class="status-dot"></span><span class="status-text">idle</span>
+    </div>
+  </div>
+
+  <div class="actions">
+    <button id="settingsBtn" class="btn btn-ghost" type="button" title="API key / model settings">Settings</button>
+    <button id="startBtn" class="btn btn-primary" type="button">
+      <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M8 5v14l11-7z"/></svg>
+      Start
+    </button>
+    <button id="stopBtn" class="btn btn-secondary" type="button" disabled>
+      <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><rect x="6" y="6" width="12" height="12" fill="currentColor" rx="2"/></svg>
+      Stop
+    </button>
+    <button id="clearBtn" class="btn btn-ghost" type="button">Clear</button>
+  </div>
+</header>
+
+<main class="panes">
+  <section class="pane pane-en">
+    <header class="pane-head">
+      <div class="pane-title"><span class="pane-tag">EN</span><h2>English transcript</h2></div>
+      <div class="pane-meta" id="enMeta">—</div>
+    </header>
+    <div id="enLog" class="log" aria-live="polite"></div>
+  </section>
+  <section class="pane pane-ja">
+    <header class="pane-head">
+      <div class="pane-title"><span class="pane-tag">JA</span><h2>日本語訳</h2></div>
+      <div class="pane-meta" id="jaMeta">—</div>
+    </header>
+    <div id="jaLog" class="log" aria-live="polite"></div>
+  </section>
+</main>
+
+<footer class="footbar">
+  <span>Desktop edition · API key is stored in this browser only (localStorage).</span>
+  <span id="errorBanner" class="error-banner" hidden></span>
+</footer>
+
+<!-- settings / setup modal -->
+<div id="modal" class="modal-backdrop" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <h2 id="modalTitle">Setup</h2>
+    <p>Paste your OpenAI API key. It is stored only in this browser's localStorage and is sent directly to the OpenAI Realtime API from this page — it never leaves your machine via any other route.</p>
+
+    <div class="modal-row">
+      <label for="apiKeyInput">OpenAI API key</label>
+      <input id="apiKeyInput" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false" />
+    </div>
+
+    <div class="modal-row">
+      <label for="modelSelect">Realtime model</label>
+      <select id="modelSelect">
+        <option value="gpt-realtime">gpt-realtime (recommended)</option>
+        <option value="gpt-4o-realtime-preview">gpt-4o-realtime-preview</option>
+        <option value="gpt-4o-mini-realtime-preview">gpt-4o-mini-realtime-preview</option>
+      </select>
+    </div>
+
+    <div class="modal-row">
+      <label for="transcribeSelect">Transcription model</label>
+      <select id="transcribeSelect">
+        <option value="whisper-1">whisper-1</option>
+        <option value="gpt-4o-transcribe">gpt-4o-transcribe</option>
+        <option value="gpt-4o-mini-transcribe">gpt-4o-mini-transcribe</option>
+      </select>
+    </div>
+
+    <div class="modal-warn">
+      This file is for personal desktop use. Do NOT share it with your API key
+      baked in — anyone who opens it on their browser could use your key.
+    </div>
+
+    <div class="modal-actions">
+      <button id="modalClearBtn" class="btn btn-ghost" type="button">Forget key</button>
+      <div>
+        <button id="modalCancelBtn" class="btn btn-ghost" type="button">Cancel</button>
+        <button id="modalSaveBtn" class="btn btn-primary" type="button">Save</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  // ---- elements ----
+  const startBtn = document.getElementById('startBtn');
+  const stopBtn = document.getElementById('stopBtn');
+  const clearBtn = document.getElementById('clearBtn');
+  const settingsBtn = document.getElementById('settingsBtn');
+  const statusEl = document.getElementById('status');
+  const statusText = statusEl.querySelector('.status-text');
+  const enLog = document.getElementById('enLog');
+  const jaLog = document.getElementById('jaLog');
+  const enMeta = document.getElementById('enMeta');
+  const jaMeta = document.getElementById('jaMeta');
+  const errorBanner = document.getElementById('errorBanner');
+  const meterBars = Array.from(document.querySelectorAll('.meter span'));
+
+  // ---- modal ----
+  const modal = document.getElementById('modal');
+  const apiKeyInput = document.getElementById('apiKeyInput');
+  const modelSelect = document.getElementById('modelSelect');
+  const transcribeSelect = document.getElementById('transcribeSelect');
+  const modalSaveBtn = document.getElementById('modalSaveBtn');
+  const modalCancelBtn = document.getElementById('modalCancelBtn');
+  const modalClearBtn = document.getElementById('modalClearBtn');
+
+  const LS_KEY = 'ltdesktop.apiKey';
+  const LS_MODEL = 'ltdesktop.model';
+  const LS_TRANSCRIBE = 'ltdesktop.transcribe';
+
+  const getApiKey = () => localStorage.getItem(LS_KEY) || '';
+  const getModel = () => localStorage.getItem(LS_MODEL) || 'gpt-realtime';
+  const getTranscribe = () => localStorage.getItem(LS_TRANSCRIBE) || 'whisper-1';
+
+  const openModal = () => {
+    apiKeyInput.value = getApiKey();
+    modelSelect.value = getModel();
+    transcribeSelect.value = getTranscribe();
+    modal.hidden = false;
+    setTimeout(() => apiKeyInput.focus(), 50);
+  };
+  const closeModal = () => { modal.hidden = true; };
+
+  modalSaveBtn.addEventListener('click', () => {
+    const v = apiKeyInput.value.trim();
+    if (v) localStorage.setItem(LS_KEY, v);
+    localStorage.setItem(LS_MODEL, modelSelect.value);
+    localStorage.setItem(LS_TRANSCRIBE, transcribeSelect.value);
+    setError('');
+    closeModal();
+  });
+  modalCancelBtn.addEventListener('click', closeModal);
+  modalClearBtn.addEventListener('click', () => {
+    localStorage.removeItem(LS_KEY);
+    apiKeyInput.value = '';
+  });
+  settingsBtn.addEventListener('click', openModal);
+
+  // ---- translation prompt ----
+  const TRANSLATION_INSTRUCTIONS = (
+    "You are a professional simultaneous interpreter. The user is speaking " +
+    "English at a public lecture. For every utterance you receive, output a " +
+    "natural, fluent Japanese translation suitable for a live audience.\n\n" +
+    "Rules:\n" +
+    "- Output ONLY the Japanese translation.\n" +
+    "- No commentary, no quotation marks, no romanization, no English.\n" +
+    "- Preserve technical terms appropriately (katakana or original English " +
+    "where commonly used in Japanese technical writing).\n" +
+    "- Match the speaker's register (formal lecture style by default).\n" +
+    "- If the input is too short or unintelligible, output an empty string."
+  );
+
+  // ---- state ----
+  let pc = null, dc = null, mediaStream = null;
+  let audioCtx = null, analyser = null, meterBuf = null, meterRaf = null;
+  let remoteAudioEl = null;
+  let running = false;
+
+  const rowsByItem = new Map();
+  const pendingItemQueue = [];
+  const responseToItem = new Map();
+  let enChars = 0, jaChars = 0;
+
+  // ---- ui helpers ----
+  const setStatus = (text, klass) => {
+    statusText.textContent = text;
+    statusEl.className = 'status ' + (klass || 'idle');
+  };
+  const setError = (msg) => {
+    if (!msg) { errorBanner.hidden = true; errorBanner.textContent = ''; return; }
+    errorBanner.hidden = false; errorBanner.textContent = msg;
+  };
+  const stampNow = () => {
+    const d = new Date();
+    return [d.getHours(), d.getMinutes(), d.getSeconds()]
+      .map(n => String(n).padStart(2, '0')).join(':');
+  };
+  const updateMeta = () => {
+    enMeta.textContent = enChars ? `${enChars.toLocaleString()} chars` : '—';
+    jaMeta.textContent = jaChars ? `${jaChars.toLocaleString()} chars` : '—';
+  };
+  const newSegment = (kind, time) => {
+    const el = document.createElement('div');
+    el.className = 'segment pending';
+    el.dataset.time = time;
+    (kind === 'en' ? enLog : jaLog).appendChild(el);
+    autoscroll();
+    return el;
+  };
+  const autoscroll = () => {
+    enLog.scrollTop = enLog.scrollHeight;
+    jaLog.scrollTop = jaLog.scrollHeight;
+  };
+  const getOrCreateRow = (itemId) => {
+    let row = rowsByItem.get(itemId);
+    if (row) return row;
+    const time = stampNow();
+    row = { enEl: newSegment('en', time), jaEl: newSegment('ja', time), time };
+    rowsByItem.set(itemId, row);
+    pendingItemQueue.push(itemId);
+    return row;
+  };
+
+  // ---- realtime events ----
+  const handleEvent = (ev) => {
+    switch (ev.type) {
+      case 'input_audio_buffer.speech_started':
+        setStatus('speaking', 'speaking'); break;
+      case 'input_audio_buffer.speech_stopped':
+        setStatus('listening', 'listening'); break;
+      case 'conversation.item.created': {
+        const it = ev.item;
+        if (it && it.type === 'message' && it.role === 'user') getOrCreateRow(it.id);
+        break;
+      }
+      case 'conversation.item.input_audio_transcription.delta': {
+        const row = getOrCreateRow(ev.item_id);
+        const d = ev.delta || '';
+        row.enEl.textContent += d; enChars += d.length;
+        updateMeta(); autoscroll(); break;
+      }
+      case 'conversation.item.input_audio_transcription.completed': {
+        const row = getOrCreateRow(ev.item_id);
+        if (ev.transcript && row.enEl.textContent !== ev.transcript) {
+          enChars += Math.max(0, ev.transcript.length - row.enEl.textContent.length);
+          row.enEl.textContent = ev.transcript;
+        }
+        row.enEl.classList.remove('pending');
+        if (!row.enEl.textContent.trim()) {
+          row.enEl.classList.add('empty'); row.enEl.textContent = '(silence)';
+        }
+        updateMeta(); autoscroll(); break;
+      }
+      case 'conversation.item.input_audio_transcription.failed': {
+        const row = getOrCreateRow(ev.item_id);
+        row.enEl.classList.remove('pending');
+        row.enEl.classList.add('error');
+        row.enEl.textContent = 'Transcription failed';
+        break;
+      }
+      case 'response.created': {
+        const rid = ev.response && ev.response.id;
+        const iid = pendingItemQueue.shift();
+        if (rid && iid) responseToItem.set(rid, iid);
+        break;
+      }
+      case 'response.text.delta':
+      case 'response.output_text.delta': {
+        const iid = responseToItem.get(ev.response_id);
+        const row = iid ? rowsByItem.get(iid) : null;
+        if (!row) break;
+        const d = ev.delta || '';
+        row.jaEl.textContent += d; jaChars += d.length;
+        updateMeta(); autoscroll(); break;
+      }
+      case 'response.text.done':
+      case 'response.output_text.done': {
+        const iid = responseToItem.get(ev.response_id);
+        const row = iid ? rowsByItem.get(iid) : null;
+        if (!row) break;
+        if (ev.text && row.jaEl.textContent !== ev.text) row.jaEl.textContent = ev.text;
+        row.jaEl.classList.remove('pending');
+        if (!row.jaEl.textContent.trim()) {
+          row.jaEl.classList.add('empty'); row.jaEl.textContent = '(無音)';
+        }
+        autoscroll(); break;
+      }
+      case 'response.done': {
+        const rid = ev.response && ev.response.id;
+        if (!rid) break;
+        const iid = responseToItem.get(rid);
+        const row = iid ? rowsByItem.get(iid) : null;
+        if (row && row.jaEl.classList.contains('pending')) {
+          row.jaEl.classList.remove('pending');
+          if (!row.jaEl.textContent.trim()) {
+            row.jaEl.classList.add('empty'); row.jaEl.textContent = '(無音)';
+          }
+        }
+        responseToItem.delete(rid); break;
+      }
+      case 'error': {
+        const msg = (ev.error && (ev.error.message || ev.error.code)) || 'Unknown error';
+        console.error('Realtime error:', ev);
+        setError('Realtime error: ' + msg);
+        break;
+      }
+    }
+  };
+
+  // ---- mic level meter ----
+  const startMeter = (stream) => {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const src = audioCtx.createMediaStreamSource(stream);
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 1024; analyser.smoothingTimeConstant = 0.5;
+    src.connect(analyser);
+    meterBuf = new Float32Array(analyser.fftSize);
+    const tick = () => {
+      if (!analyser || !meterBuf) return;
+      analyser.getFloatTimeDomainData(meterBuf);
+      let s = 0;
+      for (let i = 0; i < meterBuf.length; i++) s += meterBuf[i] * meterBuf[i];
+      const rms = Math.sqrt(s / meterBuf.length);
+      const level = Math.min(1, rms * 12);
+      meterBars.forEach((bar, i) => {
+        const thr = (i + 1) / meterBars.length;
+        const on = level >= thr * 0.6;
+        bar.style.height = (on ? 4 + (i + 1) * 2 : 4) + 'px';
+        bar.style.background = on
+          ? (i < 5 ? 'rgba(90,169,255,.9)' : i < 7 ? 'rgba(255,168,115,.9)' : 'rgba(248,113,113,.95)')
+          : 'var(--bg-3)';
+      });
+      meterRaf = requestAnimationFrame(tick);
+    };
+    tick();
+  };
+  const stopMeter = () => {
+    if (meterRaf != null) cancelAnimationFrame(meterRaf);
+    meterRaf = null; analyser = null; meterBuf = null;
+    if (audioCtx) { try { audioCtx.close(); } catch {} audioCtx = null; }
+    meterBars.forEach(b => { b.style.height = '4px'; b.style.background = 'var(--bg-3)'; });
+  };
+
+  // ---- start / stop ----
+  const start = async () => {
+    if (running) return;
+    setError('');
+    const apiKey = getApiKey();
+    if (!apiKey) { setError('Set your OpenAI API key in Settings first.'); openModal(); return; }
+    const model = getModel();
+    const transcribe = getTranscribe();
+
+    startBtn.disabled = true;
+    setStatus('connecting…', 'connecting');
+
+    try {
+      mediaStream = await navigator.mediaDevices.getUserMedia({
+        audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      });
+    } catch (err) {
+      console.error(err);
+      setStatus('mic denied', 'error');
+      setError('Microphone access denied: ' + err.message);
+      startBtn.disabled = false; return;
+    }
+    startMeter(mediaStream);
+
+    pc = new RTCPeerConnection();
+    pc.oniceconnectionstatechange = () => {
+      if (!pc) return;
+      const s = pc.iceConnectionState;
+      if (s === 'failed' || s === 'disconnected') setStatus('disconnected', 'error');
+    };
+
+    remoteAudioEl = new Audio();
+    remoteAudioEl.autoplay = true; remoteAudioEl.muted = true;
+    pc.ontrack = (ev) => { remoteAudioEl.srcObject = ev.streams[0]; };
+
+    mediaStream.getTracks().forEach(t => pc.addTrack(t, mediaStream));
+
+    dc = pc.createDataChannel('oai-events');
+    dc.addEventListener('open', () => {
+      try {
+        dc.send(JSON.stringify({
+          type: 'session.update',
+          session: {
+            modalities: ['text'],
+            instructions: TRANSLATION_INSTRUCTIONS,
+            input_audio_transcription: { model: transcribe, language: 'en' },
+            turn_detection: {
+              type: 'server_vad', threshold: 0.5,
+              prefix_padding_ms: 300, silence_duration_ms: 700,
+              create_response: true,
+            },
+            temperature: 0.6,
+          },
+        }));
+      } catch (e) { console.warn('session.update failed', e); }
+      setStatus('listening', 'listening');
+    });
+    dc.addEventListener('message', (e) => {
+      try { handleEvent(JSON.parse(e.data)); }
+      catch (err) { console.warn('bad event json', err); }
+    });
+    dc.addEventListener('close', () => { if (running) setStatus('disconnected', 'error'); });
+
+    let offer;
+    try {
+      offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+    } catch (err) {
+      console.error(err);
+      setStatus('webrtc error', 'error');
+      setError('createOffer failed: ' + err.message);
+      stop(); return;
+    }
+
+    let answerSdp;
+    try {
+      const url = 'https://api.openai.com/v1/realtime?model=' + encodeURIComponent(model);
+      const r = await fetch(url, {
+        method: 'POST', body: offer.sdp,
+        headers: {
+          Authorization: 'Bearer ' + apiKey,
+          'Content-Type': 'application/sdp',
+          'OpenAI-Beta': 'realtime=v1',
+        },
+      });
+      if (!r.ok) throw new Error('HTTP ' + r.status + ' ' + (await r.text()));
+      answerSdp = await r.text();
+    } catch (err) {
+      console.error(err);
+      setStatus('sdp error', 'error');
+      setError('SDP exchange failed: ' + err.message);
+      stop(); return;
+    }
+
+    try {
+      await pc.setRemoteDescription({ type: 'answer', sdp: answerSdp });
+    } catch (err) {
+      console.error(err);
+      setStatus('webrtc error', 'error');
+      setError('setRemoteDescription failed: ' + err.message);
+      stop(); return;
+    }
+
+    running = true;
+    stopBtn.disabled = false;
+  };
+
+  const stop = () => {
+    running = false;
+    setStatus('stopped', 'idle');
+    try { if (dc && dc.readyState === 'open') dc.close(); } catch {}
+    dc = null;
+    if (pc) {
+      try { pc.getSenders().forEach(s => { try { s.track && s.track.stop(); } catch {} }); } catch {}
+      try { pc.close(); } catch {}
+    }
+    pc = null;
+    if (mediaStream) { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
+    if (remoteAudioEl) { remoteAudioEl.srcObject = null; remoteAudioEl = null; }
+    stopMeter();
+    startBtn.disabled = false;
+    stopBtn.disabled = true;
+  };
+
+  const clear = () => {
+    enLog.innerHTML = ''; jaLog.innerHTML = '';
+    rowsByItem.clear(); responseToItem.clear(); pendingItemQueue.length = 0;
+    enChars = 0; jaChars = 0; updateMeta(); setError('');
+  };
+
+  startBtn.addEventListener('click', () => start().catch(e => {
+    console.error(e); setStatus('error', 'error'); setError(String(e.message || e)); stop();
+  }));
+  stopBtn.addEventListener('click', stop);
+  clearBtn.addEventListener('click', clear);
+  window.addEventListener('beforeunload', stop);
+
+  if (!navigator.mediaDevices || !window.RTCPeerConnection) {
+    setStatus('browser unsupported', 'error');
+    setError('This browser does not support WebRTC + getUserMedia.');
+    startBtn.disabled = true;
+  } else {
+    setStatus('idle', 'idle');
+    if (!getApiKey()) openModal();
+  }
+})();
+</script>
+</body>
+</html>

@@ -61,6 +61,25 @@ async def index() -> FileResponse:
     return FileResponse(STATIC_DIR / "index.html")
 
 
+@app.get("/download")
+async def download_desktop() -> FileResponse:
+    """Serve the standalone, single-file desktop edition for download.
+
+    The returned HTML is fully self-contained (inline CSS + JS) so the user
+    can save it to the desktop and double-click to launch.  It uses the
+    user's own OpenAI key (entered in the page, stored in localStorage) to
+    talk directly to the Realtime API and needs no backend.
+    """
+    return FileResponse(
+        STATIC_DIR / "lecture-translator.html",
+        media_type="text/html; charset=utf-8",
+        filename="lecture-translator.html",
+        headers={
+            "Content-Disposition": 'attachment; filename="lecture-translator.html"',
+        },
+    )
+
+
 @app.get("/session")
 async def session() -> JSONResponse:
     """Mint a short-lived ephemeral session token for the browser.

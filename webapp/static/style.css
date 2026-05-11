@@ -181,6 +181,7 @@ body {
   border: 1px solid transparent;
   border-radius: 8px;
   cursor: pointer;
+  text-decoration: none;
   transition: background-color 120ms ease, border-color 120ms ease, transform 80ms ease;
 }
 .btn:active { transform: translateY(1px); }
