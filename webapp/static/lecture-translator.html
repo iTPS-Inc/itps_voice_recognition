@@ -141,6 +141,30 @@
       border-color: var(--border-strong);
     }
     .btn-ghost:hover { background: var(--surface-2); color: var(--text-1); }
+    .caret { font-size: 10px; margin-left: 2px; opacity: 0.7; }
+
+    .dropdown { position: relative; }
+    .menu {
+      position: absolute; top: calc(100% + 8px); right: 0;
+      min-width: 230px; padding: 6px;
+      display: flex; flex-direction: column; gap: 2px;
+      background: var(--bg-2); border: 1px solid var(--border-strong);
+      border-radius: 10px;
+      box-shadow: 0 18px 40px rgba(0,0,0,.45);
+      z-index: 30;
+    }
+    .menu[hidden] { display: none; }
+    .menu button {
+      display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+      padding: 9px 12px;
+      background: transparent; border: none; border-radius: 6px;
+      color: var(--text-1); font-family: inherit; font-size: 13px;
+      text-align: left; cursor: pointer;
+    }
+    .menu button:hover:not(:disabled) { background: var(--surface-2); }
+    .menu button:disabled { color: var(--text-3); cursor: not-allowed; }
+    .menu .menu-main { font-weight: 500; }
+    .menu .menu-sub { font-size: 11px; color: var(--text-3); font-variant-numeric: tabular-nums; }
 
     /* panes */
     .panes {
@@ -311,6 +335,20 @@
       Stop
     </button>
     <button id="clearBtn" class="btn btn-ghost" type="button">Clear</button>
+    <div class="dropdown">
+      <button id="exportBtn" class="btn btn-ghost" type="button" aria-haspopup="true" aria-expanded="false" title="Download recordings and transcripts">
+        <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M5 20h14v-2H5v2zm7-18l-5 5h3v6h4V7h3l-5-5z"/></svg>
+        Export
+        <span class="caret" aria-hidden="true">▾</span>
+      </button>
+      <div id="exportMenu" class="menu" role="menu" hidden>
+        <button type="button" data-export="audio" role="menuitem"><span class="menu-main">Audio recording</span><span class="menu-sub">.webm (Opus)</span></button>
+        <button type="button" data-export="en" role="menuitem"><span class="menu-main">English transcript</span><span class="menu-sub">.txt</span></button>
+        <button type="button" data-export="ja" role="menuitem"><span class="menu-main">Japanese translation</span><span class="menu-sub">.txt</span></button>
+        <button type="button" data-export="tsv" role="menuitem"><span class="menu-main">Parallel (EN + JA)</span><span class="menu-sub">.tsv</span></button>
+        <button type="button" data-export="json" role="menuitem"><span class="menu-main">Structured</span><span class="menu-sub">.json</span></button>
+      </div>
+    </div>
   </div>
 </header>
 
@@ -387,6 +425,8 @@
   const stopBtn = document.getElementById('stopBtn');
   const clearBtn = document.getElementById('clearBtn');
   const settingsBtn = document.getElementById('settingsBtn');
+  const exportBtn = document.getElementById('exportBtn');
+  const exportMenu = document.getElementById('exportMenu');
   const statusEl = document.getElementById('status');
   const statusText = statusEl.querySelector('.status-text');
   const enLog = document.getElementById('enLog');
@@ -455,6 +495,10 @@
   let pc = null, dc = null, mediaStream = null;
   let audioCtx = null, analyser = null, meterBuf = null, meterRaf = null;
   let remoteAudioEl = null;
+  let audioRecorder = null;
+  let audioChunks = [];
+  let audioMime = 'audio/webm';
+  let sessionStartedAt = null;
   let running = false;
 
   const rowsByItem = new Map();
@@ -496,11 +540,108 @@
     let row = rowsByItem.get(itemId);
     if (row) return row;
     const time = stampNow();
-    row = { enEl: newSegment('en', time), jaEl: newSegment('ja', time), time };
+    row = { enEl: newSegment('en', time), jaEl: newSegment('ja', time), time, createdAt: Date.now() };
     rowsByItem.set(itemId, row);
     pendingItemQueue.push(itemId);
     return row;
   };
+
+  // ---- export ----
+  const downloadBlob = (blob, filename) => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+  const downloadText = (content, filename, mime) => {
+    downloadBlob(new Blob([content], { type: mime || 'text/plain;charset=utf-8' }), filename);
+  };
+  const collectRows = () => {
+    const rows = [];
+    rowsByItem.forEach((row) => {
+      const en = (row.enEl.textContent || '').trim();
+      const ja = (row.jaEl.textContent || '').trim();
+      const cleanEn = (en === '(silence)' || row.enEl.classList.contains('empty')) ? '' : en;
+      const cleanJa = (ja === '(無音)' || row.jaEl.classList.contains('empty')) ? '' : ja;
+      if (!cleanEn && !cleanJa) return;
+      rows.push({ time: row.time, en: cleanEn, ja: cleanJa });
+    });
+    return rows;
+  };
+  const fileStamp = () => {
+    const d = new Date(sessionStartedAt || Date.now());
+    const z = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}${z(d.getMonth()+1)}${z(d.getDate())}-${z(d.getHours())}${z(d.getMinutes())}${z(d.getSeconds())}`;
+  };
+  const setExportEnabled = () => {
+    if (!exportMenu) return;
+    const rows = collectRows();
+    const hasText = rows.length > 0;
+    const hasAudio = audioChunks.length > 0;
+    exportMenu.querySelectorAll('button[data-export]').forEach((btn) => {
+      const kind = btn.dataset.export;
+      btn.disabled = (kind === 'audio') ? !hasAudio : !hasText;
+    });
+  };
+  const exportAudio = () => {
+    if (!audioChunks.length) return;
+    const ext = audioMime.includes('ogg') ? 'ogg' : audioMime.includes('mp4') ? 'm4a' : 'webm';
+    downloadBlob(new Blob(audioChunks, { type: audioMime }), `lecture-${fileStamp()}.${ext}`);
+  };
+  const exportEN = () => {
+    const rows = collectRows(); if (!rows.length) return;
+    const body = rows.filter(r => r.en).map(r => `[${r.time}] ${r.en}`).join('\n');
+    downloadText(body + '\n', `transcript-en-${fileStamp()}.txt`);
+  };
+  const exportJA = () => {
+    const rows = collectRows(); if (!rows.length) return;
+    const body = rows.filter(r => r.ja).map(r => `[${r.time}] ${r.ja}`).join('\n');
+    downloadText(body + '\n', `transcript-ja-${fileStamp()}.txt`);
+  };
+  const exportTSV = () => {
+    const rows = collectRows(); if (!rows.length) return;
+    const esc = (s) => s.replace(/\t/g, ' ').replace(/\r?\n/g, ' ');
+    const body = ['time\ten\tja'].concat(rows.map(r => `${r.time}\t${esc(r.en)}\t${esc(r.ja)}`)).join('\n');
+    downloadText(body + '\n', `transcript-${fileStamp()}.tsv`, 'text/tab-separated-values;charset=utf-8');
+  };
+  const exportJSON = () => {
+    const rows = collectRows(); if (!rows.length) return;
+    const payload = {
+      session_started_at: sessionStartedAt ? new Date(sessionStartedAt).toISOString() : null,
+      exported_at: new Date().toISOString(),
+      segments: rows,
+    };
+    downloadText(JSON.stringify(payload, null, 2) + '\n', `transcript-${fileStamp()}.json`, 'application/json;charset=utf-8');
+  };
+  const EXPORT_HANDLERS = { audio: exportAudio, en: exportEN, ja: exportJA, tsv: exportTSV, json: exportJSON };
+  const closeExportMenu = () => {
+    if (!exportMenu) return;
+    exportMenu.hidden = true;
+    if (exportBtn) exportBtn.setAttribute('aria-expanded', 'false');
+  };
+  const toggleExportMenu = () => {
+    if (!exportMenu) return;
+    const willOpen = exportMenu.hidden;
+    if (willOpen) setExportEnabled();
+    exportMenu.hidden = !willOpen;
+    if (exportBtn) exportBtn.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
+  };
+  if (exportBtn && exportMenu) {
+    exportBtn.addEventListener('click', (e) => { e.stopPropagation(); toggleExportMenu(); });
+    exportMenu.addEventListener('click', (e) => {
+      const target = e.target instanceof HTMLElement ? e.target.closest('button[data-export]') : null;
+      if (!target || target.disabled) return;
+      const fn = EXPORT_HANDLERS[target.dataset.export];
+      if (fn) fn();
+      closeExportMenu();
+    });
+    document.addEventListener('click', (e) => {
+      if (exportMenu.hidden) return;
+      if (!exportMenu.contains(e.target) && !exportBtn.contains(e.target)) closeExportMenu();
+    });
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeExportMenu(); });
+  }
 
   // ---- realtime events ----
   const handleEvent = (ev) => {
@@ -646,6 +787,22 @@
     }
     startMeter(mediaStream);
 
+    try {
+      audioChunks = [];
+      const preferred = ['audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus', 'audio/mp4']
+        .find((m) => window.MediaRecorder && MediaRecorder.isTypeSupported(m));
+      audioRecorder = new MediaRecorder(mediaStream, preferred ? { mimeType: preferred } : undefined);
+      audioMime = audioRecorder.mimeType || preferred || 'audio/webm';
+      audioRecorder.addEventListener('dataavailable', (e) => {
+        if (e.data && e.data.size) audioChunks.push(e.data);
+      });
+      audioRecorder.start(1000);
+      sessionStartedAt = Date.now();
+    } catch (err) {
+      console.warn('audio recording unavailable', err);
+      audioRecorder = null;
+    }
+
     pc = new RTCPeerConnection();
     pc.oniceconnectionstatechange = () => {
       if (!pc) return;
@@ -732,6 +889,10 @@
   const stop = () => {
     running = false;
     setStatus('stopped', 'idle');
+    if (audioRecorder && audioRecorder.state !== 'inactive') {
+      try { audioRecorder.stop(); } catch {}
+    }
+    audioRecorder = null;
     try { if (dc && dc.readyState === 'open') dc.close(); } catch {}
     dc = null;
     if (pc) {
@@ -744,12 +905,17 @@
     stopMeter();
     startBtn.disabled = false;
     stopBtn.disabled = true;
+    setExportEnabled();
   };
 
   const clear = () => {
     enLog.innerHTML = ''; jaLog.innerHTML = '';
     rowsByItem.clear(); responseToItem.clear(); pendingItemQueue.length = 0;
-    enChars = 0; jaChars = 0; updateMeta(); setError('');
+    enChars = 0; jaChars = 0;
+    audioChunks = [];
+    sessionStartedAt = null;
+    updateMeta(); setError('');
+    setExportEnabled();
   };
 
   startBtn.addEventListener('click', () => start().catch(e => {

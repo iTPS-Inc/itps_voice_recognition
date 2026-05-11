@@ -50,6 +50,37 @@
       <button id="clearBtn" class="btn btn-ghost" type="button" title="Clear transcript">
         Clear
       </button>
+      <div class="dropdown">
+        <button id="exportBtn" class="btn btn-ghost" type="button" aria-haspopup="true" aria-expanded="false" title="Download recordings and transcripts">
+          <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+            <path fill="currentColor" d="M5 20h14v-2H5v2zm7-18l-5 5h3v6h4V7h3l-5-5z"/>
+          </svg>
+          Export
+          <span class="caret" aria-hidden="true">▾</span>
+        </button>
+        <div id="exportMenu" class="menu" role="menu" hidden>
+          <button type="button" data-export="audio" role="menuitem">
+            <span class="menu-main">Audio recording</span>
+            <span class="menu-sub">.webm (Opus)</span>
+          </button>
+          <button type="button" data-export="en" role="menuitem">
+            <span class="menu-main">English transcript</span>
+            <span class="menu-sub">.txt</span>
+          </button>
+          <button type="button" data-export="ja" role="menuitem">
+            <span class="menu-main">Japanese translation</span>
+            <span class="menu-sub">.txt</span>
+          </button>
+          <button type="button" data-export="tsv" role="menuitem">
+            <span class="menu-main">Parallel (EN + JA)</span>
+            <span class="menu-sub">.tsv</span>
+          </button>
+          <button type="button" data-export="json" role="menuitem">
+            <span class="menu-main">Structured</span>
+            <span class="menu-sub">.json</span>
+          </button>
+        </div>
+      </div>
       <a id="downloadBtn" class="btn btn-ghost" href="/download" download="lecture-translator.html" title="Download desktop edition (single self-contained HTML file)">
         <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
           <path fill="currentColor" d="M5 20h14v-2H5v2zm7-18l-5 5h3v6h4V7h3l-5-5z"/>

@@ -11,6 +11,8 @@
   const startBtn = document.getElementById('startBtn');
   const stopBtn = document.getElementById('stopBtn');
   const clearBtn = document.getElementById('clearBtn');
+  const exportBtn = document.getElementById('exportBtn');
+  const exportMenu = document.getElementById('exportMenu');
   const statusEl = document.getElementById('status');
   const statusText = statusEl.querySelector('.status-text');
   const enLog = document.getElementById('enLog');
@@ -28,6 +30,10 @@
   /** @type {Float32Array | null} */ let meterBuf = null;
   /** @type {number | null} */ let meterRaf = null;
   /** @type {HTMLAudioElement | null} */ let remoteAudioEl = null;
+  /** @type {MediaRecorder | null} */ let audioRecorder = null;
+  /** @type {Blob[]} */ let audioChunks = [];
+  let audioMime = 'audio/webm';
+  let sessionStartedAt = null;
   let running = false;
 
   // ----- segment state -----
@@ -88,11 +94,145 @@
       enEl: newSegment('en', time),
       jaEl: newSegment('ja', time),
       time,
+      createdAt: Date.now(),
     };
     rowsByItem.set(itemId, row);
     pendingItemQueue.push(itemId);
     return row;
   };
+
+  // ---------- export ----------
+
+  const downloadBlob = (blob, filename) => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
+  const downloadText = (content, filename, mime) => {
+    downloadBlob(new Blob([content], { type: mime || 'text/plain;charset=utf-8' }), filename);
+  };
+
+  const collectRows = () => {
+    const rows = [];
+    rowsByItem.forEach((row) => {
+      const en = (row.enEl.textContent || '').trim();
+      const ja = (row.jaEl.textContent || '').trim();
+      const cleanEn = (en === '(silence)' || row.enEl.classList.contains('empty')) ? '' : en;
+      const cleanJa = (ja === '(無音)' || row.jaEl.classList.contains('empty')) ? '' : ja;
+      if (!cleanEn && !cleanJa) return;
+      rows.push({ time: row.time, en: cleanEn, ja: cleanJa });
+    });
+    return rows;
+  };
+
+  const fileStamp = () => {
+    const d = new Date(sessionStartedAt || Date.now());
+    const z = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}${z(d.getMonth() + 1)}${z(d.getDate())}-${z(d.getHours())}${z(d.getMinutes())}${z(d.getSeconds())}`;
+  };
+
+  const setExportEnabled = () => {
+    if (!exportMenu) return;
+    const rows = collectRows();
+    const hasText = rows.length > 0;
+    const hasAudio = audioChunks.length > 0;
+    exportMenu.querySelectorAll('button[data-export]').forEach((btn) => {
+      const kind = btn.dataset.export;
+      btn.disabled = (kind === 'audio') ? !hasAudio : !hasText;
+    });
+  };
+
+  const exportAudio = () => {
+    if (!audioChunks.length) return;
+    const ext = (audioMime.includes('ogg')) ? 'ogg' : (audioMime.includes('mp4') ? 'm4a' : 'webm');
+    const blob = new Blob(audioChunks, { type: audioMime });
+    downloadBlob(blob, `lecture-${fileStamp()}.${ext}`);
+  };
+
+  const exportEN = () => {
+    const rows = collectRows();
+    if (!rows.length) return;
+    const body = rows
+      .filter(r => r.en)
+      .map(r => `[${r.time}] ${r.en}`)
+      .join('\n');
+    downloadText(body + '\n', `transcript-en-${fileStamp()}.txt`);
+  };
+
+  const exportJA = () => {
+    const rows = collectRows();
+    if (!rows.length) return;
+    const body = rows
+      .filter(r => r.ja)
+      .map(r => `[${r.time}] ${r.ja}`)
+      .join('\n');
+    downloadText(body + '\n', `transcript-ja-${fileStamp()}.txt`);
+  };
+
+  const exportTSV = () => {
+    const rows = collectRows();
+    if (!rows.length) return;
+    const esc = (s) => s.replace(/\t/g, ' ').replace(/\r?\n/g, ' ');
+    const header = 'time\ten\tja';
+    const body = rows.map(r => `${r.time}\t${esc(r.en)}\t${esc(r.ja)}`).join('\n');
+    downloadText(header + '\n' + body + '\n', `transcript-${fileStamp()}.tsv`, 'text/tab-separated-values;charset=utf-8');
+  };
+
+  const exportJSON = () => {
+    const rows = collectRows();
+    if (!rows.length) return;
+    const payload = {
+      session_started_at: sessionStartedAt ? new Date(sessionStartedAt).toISOString() : null,
+      exported_at: new Date().toISOString(),
+      segments: rows,
+    };
+    downloadText(JSON.stringify(payload, null, 2) + '\n', `transcript-${fileStamp()}.json`, 'application/json;charset=utf-8');
+  };
+
+  const EXPORT_HANDLERS = {
+    audio: exportAudio,
+    en: exportEN,
+    ja: exportJA,
+    tsv: exportTSV,
+    json: exportJSON,
+  };
+
+  const closeExportMenu = () => {
+    if (!exportMenu) return;
+    exportMenu.hidden = true;
+    if (exportBtn) exportBtn.setAttribute('aria-expanded', 'false');
+  };
+
+  const toggleExportMenu = () => {
+    if (!exportMenu) return;
+    const willOpen = exportMenu.hidden;
+    if (willOpen) setExportEnabled();
+    exportMenu.hidden = !willOpen;
+    if (exportBtn) exportBtn.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
+  };
+
+  if (exportBtn && exportMenu) {
+    exportBtn.addEventListener('click', (e) => { e.stopPropagation(); toggleExportMenu(); });
+    exportMenu.addEventListener('click', (e) => {
+      const target = e.target instanceof HTMLElement ? e.target.closest('button[data-export]') : null;
+      if (!target || target.disabled) return;
+      const kind = target.dataset.export;
+      const fn = EXPORT_HANDLERS[kind];
+      if (fn) fn();
+      closeExportMenu();
+    });
+    document.addEventListener('click', (e) => {
+      if (exportMenu.hidden) return;
+      if (!exportMenu.contains(e.target) && !exportBtn.contains(e.target)) closeExportMenu();
+    });
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeExportMenu(); });
+  }
 
   // ---------- event handling ----------
 
@@ -316,6 +456,27 @@
     }
     startMeter(mediaStream);
 
+    // local audio recording for later download
+    try {
+      audioChunks = [];
+      const preferred = [
+        'audio/webm;codecs=opus',
+        'audio/webm',
+        'audio/ogg;codecs=opus',
+        'audio/mp4',
+      ].find((m) => window.MediaRecorder && MediaRecorder.isTypeSupported(m));
+      audioRecorder = new MediaRecorder(mediaStream, preferred ? { mimeType: preferred } : undefined);
+      audioMime = audioRecorder.mimeType || preferred || 'audio/webm';
+      audioRecorder.addEventListener('dataavailable', (e) => {
+        if (e.data && e.data.size) audioChunks.push(e.data);
+      });
+      audioRecorder.start(1000);
+      sessionStartedAt = Date.now();
+    } catch (err) {
+      console.warn('audio recording unavailable', err);
+      audioRecorder = null;
+    }
+
     // 3. peer connection
     pc = new RTCPeerConnection();
     pc.oniceconnectionstatechange = () => {
@@ -420,6 +581,10 @@
   const stop = () => {
     running = false;
     setStatus('stopped', 'idle');
+    if (audioRecorder && audioRecorder.state !== 'inactive') {
+      try { audioRecorder.stop(); } catch { /* ignore */ }
+    }
+    audioRecorder = null;
     try { if (dc && dc.readyState === 'open') dc.close(); } catch { /* ignore */ }
     dc = null;
     if (pc) {
@@ -435,6 +600,7 @@
     stopMeter();
     startBtn.disabled = false;
     stopBtn.disabled = true;
+    setExportEnabled();
   };
 
   const clear = () => {
@@ -445,8 +611,11 @@
     pendingItemQueue.length = 0;
     enChars = 0;
     jaChars = 0;
+    audioChunks = [];
+    sessionStartedAt = null;
     updateMeta();
     setError('');
+    setExportEnabled();
   };
 
   // ---------- wire up ----------
