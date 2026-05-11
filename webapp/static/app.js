@@ -1,8 +1,9 @@
 // Real-time English -> Japanese lecture translator (browser side).
 //
-// Captures microphone audio, slices it into fixed-length chunks via a
-// MediaRecorder restart cycle, ships each chunk to the server over a
-// WebSocket, and live-updates a two-pane (EN / JA) transcript view.
+// Captures microphone audio, slices it into variable-length chunks (a
+// minimum duration, then cut at the first detected silence / speech
+// break), ships each chunk over a WebSocket, and live-updates a
+// two-pane (EN / JA) transcript view.
 
 (() => {
   const startBtn = document.getElementById('startBtn');
@@ -13,10 +14,21 @@
   const enLog = document.getElementById('enLog');
   const jaLog = document.getElementById('jaLog');
 
+  // Silence detection params.
+  const SILENCE_RMS = 0.012;        // RMS amplitude below this counts as "quiet".
+  const SILENCE_HOLD_MS = 600;      // continuous quiet duration that defines a "break".
+  const VAD_POLL_MS = 80;           // RMS sampling cadence.
+  const MAX_CHUNK_MULTIPLIER = 2;   // safety: hard-cut after min * this many seconds.
+  const MAX_CHUNK_CEILING_S = 300;  // absolute upper bound (5 min).
+
   /** @type {WebSocket | null} */ let ws = null;
   /** @type {MediaStream | null} */ let mediaStream = null;
   /** @type {MediaRecorder | null} */ let recorder = null;
-  /** @type {number | null} */ let cycleTimer = null;
+  /** @type {AudioContext | null} */ let audioCtx = null;
+  /** @type {AnalyserNode | null} */ let analyser = null;
+  /** @type {Float32Array | null} */ let vadBuf = null;
+  /** @type {number | null} */ let safetyTimer = null;
+  /** @type {number | null} */ let vadTimer = null;
   let chunkId = 0;
   let running = false;
   /** @type {Map<number, {en: HTMLElement, ja: HTMLElement}>} */
@@ -38,6 +50,12 @@
       if (window.MediaRecorder && MediaRecorder.isTypeSupported(m)) return m;
     }
     return '';
+  };
+
+  const minChunkSec = () => {
+    const raw = Number(chunkSecInput.value);
+    if (!Number.isFinite(raw)) return 30;
+    return Math.max(5, Math.min(180, Math.round(raw)));
   };
 
   const appendSegment = (id) => {
@@ -108,6 +126,34 @@
     });
   });
 
+  const setupVad = (stream) => {
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const src = audioCtx.createMediaStreamSource(stream);
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 2048;
+    analyser.smoothingTimeConstant = 0;
+    src.connect(analyser);
+    vadBuf = new Float32Array(analyser.fftSize);
+  };
+
+  const teardownVad = () => {
+    if (vadTimer != null) { clearInterval(vadTimer); vadTimer = null; }
+    analyser = null;
+    vadBuf = null;
+    if (audioCtx) {
+      try { audioCtx.close(); } catch { /* ignore */ }
+      audioCtx = null;
+    }
+  };
+
+  const readRms = () => {
+    if (!analyser || !vadBuf) return 0;
+    analyser.getFloatTimeDomainData(vadBuf);
+    let sumSq = 0;
+    for (let i = 0; i < vadBuf.length; i++) sumSq += vadBuf[i] * vadBuf[i];
+    return Math.sqrt(sumSq / vadBuf.length);
+  };
+
   const startRecorderCycle = (mime) => {
     if (!mediaStream || !running) return;
 
@@ -136,10 +182,41 @@
     rec.start();
     recorder = rec;
 
-    const chunkSec = Math.max(2, Math.min(15, Number(chunkSecInput.value) || 5));
-    cycleTimer = window.setTimeout(() => {
-      if (rec.state !== 'inactive') rec.stop();
-    }, chunkSec * 1000);
+    const minSec = minChunkSec();
+    const minMs = minSec * 1000;
+    const maxSec = Math.min(MAX_CHUNK_CEILING_S, minSec * MAX_CHUNK_MULTIPLIER);
+    const cycleStart = performance.now();
+    let silenceStart = null;
+
+    const stopThisCycle = () => {
+      if (vadTimer != null) { clearInterval(vadTimer); vadTimer = null; }
+      if (safetyTimer != null) { clearTimeout(safetyTimer); safetyTimer = null; }
+      if (rec.state !== 'inactive') {
+        try { rec.stop(); } catch { /* ignore */ }
+      }
+    };
+
+    safetyTimer = window.setTimeout(stopThisCycle, maxSec * 1000);
+    setStatus(`recording (waiting min ${minSec}s)`, 'listening');
+
+    vadTimer = window.setInterval(() => {
+      if (!running || recorder !== rec) return;
+      const elapsed = performance.now() - cycleStart;
+      if (elapsed < minMs) return;
+
+      if (silenceStart == null) {
+        setStatus('recording (listening for break)', 'listening');
+      }
+      const rms = readRms();
+      if (rms < SILENCE_RMS) {
+        if (silenceStart == null) silenceStart = performance.now();
+        if (performance.now() - silenceStart >= SILENCE_HOLD_MS) {
+          stopThisCycle();
+        }
+      } else {
+        silenceStart = null;
+      }
+    }, VAD_POLL_MS);
   };
 
   const start = async () => {
@@ -173,6 +250,19 @@
       return;
     }
 
+    try {
+      setupVad(mediaStream);
+    } catch (err) {
+      console.error(err);
+      setStatus('audio init failed', 'error');
+      mediaStream.getTracks().forEach((t) => t.stop());
+      mediaStream = null;
+      ws.close();
+      ws = null;
+      startBtn.disabled = false;
+      return;
+    }
+
     running = true;
     stopBtn.disabled = false;
     setStatus('listening', 'listening');
@@ -182,11 +272,13 @@
 
   const stop = () => {
     running = false;
-    if (cycleTimer != null) { clearTimeout(cycleTimer); cycleTimer = null; }
+    if (vadTimer != null) { clearInterval(vadTimer); vadTimer = null; }
+    if (safetyTimer != null) { clearTimeout(safetyTimer); safetyTimer = null; }
     if (recorder && recorder.state !== 'inactive') {
       try { recorder.stop(); } catch { /* ignore */ }
     }
     recorder = null;
+    teardownVad();
     if (mediaStream) {
       mediaStream.getTracks().forEach((t) => t.stop());
       mediaStream = null;

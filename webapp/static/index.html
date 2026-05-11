@@ -12,9 +12,9 @@
     <div class="controls">
       <button id="startBtn" type="button">▶ Start</button>
       <button id="stopBtn" type="button" disabled>■ Stop</button>
-      <label class="ctrl">
-        Chunk
-        <input id="chunkSec" type="number" min="2" max="15" step="1" value="5" />
+      <label class="ctrl" title="Minimum chunk length. After this many seconds, the recorder waits for the first silence (speech break) before cutting the chunk.">
+        Min chunk
+        <input id="chunkSec" type="number" min="5" max="180" step="1" value="30" />
         s
       </label>
       <label class="ctrl">
