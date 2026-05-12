@@ -123,10 +123,13 @@ async def session() -> JSONResponse:
             "threshold": 0.5,
             "prefix_padding_ms": 300,
             "silence_duration_ms": 900,
-            "create_response": True,
-            # Do NOT cancel the current translation when the speaker
-            # starts the next utterance.  Otherwise long sentences get
-            # truncated halfway through.
+            # The browser drives response.create manually so each user
+            # utterance gets exactly one response, even when the speaker
+            # overlaps with the previous translation.  With auto-create
+            # plus interrupt_response=False the server VAD races with the
+            # in-flight response and silently drops some utterances,
+            # which shifts the EN/JA timeline alignment.
+            "create_response": False,
             "interrupt_response": False,
         },
         "temperature": 0.6,

@@ -39,8 +39,12 @@
   // ----- segment state -----
   /** @typedef {{enEl: HTMLElement, jaEl: HTMLElement, time: string}} Row */
   /** @type {Map<string, Row>} */ const rowsByItem = new Map();
-  /** @type {string[]} */ const pendingItemQueue = [];
+  // user item ids that still need a response, in conversation order
+  /** @type {string[]} */ const pendingUserItems = [];
+  // response_id -> user item_id for responses we have already started
   /** @type {Map<string, string>} */ const responseToItem = new Map();
+  // user item id of the response.create we just sent, awaiting response.created
+  /** @type {string | null} */ let pendingNextItemId = null;
 
   let enChars = 0;
   let jaChars = 0;
@@ -97,8 +101,33 @@
       createdAt: Date.now(),
     };
     rowsByItem.set(itemId, row);
-    pendingItemQueue.push(itemId);
     return row;
+  };
+
+  // Manually drive response.create so each user utterance is paired with
+  // exactly one response, even when the speaker overlaps with the
+  // previous translation.  Otherwise the server VAD's auto-create races
+  // with an in-flight response and silently drops some utterances.
+  const maybeCreateNextResponse = () => {
+    if (!dc || dc.readyState !== 'open') return;
+    if (pendingNextItemId !== null) return;
+    if (responseToItem.size > 0) return;
+    if (!pendingUserItems.length) return;
+    const itemId = pendingUserItems.shift();
+    pendingNextItemId = itemId;
+    try {
+      dc.send(JSON.stringify({
+        type: 'response.create',
+        response: {
+          modalities: ['text'],
+          input: [{ type: 'item_reference', id: itemId }],
+        },
+      }));
+    } catch (err) {
+      console.error('response.create send failed', err);
+      pendingUserItems.unshift(itemId);
+      pendingNextItemId = null;
+    }
   };
 
   // ---------- export ----------
@@ -255,6 +284,10 @@
         const item = ev.item;
         if (item && item.type === 'message' && item.role === 'user') {
           getOrCreateRow(item.id);
+          if (!pendingUserItems.includes(item.id) && item.id !== pendingNextItemId) {
+            pendingUserItems.push(item.id);
+            maybeCreateNextResponse();
+          }
         }
         break;
       }
@@ -297,8 +330,11 @@
 
       case 'response.created': {
         const responseId = ev.response && ev.response.id;
-        const itemId = pendingItemQueue.shift();
-        if (responseId && itemId) responseToItem.set(responseId, itemId);
+        if (!responseId) break;
+        let itemId = pendingNextItemId;
+        if (itemId === null) itemId = pendingUserItems.shift() || null;
+        pendingNextItemId = null;
+        if (itemId) responseToItem.set(responseId, itemId);
         break;
       }
 
@@ -345,11 +381,22 @@
           }
         }
         responseToItem.delete(responseId);
+        maybeCreateNextResponse();
         break;
       }
 
       case 'error': {
-        const msg = (ev.error && (ev.error.message || ev.error.code)) || 'Unknown error';
+        const errObj = ev.error || {};
+        const msg = errObj.message || errObj.code || 'Unknown error';
+        const code = (errObj.code || errObj.type || '').toString();
+        if (/active response/i.test(msg) || code === 'conversation_already_has_active_response') {
+          if (pendingNextItemId !== null) {
+            pendingUserItems.unshift(pendingNextItemId);
+            pendingNextItemId = null;
+          }
+          console.warn('Realtime warning (suppressed):', msg);
+          break;
+        }
         console.error('Realtime error:', ev);
         setError('Realtime error: ' + msg);
         break;
@@ -512,7 +559,9 @@
               threshold: 0.5,
               prefix_padding_ms: 300,
               silence_duration_ms: 900,
-              create_response: true,
+              // The browser drives response.create itself; see
+              // maybeCreateNextResponse().
+              create_response: false,
               interrupt_response: false,
             },
             temperature: 0.6,
@@ -610,7 +659,8 @@
     jaLog.innerHTML = '';
     rowsByItem.clear();
     responseToItem.clear();
-    pendingItemQueue.length = 0;
+    pendingUserItems.length = 0;
+    pendingNextItemId = null;
     enChars = 0;
     jaChars = 0;
     audioChunks = [];

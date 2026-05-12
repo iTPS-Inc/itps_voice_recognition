@@ -523,8 +523,12 @@
   let running = false;
 
   const rowsByItem = new Map();
-  const pendingItemQueue = [];
+  // user item ids that still need a response, in conversation order
+  const pendingUserItems = [];
+  // response_id -> user item_id for responses we have already started
   const responseToItem = new Map();
+  // user item id of the response.create we just sent, awaiting response.created
+  let pendingNextItemId = null;
   let enChars = 0, jaChars = 0;
 
   // ---- ui helpers ----
@@ -563,8 +567,33 @@
     const time = stampNow();
     row = { enEl: newSegment('en', time), jaEl: newSegment('ja', time), time, createdAt: Date.now() };
     rowsByItem.set(itemId, row);
-    pendingItemQueue.push(itemId);
     return row;
+  };
+
+  // Manually drive response.create so each user utterance is paired with
+  // exactly one response, even when the speaker keeps talking through the
+  // previous translation (the server VAD's auto-create_response races with
+  // an in-flight response and silently drops utterances otherwise).
+  const maybeCreateNextResponse = () => {
+    if (!dc || dc.readyState !== 'open') return;
+    if (pendingNextItemId !== null) return;
+    if (responseToItem.size > 0) return;
+    if (!pendingUserItems.length) return;
+    const itemId = pendingUserItems.shift();
+    pendingNextItemId = itemId;
+    try {
+      dc.send(JSON.stringify({
+        type: 'response.create',
+        response: {
+          modalities: ['text'],
+          input: [{ type: 'item_reference', id: itemId }],
+        },
+      }));
+    } catch (err) {
+      console.error('response.create send failed', err);
+      pendingUserItems.unshift(itemId);
+      pendingNextItemId = null;
+    }
   };
 
   // ---- export ----
@@ -673,7 +702,13 @@
         setStatus('listening', 'listening'); break;
       case 'conversation.item.created': {
         const it = ev.item;
-        if (it && it.type === 'message' && it.role === 'user') getOrCreateRow(it.id);
+        if (it && it.type === 'message' && it.role === 'user') {
+          getOrCreateRow(it.id);
+          if (!pendingUserItems.includes(it.id) && it.id !== pendingNextItemId) {
+            pendingUserItems.push(it.id);
+            maybeCreateNextResponse();
+          }
+        }
         break;
       }
       case 'conversation.item.input_audio_transcription.delta': {
@@ -703,8 +738,11 @@
       }
       case 'response.created': {
         const rid = ev.response && ev.response.id;
-        const iid = pendingItemQueue.shift();
-        if (rid && iid) responseToItem.set(rid, iid);
+        if (!rid) break;
+        let iid = pendingNextItemId;
+        if (iid === null) iid = pendingUserItems.shift() || null;
+        pendingNextItemId = null;
+        if (iid) responseToItem.set(rid, iid);
         break;
       }
       case 'response.text.delta':
@@ -739,10 +777,23 @@
             row.jaEl.classList.add('empty'); row.jaEl.textContent = '(無音)';
           }
         }
-        responseToItem.delete(rid); break;
+        responseToItem.delete(rid);
+        maybeCreateNextResponse();
+        break;
       }
       case 'error': {
-        const msg = (ev.error && (ev.error.message || ev.error.code)) || 'Unknown error';
+        const errObj = ev.error || {};
+        const msg = errObj.message || errObj.code || 'Unknown error';
+        const code = (errObj.code || errObj.type || '').toString();
+        if (/active response/i.test(msg) || code === 'conversation_already_has_active_response') {
+          // Recoverable race: put the in-flight item back and try later.
+          if (pendingNextItemId !== null) {
+            pendingUserItems.unshift(pendingNextItemId);
+            pendingNextItemId = null;
+          }
+          console.warn('Realtime warning (suppressed):', msg);
+          break;
+        }
         console.error('Realtime error:', ev);
         setError('Realtime error: ' + msg);
         break;
@@ -849,9 +900,9 @@
             turn_detection: {
               type: 'server_vad', threshold: 0.5,
               prefix_padding_ms: 300, silence_duration_ms: 900,
-              create_response: true,
-              // Do NOT cancel the in-flight translation when the next
-              // utterance starts -- otherwise long sentences are cut off.
+              // We control response creation ourselves so user items and
+              // responses stay 1:1 even when the speaker overlaps.
+              create_response: false,
               interrupt_response: false,
             },
             temperature: 0.6,
@@ -934,7 +985,9 @@
 
   const clear = () => {
     enLog.innerHTML = ''; jaLog.innerHTML = '';
-    rowsByItem.clear(); responseToItem.clear(); pendingItemQueue.length = 0;
+    rowsByItem.clear(); responseToItem.clear();
+    pendingUserItems.length = 0;
+    pendingNextItemId = null;
     enChars = 0; jaChars = 0;
     audioChunks = [];
     sessionStartedAt = null;
