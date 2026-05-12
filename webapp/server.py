@@ -114,7 +114,6 @@ async def session() -> JSONResponse:
                 headers={
                     "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json",
-                    "OpenAI-Beta": "realtime=v1",
                 },
                 json=payload,
             )

@@ -551,7 +551,6 @@
         headers: {
           Authorization: `Bearer ${ephemeralKey}`,
           'Content-Type': 'application/sdp',
-          'OpenAI-Beta': 'realtime=v1',
         },
       });
       if (!r.ok) throw new Error('HTTP ' + r.status + ' ' + (await r.text()));
