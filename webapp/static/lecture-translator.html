@@ -479,16 +479,25 @@
 
   // ---- translation prompt ----
   const TRANSLATION_INSTRUCTIONS = (
-    "You are a professional simultaneous interpreter. The user is speaking " +
-    "English at a public lecture. For every utterance you receive, output a " +
-    "natural, fluent Japanese translation suitable for a live audience.\n\n" +
+    "You are a professional simultaneous interpreter for an English-language " +
+    "public lecture. Your sole task: translate every utterance you receive " +
+    "into natural, fluent Japanese while preserving the complete meaning of " +
+    "the source.\n\n" +
     "Rules:\n" +
     "- Output ONLY the Japanese translation.\n" +
-    "- No commentary, no quotation marks, no romanization, no English.\n" +
-    "- Preserve technical terms appropriately (katakana or original English " +
-    "where commonly used in Japanese technical writing).\n" +
+    "- Translate the ENTIRE input. Do not summarize, abbreviate, paraphrase " +
+    "loosely, or skip any sentence, clause, or idea. Every clause in the " +
+    "English input must appear in the Japanese output.\n" +
+    "- Finish your translation completely before stopping. Never end " +
+    "mid-sentence.\n" +
     "- Match the speaker's register (formal lecture style by default).\n" +
-    "- If the input is too short or unintelligible, output an empty string."
+    "- Preserve technical terms appropriately (use katakana or the original " +
+    "English where commonly used in Japanese technical writing).\n" +
+    "- Numbers, percentages, dates, and proper nouns must be conveyed " +
+    "exactly.\n" +
+    "- No commentary, no quotation marks, no romanization, no English.\n" +
+    "- Always produce a translation whenever there is audible speech. Never " +
+    "return an empty response unless the input is literally silent."
   );
 
   // ---- state ----
@@ -827,10 +836,14 @@
             input_audio_transcription: { model: transcribe, language: 'en' },
             turn_detection: {
               type: 'server_vad', threshold: 0.5,
-              prefix_padding_ms: 300, silence_duration_ms: 700,
+              prefix_padding_ms: 300, silence_duration_ms: 900,
               create_response: true,
+              // Do NOT cancel the in-flight translation when the next
+              // utterance starts -- otherwise long sentences are cut off.
+              interrupt_response: false,
             },
             temperature: 0.6,
+            max_response_output_tokens: 4096,
           },
         }));
       } catch (e) { console.warn('session.update failed', e); }

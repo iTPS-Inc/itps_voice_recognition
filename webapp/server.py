@@ -39,17 +39,27 @@ TRANSCRIBE_MODEL = os.environ.get("TRANSCRIBE_MODEL", "whisper-1")
 SESSIONS_URL = "https://api.openai.com/v1/realtime/sessions"
 
 TRANSLATION_INSTRUCTIONS = (
-    "You are a professional simultaneous interpreter. The user is speaking "
-    "English at a public lecture. For every utterance you receive, output a "
-    "natural, fluent Japanese translation suitable for a live audience.\n"
+    "You are a professional simultaneous interpreter for an English-language "
+    "public lecture. Your sole task: translate every utterance you receive "
+    "into natural, fluent Japanese while preserving the complete meaning of "
+    "the source.\n"
     "\n"
     "Rules:\n"
     "- Output ONLY the Japanese translation.\n"
-    "- No commentary, no quotation marks, no romanization, no English.\n"
-    "- Preserve technical terms appropriately (katakana or original English "
-    "where commonly used in Japanese technical writing).\n"
+    "- Translate the ENTIRE input. Do not summarize, abbreviate, paraphrase "
+    "loosely, or skip any sentence, clause, or idea. Every clause in the "
+    "English input must appear in the Japanese output.\n"
+    "- Finish your translation completely before stopping. Never end "
+    "mid-sentence.\n"
     "- Match the speaker's register (formal lecture style by default).\n"
-    "- If the input is too short or unintelligible, output an empty string."
+    "- Preserve technical terms appropriately (use katakana or the original "
+    "English where commonly used in Japanese technical writing).\n"
+    "- Numbers, percentages, dates, and proper nouns must be conveyed "
+    "exactly.\n"
+    "- No commentary, no quotation marks, no romanization, no English.\n"
+    "- Always produce a translation whenever there is audible speech in the "
+    "input. Never return an empty response unless the input is literally "
+    "silent."
 )
 
 app = FastAPI(title="Lecture Translator (Realtime)")
@@ -101,10 +111,15 @@ async def session() -> JSONResponse:
             "type": "server_vad",
             "threshold": 0.5,
             "prefix_padding_ms": 300,
-            "silence_duration_ms": 700,
+            "silence_duration_ms": 900,
             "create_response": True,
+            # Do NOT cancel the current translation when the speaker
+            # starts the next utterance.  Otherwise long sentences get
+            # truncated halfway through.
+            "interrupt_response": False,
         },
         "temperature": 0.6,
+        "max_response_output_tokens": 4096,
     }
 
     try:
