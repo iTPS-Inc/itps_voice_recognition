@@ -8,6 +8,8 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Noto+Sans+JP:wght@400;500;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/style.css" />
+  <script defer src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js"></script>
 </head>
 <body>
   <header class="topbar">
@@ -35,6 +37,7 @@
     </div>
 
     <div class="actions">
+      <button id="settingsBtn" class="btn btn-ghost" type="button" title="VAD timing settings">Settings</button>
       <button id="startBtn" class="btn btn-primary" type="button">
         <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
           <path fill="currentColor" d="M8 5v14l11-7z"/>
@@ -61,23 +64,19 @@
         <div id="exportMenu" class="menu" role="menu" hidden>
           <button type="button" data-export="audio" role="menuitem">
             <span class="menu-main">Audio recording</span>
-            <span class="menu-sub">.webm (Opus)</span>
+            <span class="menu-sub">.mp3</span>
           </button>
           <button type="button" data-export="en" role="menuitem">
             <span class="menu-main">English transcript</span>
-            <span class="menu-sub">.txt</span>
+            <span class="menu-sub">.xlsx</span>
           </button>
           <button type="button" data-export="ja" role="menuitem">
             <span class="menu-main">Japanese translation</span>
-            <span class="menu-sub">.txt</span>
+            <span class="menu-sub">.xlsx</span>
           </button>
-          <button type="button" data-export="tsv" role="menuitem">
+          <button type="button" data-export="parallel" role="menuitem">
             <span class="menu-main">Parallel (EN + JA)</span>
-            <span class="menu-sub">.tsv</span>
-          </button>
-          <button type="button" data-export="json" role="menuitem">
-            <span class="menu-main">Structured</span>
-            <span class="menu-sub">.json</span>
+            <span class="menu-sub">.xlsx</span>
           </button>
         </div>
       </div>
@@ -121,6 +120,43 @@
     </span>
     <span id="errorBanner" class="error-banner" hidden></span>
   </footer>
+
+  <div id="modal" class="modal-backdrop" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+      <h2 id="modalTitle">Settings</h2>
+      <p>VAD タイミングを調整します。設定は次回 Start 時から有効になります。</p>
+
+      <div class="modal-row">
+        <label for="minSpeechSlider">
+          最小発話長 / Min speech duration:
+          <span id="minSpeechValue" class="slider-val">1.0</span> s
+        </label>
+        <input id="minSpeechSlider" type="range" min="0" max="5" step="0.5" value="1" />
+        <small class="slider-help">
+          これより短い発話 (咳・うなずきなど) は翻訳しません。0 にすると全て翻訳します。
+        </small>
+      </div>
+
+      <div class="modal-row">
+        <label for="silenceSlider">
+          切れ目の沈黙時間 / Pause to end utterance:
+          <span id="silenceValue" class="slider-val">0.9</span> s
+        </label>
+        <input id="silenceSlider" type="range" min="0.3" max="3" step="0.1" value="0.9" />
+        <small class="slider-help">
+          無音がこの長さ続くと一区切りと判定します。長くすると 1 区切りの英文・訳文が長くなります。
+        </small>
+      </div>
+
+      <div class="modal-actions">
+        <span></span>
+        <div>
+          <button id="modalCancelBtn" class="btn btn-ghost" type="button">Cancel</button>
+          <button id="modalSaveBtn" class="btn btn-primary" type="button">Save</button>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <script src="/static/app.js"></script>
 </body>

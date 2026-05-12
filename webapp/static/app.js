@@ -11,6 +11,7 @@
   const startBtn = document.getElementById('startBtn');
   const stopBtn = document.getElementById('stopBtn');
   const clearBtn = document.getElementById('clearBtn');
+  const settingsBtn = document.getElementById('settingsBtn');
   const exportBtn = document.getElementById('exportBtn');
   const exportMenu = document.getElementById('exportMenu');
   const statusEl = document.getElementById('status');
@@ -21,6 +22,56 @@
   const jaMeta = document.getElementById('jaMeta');
   const errorBanner = document.getElementById('errorBanner');
   const meterBars = Array.from(document.querySelectorAll('.meter span'));
+
+  // settings modal
+  const modal = document.getElementById('modal');
+  const minSpeechSlider = document.getElementById('minSpeechSlider');
+  const silenceSlider = document.getElementById('silenceSlider');
+  const minSpeechValue = document.getElementById('minSpeechValue');
+  const silenceValue = document.getElementById('silenceValue');
+  const modalSaveBtn = document.getElementById('modalSaveBtn');
+  const modalCancelBtn = document.getElementById('modalCancelBtn');
+
+  const LS_MIN_SPEECH = 'lecture.minSpeechSec';
+  const LS_SILENCE = 'lecture.silenceSec';
+  const getMinSpeechSec = () => {
+    const v = parseFloat(localStorage.getItem(LS_MIN_SPEECH));
+    return Number.isFinite(v) ? v : 1.0;
+  };
+  const getSilenceSec = () => {
+    const v = parseFloat(localStorage.getItem(LS_SILENCE));
+    return Number.isFinite(v) ? v : 0.9;
+  };
+  const formatSec = (v) => Number(v).toFixed(1);
+
+  if (minSpeechSlider && silenceSlider) {
+    const bindSlider = (s, vEl) => {
+      const u = () => { vEl.textContent = formatSec(s.value); };
+      s.addEventListener('input', u);
+      u();
+    };
+    bindSlider(minSpeechSlider, minSpeechValue);
+    bindSlider(silenceSlider, silenceValue);
+  }
+
+  const openModal = () => {
+    if (!modal) return;
+    minSpeechSlider.value = getMinSpeechSec();
+    silenceSlider.value = getSilenceSec();
+    minSpeechValue.textContent = formatSec(minSpeechSlider.value);
+    silenceValue.textContent = formatSec(silenceSlider.value);
+    modal.hidden = false;
+  };
+  const closeModal = () => { if (modal) modal.hidden = true; };
+  if (modalSaveBtn) {
+    modalSaveBtn.addEventListener('click', () => {
+      localStorage.setItem(LS_MIN_SPEECH, String(minSpeechSlider.value));
+      localStorage.setItem(LS_SILENCE, String(silenceSlider.value));
+      closeModal();
+    });
+  }
+  if (modalCancelBtn) modalCancelBtn.addEventListener('click', closeModal);
+  if (settingsBtn) settingsBtn.addEventListener('click', openModal);
 
   /** @type {RTCPeerConnection | null} */ let pc = null;
   /** @type {RTCDataChannel | null} */ let dc = null;
@@ -35,6 +86,10 @@
   let audioMime = 'audio/webm';
   let sessionStartedAt = null;
   let running = false;
+  // speech-duration filter state
+  /** @type {number | null} */ let speechStartedAt = null;
+  let lastSpeechDurationMs = 0;
+  /** @type {Set<string>} */ const skippedUserItems = new Set();
 
   // ----- segment state -----
   /** @typedef {{enEl: HTMLElement, jaEl: HTMLElement, time: string}} Row */
@@ -147,13 +202,19 @@
     downloadBlob(new Blob([content], { type: mime || 'text/plain;charset=utf-8' }), filename);
   };
 
+  const SKIPPED_JA_TEXT = '(短すぎる発話: 翻訳スキップ)';
   const collectRows = () => {
     const rows = [];
     rowsByItem.forEach((row) => {
       const en = (row.enEl.textContent || '').trim();
       const ja = (row.jaEl.textContent || '').trim();
       const cleanEn = (en === '(silence)' || row.enEl.classList.contains('empty')) ? '' : en;
-      const cleanJa = (ja === '(無音)' || row.jaEl.classList.contains('empty')) ? '' : ja;
+      let cleanJa;
+      if (ja === '(無音)' || ja === SKIPPED_JA_TEXT || row.jaEl.classList.contains('empty')) {
+        cleanJa = '';
+      } else {
+        cleanJa = ja;
+      }
       if (!cleanEn && !cleanJa) return;
       rows.push({ time: row.time, en: cleanEn, ja: cleanJa });
     });
@@ -177,59 +238,110 @@
     });
   };
 
-  const exportAudio = () => {
+  // ---- lazy library loaders ----
+  const loadScript = (url) => new Promise((resolve, reject) => {
+    const existing = document.querySelector('script[data-loaded-src="' + url + '"]');
+    if (existing) { resolve(); return; }
+    const s = document.createElement('script');
+    s.src = url;
+    s.async = true;
+    s.setAttribute('data-loaded-src', url);
+    s.onload = () => resolve();
+    s.onerror = () => reject(new Error('failed to load ' + url));
+    document.head.appendChild(s);
+  });
+  const ensureXlsx = async () => {
+    if (typeof window.XLSX !== 'undefined') return;
+    await loadScript('https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js');
+  };
+  const ensureLamejs = async () => {
+    if (typeof window.lamejs !== 'undefined') return;
+    await loadScript('https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js');
+  };
+
+  const float32ToInt16 = (samples) => {
+    const out = new Int16Array(samples.length);
+    for (let i = 0; i < samples.length; i++) {
+      const s = Math.max(-1, Math.min(1, samples[i]));
+      out[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+    }
+    return out;
+  };
+  const encodeMp3 = (int16, sampleRate) => {
+    const encoder = new lamejs.Mp3Encoder(1, sampleRate, 128);
+    const chunks = [];
+    const block = 1152;
+    for (let i = 0; i < int16.length; i += block) {
+      const buf = encoder.encodeBuffer(int16.subarray(i, i + block));
+      if (buf.length > 0) chunks.push(buf);
+    }
+    const flush = encoder.flush();
+    if (flush.length > 0) chunks.push(flush);
+    return new Blob(chunks, { type: 'audio/mpeg' });
+  };
+  const exportAudio = async () => {
     if (!audioChunks.length) return;
-    const ext = (audioMime.includes('ogg')) ? 'ogg' : (audioMime.includes('mp4') ? 'm4a' : 'webm');
-    const blob = new Blob(audioChunks, { type: audioMime });
-    downloadBlob(blob, `lecture-${fileStamp()}.${ext}`);
+    setError('');
+    try {
+      await ensureLamejs();
+      const blob = new Blob(audioChunks, { type: audioMime });
+      const buf = await blob.arrayBuffer();
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const audioBuffer = await ctx.decodeAudioData(buf.slice(0));
+      let mono;
+      if (audioBuffer.numberOfChannels === 1) {
+        mono = audioBuffer.getChannelData(0);
+      } else {
+        const a = audioBuffer.getChannelData(0);
+        const b = audioBuffer.getChannelData(1);
+        mono = new Float32Array(a.length);
+        for (let i = 0; i < a.length; i++) mono[i] = (a[i] + b[i]) / 2;
+      }
+      const mp3Blob = encodeMp3(float32ToInt16(mono), audioBuffer.sampleRate);
+      try { ctx.close(); } catch { /* ignore */ }
+      downloadBlob(mp3Blob, `lecture-${fileStamp()}.mp3`);
+    } catch (err) {
+      console.error('mp3 export failed', err);
+      setError('MP3 conversion failed: ' + (err.message || err) + '  (saved raw recording instead)');
+      const ext = audioMime.includes('ogg') ? 'ogg' : audioMime.includes('mp4') ? 'm4a' : 'webm';
+      downloadBlob(new Blob(audioChunks, { type: audioMime }), `lecture-${fileStamp()}.${ext}`);
+    }
   };
 
-  const exportEN = () => {
-    const rows = collectRows();
-    if (!rows.length) return;
-    const body = rows
-      .filter(r => r.en)
-      .map(r => `[${r.time}] ${r.en}`)
-      .join('\n');
-    downloadText(body + '\n', `transcript-en-${fileStamp()}.txt`);
+  const writeXlsx = (aoa, sheetName, filename, colWidths) => {
+    const ws = XLSX.utils.aoa_to_sheet(aoa);
+    if (colWidths) ws['!cols'] = colWidths.map((w) => ({ wch: w }));
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, sheetName);
+    XLSX.writeFile(wb, filename);
   };
-
-  const exportJA = () => {
-    const rows = collectRows();
+  const exportEN = async () => {
+    const rows = collectRows().filter(r => r.en);
     if (!rows.length) return;
-    const body = rows
-      .filter(r => r.ja)
-      .map(r => `[${r.time}] ${r.ja}`)
-      .join('\n');
-    downloadText(body + '\n', `transcript-ja-${fileStamp()}.txt`);
+    await ensureXlsx();
+    const aoa = [['Time', 'English']].concat(rows.map(r => [r.time, r.en]));
+    writeXlsx(aoa, 'English transcript', `transcript-en-${fileStamp()}.xlsx`, [12, 100]);
   };
-
-  const exportTSV = () => {
-    const rows = collectRows();
+  const exportJA = async () => {
+    const rows = collectRows().filter(r => r.ja);
     if (!rows.length) return;
-    const esc = (s) => s.replace(/\t/g, ' ').replace(/\r?\n/g, ' ');
-    const header = 'time\ten\tja';
-    const body = rows.map(r => `${r.time}\t${esc(r.en)}\t${esc(r.ja)}`).join('\n');
-    downloadText(header + '\n' + body + '\n', `transcript-${fileStamp()}.tsv`, 'text/tab-separated-values;charset=utf-8');
+    await ensureXlsx();
+    const aoa = [['Time', '日本語訳']].concat(rows.map(r => [r.time, r.ja]));
+    writeXlsx(aoa, '日本語訳', `transcript-ja-${fileStamp()}.xlsx`, [12, 100]);
   };
-
-  const exportJSON = () => {
+  const exportParallel = async () => {
     const rows = collectRows();
     if (!rows.length) return;
-    const payload = {
-      session_started_at: sessionStartedAt ? new Date(sessionStartedAt).toISOString() : null,
-      exported_at: new Date().toISOString(),
-      segments: rows,
-    };
-    downloadText(JSON.stringify(payload, null, 2) + '\n', `transcript-${fileStamp()}.json`, 'application/json;charset=utf-8');
+    await ensureXlsx();
+    const aoa = [['Time', 'English', '日本語訳']].concat(rows.map(r => [r.time, r.en, r.ja]));
+    writeXlsx(aoa, 'EN-JA parallel', `transcript-${fileStamp()}.xlsx`, [12, 80, 80]);
   };
 
   const EXPORT_HANDLERS = {
     audio: exportAudio,
     en: exportEN,
     ja: exportJA,
-    tsv: exportTSV,
-    json: exportJSON,
+    parallel: exportParallel,
   };
 
   const closeExportMenu = () => {
@@ -253,7 +365,12 @@
       if (!target || target.disabled) return;
       const kind = target.dataset.export;
       const fn = EXPORT_HANDLERS[kind];
-      if (fn) fn();
+      if (fn) {
+        Promise.resolve().then(fn).catch((err) => {
+          console.error('export failed', err);
+          setError('Export failed: ' + (err.message || err));
+        });
+      }
       closeExportMenu();
     });
     document.addEventListener('click', (e) => {
@@ -273,10 +390,15 @@
         break;
 
       case 'input_audio_buffer.speech_started':
+        speechStartedAt = performance.now();
         setStatus('speaking', 'speaking');
         break;
 
       case 'input_audio_buffer.speech_stopped':
+        if (speechStartedAt != null) {
+          lastSpeechDurationMs = performance.now() - speechStartedAt;
+          speechStartedAt = null;
+        }
         setStatus('listening', 'listening');
         break;
 
@@ -284,7 +406,18 @@
         const item = ev.item;
         if (item && item.type === 'message' && item.role === 'user') {
           getOrCreateRow(item.id);
-          if (!pendingUserItems.includes(item.id) && item.id !== pendingNextItemId) {
+          const minMs = Math.max(0, getMinSpeechSec()) * 1000;
+          const tooShort = minMs > 0 && lastSpeechDurationMs > 0 && lastSpeechDurationMs < minMs;
+          lastSpeechDurationMs = 0;
+          if (tooShort) {
+            skippedUserItems.add(item.id);
+            const row = rowsByItem.get(item.id);
+            if (row) {
+              row.jaEl.classList.remove('pending');
+              row.jaEl.classList.add('empty');
+              row.jaEl.textContent = '(短すぎる発話: 翻訳スキップ)';
+            }
+          } else if (!pendingUserItems.includes(item.id) && item.id !== pendingNextItemId) {
             pendingUserItems.push(item.id);
             maybeCreateNextResponse();
           }
@@ -558,7 +691,7 @@
               type: 'server_vad',
               threshold: 0.5,
               prefix_padding_ms: 300,
-              silence_duration_ms: 900,
+              silence_duration_ms: Math.round(getSilenceSec() * 1000),
               // The browser drives response.create itself; see
               // maybeCreateNextResponse().
               create_response: false,
@@ -661,6 +794,9 @@
     responseToItem.clear();
     pendingUserItems.length = 0;
     pendingNextItemId = null;
+    skippedUserItems.clear();
+    speechStartedAt = null;
+    lastSpeechDurationMs = 0;
     enChars = 0;
     jaChars = 0;
     audioChunks = [];
