@@ -1,0 +1,2373 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>iTLE Neo - Chrome/Edge専用</title>
+
+<!--
+  iTLE Neo - スタンドアロン版メディア処理アプリ
+  単一HTMLファイル / ブラウザ完結 / APIキーはクライアント保持（案A）
+  将来案C（Cloudflare Workers + Stripeで認証・課金プロキシ）への移行を
+  容易にするため、API呼び出しは apiClient モジュールに集約し、
+  baseUrl の差し替えのみでサーバ経由化できる設計としています。
+-->
+
+<!-- CDN ライブラリ -->
+<script src="https://cdn.jsdelivr.net/npm/pptxgenjs@3.12.0/dist/pptxgen.bundle.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dayjs@1.11.10/dayjs.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dayjs@1.11.10/plugin/duration.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/lucide@latest/dist/umd/lucide.min.js"></script>
+<!-- 波形プレーヤー（任意）。読み込み失敗時は標準 audio タグにフォールバック -->
+<script src="https://cdn.jsdelivr.net/npm/wavesurfer.js@7.7.3/dist/wavesurfer.min.js"></script>
+
+<style>
+  :root {
+    --bg: #0f1419;
+    --bg-elev: #1a212b;
+    --bg-elev2: #232c38;
+    --fg: #e8edf3;
+    --fg-mute: #9aa7b4;
+    --accent: #4f8cff;
+    --accent-fg: #ffffff;
+    --border: #2a3340;
+    --ok: #22c55e;
+    --warn: #f59e0b;
+    --err: #ef4444;
+    --radius: 8px;
+  }
+  [data-theme="light"] {
+    --bg: #f7f8fa;
+    --bg-elev: #ffffff;
+    --bg-elev2: #eef1f6;
+    --fg: #1a212b;
+    --fg-mute: #5c6773;
+    --accent: #2563eb;
+    --accent-fg: #ffffff;
+    --border: #d8dde5;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: var(--bg); color: var(--fg);
+    font: 14px/1.5 "Hiragino Sans", "Noto Sans JP", "Yu Gothic", system-ui, sans-serif;
+    min-width: 1280px;
+  }
+  a { color: var(--accent); }
+  button {
+    background: var(--bg-elev2); color: var(--fg);
+    border: 1px solid var(--border); padding: 6px 12px;
+    border-radius: var(--radius); cursor: pointer; font-size: 13px;
+  }
+  button.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+  button.danger { background: var(--err); color: white; border-color: var(--err); }
+  button:hover:not(:disabled) { filter: brightness(1.1); }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  input, select, textarea {
+    background: var(--bg-elev); color: var(--fg);
+    border: 1px solid var(--border); padding: 6px 8px;
+    border-radius: var(--radius); font: inherit;
+  }
+  input[type="checkbox"] { width: auto; }
+  textarea { width: 100%; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+
+  header.app-header {
+    display: flex; align-items: center; gap: 16px;
+    padding: 10px 20px; background: var(--bg-elev);
+    border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 100;
+  }
+  header .brand { font-weight: 700; font-size: 16px; }
+  header .badge {
+    background: var(--bg-elev2); color: var(--fg-mute);
+    padding: 3px 8px; border-radius: 4px; font-size: 11px;
+    border: 1px solid var(--border);
+  }
+  header .spacer { flex: 1; }
+  header .net-status { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; }
+  header .net-status .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--ok);
+  }
+  header .net-status.offline .dot { background: var(--err); }
+
+  nav.tabs {
+    display: flex; gap: 2px; padding: 0 20px;
+    background: var(--bg-elev); border-bottom: 1px solid var(--border);
+  }
+  nav.tabs button {
+    background: transparent; border: none; border-bottom: 2px solid transparent;
+    border-radius: 0; padding: 10px 16px; color: var(--fg-mute);
+  }
+  nav.tabs button.active {
+    color: var(--fg); border-bottom-color: var(--accent);
+  }
+
+  main { padding: 20px; max-width: 1600px; margin: 0 auto; }
+  .panel { display: none; }
+  .panel.active { display: block; }
+
+  .card {
+    background: var(--bg-elev); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 16px; margin-bottom: 16px;
+  }
+  .card h2 { margin: 0 0 12px; font-size: 15px; }
+  .card h3 { margin: 16px 0 8px; font-size: 13px; color: var(--fg-mute); }
+
+  .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .row > label { min-width: 140px; color: var(--fg-mute); }
+  .grow { flex: 1; }
+
+  /* ドロップゾーン */
+  .dropzone {
+    border: 2px dashed var(--border); border-radius: var(--radius);
+    padding: 60px 20px; text-align: center; color: var(--fg-mute);
+    transition: 0.15s; cursor: pointer;
+  }
+  .dropzone.hover, .dropzone:hover {
+    border-color: var(--accent); background: var(--bg-elev2); color: var(--fg);
+  }
+  .dropzone .hint { font-size: 12px; margin-top: 6px; }
+
+  /* バナー */
+  .banner {
+    padding: 10px 14px; border-radius: var(--radius); margin-bottom: 12px;
+    border: 1px solid var(--border);
+  }
+  .banner.warn { background: rgba(245, 158, 11, 0.1); border-color: var(--warn); }
+  .banner.info { background: rgba(79, 140, 255, 0.08); border-color: var(--accent); }
+  .banner.err { background: rgba(239, 68, 68, 0.1); border-color: var(--err); }
+
+  /* テーブル */
+  table.bilingual {
+    width: 100%; border-collapse: collapse; font-size: 13px;
+  }
+  table.bilingual th, table.bilingual td {
+    border: 1px solid var(--border); padding: 6px 8px; vertical-align: top;
+  }
+  table.bilingual th {
+    background: var(--bg-elev2); position: sticky; top: 0; z-index: 5;
+  }
+  table.bilingual td[contenteditable="true"] { min-width: 200px; }
+  table.bilingual td[contenteditable="true"]:focus { outline: 2px solid var(--accent); }
+  table.bilingual tr.dragging { opacity: 0.4; }
+  table.bilingual tr:hover { background: var(--bg-elev2); }
+  .ts-link { color: var(--accent); cursor: pointer; text-decoration: underline; font-variant-numeric: tabular-nums; }
+
+  /* プログレス */
+  .progress {
+    height: 6px; background: var(--bg-elev2); border-radius: 3px;
+    overflow: hidden; margin-top: 6px;
+  }
+  .progress > .bar { height: 100%; background: var(--accent); transition: 0.2s; width: 0; }
+
+  /* トースト */
+  #toasts {
+    position: fixed; bottom: 16px; right: 16px; z-index: 1000;
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .toast {
+    background: var(--bg-elev); border: 1px solid var(--border);
+    padding: 10px 14px; border-radius: var(--radius);
+    min-width: 240px; box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+  }
+  .toast.ok { border-left: 3px solid var(--ok); }
+  .toast.err { border-left: 3px solid var(--err); }
+  .toast.warn { border-left: 3px solid var(--warn); }
+
+  /* モーダル */
+  .modal-bg {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.5);
+    display: none; align-items: center; justify-content: center; z-index: 500;
+  }
+  .modal-bg.show { display: flex; }
+  .modal {
+    background: var(--bg-elev); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 20px; min-width: 480px; max-width: 720px;
+    max-height: 80vh; overflow: auto;
+  }
+
+  /* リスト */
+  ul.history-list { list-style: none; padding: 0; margin: 0; }
+  ul.history-list li {
+    padding: 10px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 12px;
+  }
+  ul.history-list li:hover { background: var(--bg-elev2); }
+  .status-pill {
+    padding: 2px 8px; border-radius: 10px; font-size: 11px;
+    background: var(--bg-elev2); border: 1px solid var(--border);
+  }
+  .status-pill.completed { background: rgba(34,197,94,0.15); border-color: var(--ok); }
+  .status-pill.running { background: rgba(79,140,255,0.15); border-color: var(--accent); }
+  .status-pill.failed { background: rgba(239,68,68,0.15); border-color: var(--err); }
+  .status-pill.paused { background: rgba(245,158,11,0.15); border-color: var(--warn); }
+  .status-pill.queued { color: var(--fg-mute); }
+
+  /* スピーカー色分け */
+  .spk-A { color: #7dd3fc; }
+  .spk-B { color: #fda4af; }
+  .spk-C { color: #86efac; }
+  .spk-D { color: #fcd34d; }
+  .spk-E { color: #c4b5fd; }
+  .spk-F { color: #fdba74; }
+
+  code, pre {
+    background: var(--bg-elev2); padding: 2px 4px; border-radius: 3px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px;
+  }
+  pre { padding: 10px; overflow: auto; }
+
+  /* 非対応ブラウザ警告 */
+  #unsupported {
+    display: none; padding: 40px; text-align: center;
+  }
+  #unsupported.show { display: block; }
+  #unsupported.show ~ * { display: none !important; }
+
+  /* 案C移行用の余白 (アカウント/課金UI挿入箇所) */
+  .future-account-slot { display: none; /* 将来 認証UI 挿入予定 */ }
+  .future-billing-slot { display: none; /* 将来 Stripe Customer Portal リンク挿入予定 */ }
+</style>
+</head>
+<body>
+
+<!-- ==================== 非対応ブラウザ警告 ==================== -->
+<div id="unsupported">
+  <h1>⚠️ 非対応ブラウザ</h1>
+  <p>iTLE Neo は Chrome / Edge の最新版でのみ動作します（File System Access API使用）。</p>
+  <p>HTTPS または localhost 環境でアクセスしてください。</p>
+</div>
+
+<!-- ==================== ヘッダ ==================== -->
+<header class="app-header">
+  <span class="brand">iTLE Neo - Chrome/Edge専用</span>
+  <span class="badge" id="versionBadge">v0.1.0 (standalone)</span>
+  <span class="future-account-slot" id="accountSlot"></span>
+  <div class="spacer"></div>
+  <span class="net-status" id="netStatus"><span class="dot"></span><span id="netLabel">オンライン</span></span>
+  <button id="themeToggle" title="ダーク/ライト切替">🌓</button>
+  <button id="shortcutsBtn" title="ショートカット一覧">⌨</button>
+</header>
+
+<!-- ==================== タブ ==================== -->
+<nav class="tabs" id="tabs">
+  <button data-tab="acquire" class="active">取得</button>
+  <button data-tab="transcribe">文字起こし</button>
+  <button data-tab="bilingual">対訳/翻訳</button>
+  <button data-tab="summary">要約</button>
+  <button data-tab="slides">スライド</button>
+  <button data-tab="history">履歴</button>
+  <button data-tab="settings">設定</button>
+</nav>
+
+<main>
+
+<!-- ============ パネル: 取得 ============ -->
+<section class="panel active" id="panel-acquire">
+
+  <div class="card">
+    <h2>(a) ローカルファイルをドラッグ＆ドロップ <span style="color:var(--fg-mute);font-weight:normal;font-size:12px;">— 推奨経路</span></h2>
+    <div id="dropzone" class="dropzone">
+      <div>📁 ここにメディアをドロップ、またはクリックして選択</div>
+      <div class="hint">対応形式: mp3 / mp4 / wav / m4a / webm / mov</div>
+      <input id="fileInput" type="file" accept=".mp3,.mp4,.wav,.m4a,.webm,.mov,audio/*,video/*" multiple style="display:none" />
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>(b) 直接URL貼り付け</h2>
+    <p style="color:var(--fg-mute);font-size:12px;margin-top:0;">
+      mp3 / mp4 / wav / m4a / webm の直接リンクのみ。fetch → 指定フォルダに保存します。
+    </p>
+    <div class="row">
+      <input id="directUrl" class="grow" type="url" placeholder="https://example.com/audio.mp3" />
+      <button id="directUrlBtn" class="primary">取得</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>(c) ブックマークレットから流し込み</h2>
+    <p style="color:var(--fg-mute);font-size:12px;margin-top:0;">
+      設定タブの「ブックマークレット」をブラウザのブックマークバーに登録し、
+      対象ページで実行すると検出されたメディアURLが本アプリに送られます。
+    </p>
+  </div>
+
+  <div class="card">
+    <h2>(d) YouTube URL</h2>
+    <div class="row">
+      <input id="ytUrl" class="grow" type="url" placeholder="https://www.youtube.com/watch?v=..." />
+      <button id="ytAnalyzeBtn" class="primary">判定</button>
+    </div>
+    <div id="ytResult" style="margin-top:12px;"></div>
+  </div>
+</section>
+
+<!-- ============ パネル: 文字起こし ============ -->
+<section class="panel" id="panel-transcribe">
+  <div class="card">
+    <h2>文字起こし設定</h2>
+    <div class="row">
+      <label>対象ファイル</label>
+      <span id="trxFileName" class="grow" style="color:var(--fg-mute);">（取得タブで指定）</span>
+    </div>
+    <div class="row">
+      <label>モデル</label>
+      <select id="trxModel">
+        <option value="universal">AssemblyAI Universal-2</option>
+        <option value="slam-1">AssemblyAI Slam-1</option>
+      </select>
+    </div>
+    <div class="row">
+      <label>言語</label>
+      <select id="trxLang">
+        <option value="ja" selected>日本語 (ja)</option>
+        <option value="en">英語 (en)</option>
+        <option value="zh">中国語 (zh)</option>
+        <option value="ko">韓国語 (ko)</option>
+        <option value="">自動検出</option>
+      </select>
+    </div>
+    <div class="row">
+      <label>話者分離</label>
+      <label><input type="checkbox" id="trxDiarize" checked /> diarization 有効</label>
+    </div>
+    <div class="row">
+      <label>大容量圧縮</label>
+      <label><input type="checkbox" id="trxCompress" checked /> 500MB超は ffmpeg.wasm で opus/m4a に圧縮</label>
+    </div>
+    <div class="row">
+      <button id="trxStart" class="primary">文字起こし開始</button>
+      <button id="trxPause">一時停止</button>
+      <button id="trxResume">再開</button>
+    </div>
+    <div class="progress"><div class="bar" id="trxBar"></div></div>
+    <div id="trxStatus" style="margin-top:8px;color:var(--fg-mute);font-size:12px;"></div>
+  </div>
+
+  <div class="card">
+    <h2>話者ラベル</h2>
+    <p style="color:var(--fg-mute);font-size:12px;margin-top:0;">
+      検出された話者ラベル（話者A/B/C…）を実名にリネームできます。全セグメントへ即時反映します。
+    </p>
+    <div id="speakerList"></div>
+  </div>
+</section>
+
+<!-- ============ パネル: 対訳 / 翻訳 ============ -->
+<section class="panel" id="panel-bilingual">
+  <div class="card">
+    <div class="row" style="gap:8px;">
+      <button id="audioPrev">⏮</button>
+      <button id="audioPlay">▶︎</button>
+      <button id="audioNext">⏭</button>
+      <span id="audioTime" style="color:var(--fg-mute);font-variant-numeric:tabular-nums;">00:00 / 00:00</span>
+      <div class="grow"></div>
+      <label>翻訳先</label>
+      <select id="targetLang">
+        <option value="ja">日本語</option>
+        <option value="en">English</option>
+        <option value="zh">中文(简体)</option>
+        <option value="ko">한국어</option>
+      </select>
+      <button id="translateAllBtn" class="primary">一括翻訳</button>
+    </div>
+    <div id="waveform" style="height:64px;margin-top:10px;background:var(--bg-elev2);border-radius:6px;"></div>
+    <audio id="audioEl" preload="metadata" style="display:none;"></audio>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <label>フィルタ</label>
+      <select id="filterSpeaker"><option value="">全話者</option></select>
+      <input id="filterKeyword" placeholder="キーワード検索" />
+      <label><input type="checkbox" id="filterUntranslated" /> 未翻訳のみ</label>
+      <div class="grow"></div>
+      <button id="addRowBtn">＋行追加</button>
+    </div>
+    <div style="max-height:60vh;overflow:auto;margin-top:10px;">
+      <table class="bilingual" id="bilingualTable">
+        <thead><tr>
+          <th>#</th><th>開始</th><th>終了</th><th>話者</th>
+          <th>原文</th><th>翻訳文</th><th>操作</th>
+        </tr></thead>
+        <tbody id="bilingualBody"></tbody>
+      </table>
+    </div>
+    <div style="margin-top:10px;color:var(--fg-mute);font-size:12px;">
+      編集はdebounce 1秒で自動保存。Ctrl+Z / Ctrl+Shift+Z でUndo/Redo。
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>エクスポート</h2>
+    <div class="row">
+      <button id="expXlsx" class="primary">Excel (.xlsx)</button>
+      <button id="expSrtSrc">SRT (原文)</button>
+      <button id="expSrtTgt">SRT (翻訳)</button>
+      <button id="expVttSrc">VTT (原文)</button>
+      <button id="expVttTgt">VTT (翻訳)</button>
+      <button id="expCsv">CSV</button>
+      <button id="expMd">Markdown</button>
+      <button id="expJson">JSON</button>
+      <button id="expTxtSrc">テキスト (原文)</button>
+      <button id="expTxtTgt">テキスト (翻訳)</button>
+      <button id="expTxtBoth">テキスト (両並記)</button>
+    </div>
+  </div>
+</section>
+
+<!-- ============ パネル: 要約 ============ -->
+<section class="panel" id="panel-summary">
+  <div class="card">
+    <div class="row">
+      <label>長さ</label>
+      <select id="sumLength">
+        <option value="short">短い (200字)</option>
+        <option value="standard" selected>標準 (800字)</option>
+        <option value="detailed">詳細 (2000字)</option>
+      </select>
+      <label><input type="checkbox" id="sumMinutes" /> 議事録形式（決定/アクション/論点）</label>
+      <button id="sumRunBtn" class="primary">要約生成</button>
+    </div>
+    <div class="progress"><div class="bar" id="sumBar"></div></div>
+    <textarea id="sumText" rows="20" style="width:100%;margin-top:12px;"></textarea>
+  </div>
+</section>
+
+<!-- ============ パネル: スライド ============ -->
+<section class="panel" id="panel-slides">
+  <div class="card">
+    <h2>(A) 自動生成モード</h2>
+    <div class="row">
+      <label>配色テーマ</label>
+      <select id="slideTheme">
+        <option value="light">Light</option>
+        <option value="dark">Dark</option>
+        <option value="corporate">Corporate</option>
+      </select>
+      <label>枚数目安</label>
+      <select id="slideCount">
+        <option value="auto" selected>自動</option>
+        <option value="5">5</option><option value="10">10</option>
+        <option value="15">15</option><option value="20">20</option>
+        <option value="30">30</option>
+      </select>
+      <button id="slideGenBtn" class="primary">スライド生成 (.pptx)</button>
+    </div>
+    <div class="progress"><div class="bar" id="slideBar"></div></div>
+    <div id="slideStatus" style="margin-top:8px;color:var(--fg-mute);font-size:12px;"></div>
+  </div>
+
+  <div class="card">
+    <h2>(B) プロンプト出力モード</h2>
+    <p style="color:var(--fg-mute);font-size:12px;margin-top:0;">
+      複雑な図表や独自レイアウトが必要な場合用に、外部AIへ貼り付けるプロンプトを生成します。
+    </p>
+    <div class="row">
+      <label>ツール</label>
+      <select id="promptTool">
+        <option value="claude">Claude</option>
+        <option value="copilot">Microsoft Copilot</option>
+        <option value="gemini">Gemini</option>
+        <option value="gpt">GPT</option>
+      </select>
+      <button id="promptGenBtn" class="primary">プロンプト生成</button>
+      <button id="promptCopyBtn">クリップボードへコピー</button>
+    </div>
+    <textarea id="promptOut" rows="14" style="width:100%;margin-top:10px;" placeholder="生成されたプロンプトがここに表示されます"></textarea>
+  </div>
+</section>
+
+<!-- ============ パネル: 履歴 ============ -->
+<section class="panel" id="panel-history">
+  <div class="card">
+    <h2>ジョブ履歴</h2>
+    <ul id="historyList" class="history-list"></ul>
+  </div>
+</section>
+
+<!-- ============ パネル: 設定 ============ -->
+<section class="panel" id="panel-settings">
+
+  <div class="card">
+    <h2>APIキー</h2>
+    <p style="color:var(--fg-mute);font-size:12px;margin-top:0;">
+      Web Crypto (AES-GCM) で暗号化し IndexedDB に保存します。送信先は各APIプロバイダのみです（案A）。
+      <br/>将来案Cに移行する場合、apiClient の baseUrl を Cloudflare Workers に差し替えるだけで
+      キーをサーバ側で安全に保持できます。
+    </p>
+    <div class="row">
+      <label>AssemblyAI</label>
+      <input type="password" id="keyAssembly" class="grow" autocomplete="off" />
+      <button data-test="assembly">疎通テスト</button>
+    </div>
+    <div class="row">
+      <label>Anthropic Claude</label>
+      <input type="password" id="keyAnthropic" class="grow" autocomplete="off" />
+      <button data-test="anthropic">疎通テスト</button>
+    </div>
+    <div class="row">
+      <label>OpenAI (任意)</label>
+      <input type="password" id="keyOpenAI" class="grow" autocomplete="off" />
+      <button data-test="openai">疎通テスト</button>
+    </div>
+    <div class="row">
+      <label>YouTube Data API v3</label>
+      <input type="password" id="keyYouTube" class="grow" autocomplete="off" />
+      <button data-test="youtube">疎通テスト</button>
+    </div>
+    <div class="row">
+      <button id="saveKeysBtn" class="primary">暗号化して保存</button>
+      <span class="future-billing-slot" id="billingSlot"></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>月間使用量（概算）</h2>
+    <div id="usageBox" style="color:var(--fg-mute);font-size:13px;">読み込み中…</div>
+  </div>
+
+  <div class="card">
+    <h2>用語集（強制適用）</h2>
+    <p style="color:var(--fg-mute);font-size:12px;margin-top:0;">
+      「原語 → 訳語」の対応表。翻訳時にプロンプトへ含めて適用します。1行1ペア、TAB または `=>` 区切り。
+    </p>
+    <textarea id="glossaryText" rows="6" placeholder="iTLE => アイトル&#10;音声認識 => Speech Recognition"></textarea>
+    <div class="row" style="margin-top:8px;">
+      <button id="saveGlossaryBtn" class="primary">保存</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>ブックマークレット</h2>
+    <p style="color:var(--fg-mute);font-size:12px;margin-top:0;">
+      下のコードをブックマークの「URL」欄に貼り付けて保存し、対象ページで実行してください。
+      検出されたメディアURLが本アプリに送られます（このページの origin を許可するため、
+      本アプリを HTTPS で公開した URL に書き換えてください）。
+    </p>
+    <textarea id="bookmarkletCode" rows="6" readonly></textarea>
+    <div class="row" style="margin-top:8px;">
+      <button id="copyBookmarkletBtn">コピー</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>yt-dlp コマンド例</h2>
+    <p style="color:var(--fg-mute);font-size:12px;margin-top:0;">
+      メンバー限定 / プライベート動画など、権利を有するコンテンツのローカル取得用です。
+    </p>
+    <pre id="ytdlpExample">yt-dlp -f "bestaudio[ext=m4a]/bestaudio" -o "%(title)s.%(ext)s" --cookies-from-browser chrome "&lt;YouTube URL&gt;"</pre>
+  </div>
+
+  <div class="card">
+    <h2>データ管理</h2>
+    <div class="row">
+      <button id="exportAllBtn">全データをエクスポート (JSON)</button>
+      <button id="importAllBtn">JSONからインポート</button>
+      <button id="wipeBtn" class="danger">全データを削除</button>
+    </div>
+    <input type="file" id="importAllInput" accept=".json" style="display:none;" />
+  </div>
+</section>
+
+</main>
+
+<!-- ==================== トースト ==================== -->
+<div id="toasts"></div>
+
+<!-- ==================== モーダル ==================== -->
+<div class="modal-bg" id="modalBg">
+  <div class="modal" id="modal"></div>
+</div>
+
+<script>
+/* =================================================================
+ * iTLE Neo  —  単一HTML スタンドアロン版
+ *
+ *  構造:
+ *    [BrowserCheck]   起動時にChrome/Edge判定
+ *    [IDB]            IndexedDB ラッパー
+ *    [Crypto]         AES-GCM でAPIキー暗号化
+ *    [Settings]       APIキー・用語集 取得保存
+ *    [apiClient]      ★ AssemblyAI / Anthropic / OpenAI / YouTube
+ *                       baseUrl 差し替えで案C(Workersプロキシ)に移行可
+ *    [Hooks]          [案C移行用] サーバー側ロギング・用量制限フック
+ *    [JobMgr]         ジョブ状態の永続化と中断再開
+ *    [Workers]        重い処理（圧縮など）は Web Worker で実行
+ *    [UI]             タブ・モーダル・トースト
+ *    [Acquire]        4経路のメディア取得
+ *    [Transcribe]     AssemblyAI 文字起こし＆話者分離
+ *    [Bilingual]      対訳エディタ（編集/Undo/フィルタ/翻訳）
+ *    [Summary]        map-reduce 要約
+ *    [Slides]         PptxGenJS 自動生成 / プロンプト出力
+ *    [Export]         xlsx/srt/vtt/csv/md/json/txt
+ *    [History]        履歴一覧と再開ダイアログ
+ *
+ *  将来 案C 移行ポイント (★コメントを目印に)
+ *    - apiClient.baseUrl を Workers のドメインへ
+ *    - userId 'local' を 認証済みID に置換
+ *    - Hooks.serverLog / Hooks.usageCheck を実装
+ *    - 課金UI(#billingSlot) と アカウントUI(#accountSlot) を表示
+ * ================================================================= */
+
+'use strict';
+
+// ============================================================
+// [BrowserCheck] Chrome / Edge + HTTPS or localhost を要求
+// ============================================================
+const BrowserCheck = (() => {
+  function isSupported() {
+    const ua = navigator.userAgent;
+    const isChrome = /Chrome\//.test(ua) && !/Edg\//.test(ua) && !/OPR\//.test(ua);
+    const isEdge   = /Edg\//.test(ua);
+    if (!isChrome && !isEdge) return { ok: false, reason: 'Chrome/Edge のみ対応です' };
+    if (!('showSaveFilePicker' in window) && !('showOpenFilePicker' in window)) {
+      return { ok: false, reason: 'File System Access API がありません' };
+    }
+    const secure = window.isSecureContext;
+    if (!secure) return { ok: false, reason: 'HTTPS または localhost で開いてください' };
+    return { ok: true };
+  }
+  function enforce() {
+    const r = isSupported();
+    if (!r.ok) {
+      const el = document.getElementById('unsupported');
+      el.classList.add('show');
+      el.querySelector('p').textContent = r.reason;
+      return false;
+    }
+    return true;
+  }
+  return { enforce };
+})();
+
+if (!BrowserCheck.enforce()) {
+  // 以降のスクリプト初期化は行わない
+  throw new Error('Unsupported browser');
+}
+
+// ============================================================
+// [IDB] IndexedDB の薄いラッパー
+//   stores: settings / jobs / segments / glossary / cache
+// ============================================================
+const IDB = (() => {
+  const DB = 'itle-neo';
+  const VER = 1;
+  let _db;
+
+  function open() {
+    if (_db) return Promise.resolve(_db);
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(DB, VER);
+      req.onupgradeneeded = e => {
+        const db = e.target.result;
+        if (!db.objectStoreNames.contains('settings')) db.createObjectStore('settings');
+        if (!db.objectStoreNames.contains('jobs')) db.createObjectStore('jobs', { keyPath: 'id' });
+        if (!db.objectStoreNames.contains('segments')) db.createObjectStore('segments', { keyPath: ['jobId','idx'] });
+        if (!db.objectStoreNames.contains('glossary')) db.createObjectStore('glossary');
+        if (!db.objectStoreNames.contains('cache')) db.createObjectStore('cache');
+      };
+      req.onsuccess = () => { _db = req.result; resolve(_db); };
+      req.onerror = () => reject(req.error);
+    });
+  }
+  async function _run(store, mode, fn) {
+    const db = await open();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(store, mode);
+      const s = tx.objectStore(store);
+      const result = fn(s);
+      tx.oncomplete = () => resolve(result && result.__value !== undefined ? result.__value : result);
+      tx.onerror = () => reject(tx.error);
+    });
+  }
+  function _req(p) { return new Promise((res, rej) => { p.onsuccess = () => res(p.result); p.onerror = () => rej(p.error); }); }
+
+  async function get(store, key) { return _run(store, 'readonly', s => _req(s.get(key))); }
+  async function put(store, value, key) { return _run(store, 'readwrite', s => key !== undefined ? _req(s.put(value, key)) : _req(s.put(value))); }
+  async function del(store, key) { return _run(store, 'readwrite', s => _req(s.delete(key))); }
+  async function all(store) { return _run(store, 'readonly', s => _req(s.getAll())); }
+  async function clear(store) { return _run(store, 'readwrite', s => _req(s.clear())); }
+
+  return { open, get, put, del, all, clear };
+})();
+
+// ============================================================
+// [Crypto] AES-GCM でAPIキーを暗号化保存
+//   - ユーザーのパスフレーズを使わず、デバイス固有の派生鍵を IDB に保存
+//   - 完全防御ではないが、平文保存より大幅に安全
+// ============================================================
+const Crypto = (() => {
+  let _key;
+  async function _getOrCreateKey() {
+    if (_key) return _key;
+    const stored = await IDB.get('settings', '__cryptoKey');
+    if (stored) {
+      _key = await crypto.subtle.importKey('jwk', stored, 'AES-GCM', false, ['encrypt','decrypt']);
+      return _key;
+    }
+    _key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, ['encrypt','decrypt']);
+    const jwk = await crypto.subtle.exportKey('jwk', _key);
+    await IDB.put('settings', jwk, '__cryptoKey');
+    return _key;
+  }
+  async function encrypt(text) {
+    if (!text) return null;
+    const key = await _getOrCreateKey();
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const enc = new TextEncoder().encode(text);
+    const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, enc);
+    return { iv: Array.from(iv), ct: Array.from(new Uint8Array(ct)) };
+  }
+  async function decrypt(obj) {
+    if (!obj) return '';
+    const key = await _getOrCreateKey();
+    const iv = new Uint8Array(obj.iv);
+    const ct = new Uint8Array(obj.ct);
+    const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ct);
+    return new TextDecoder().decode(pt);
+  }
+  return { encrypt, decrypt };
+})();
+
+// ============================================================
+// [Settings] APIキー / 用語集 / テーマ など
+// ============================================================
+const Settings = (() => {
+  async function getKeys() {
+    const enc = await IDB.get('settings', 'apiKeys') || {};
+    const out = {};
+    for (const [k, v] of Object.entries(enc)) out[k] = await Crypto.decrypt(v);
+    return out;
+  }
+  async function setKeys(keys) {
+    const enc = {};
+    for (const [k, v] of Object.entries(keys)) {
+      if (v) enc[k] = await Crypto.encrypt(v);
+    }
+    await IDB.put('settings', enc, 'apiKeys');
+  }
+  async function getGlossary() {
+    return (await IDB.get('settings', 'glossary')) || '';
+  }
+  async function setGlossary(text) {
+    await IDB.put('settings', text, 'glossary');
+  }
+  async function getTheme() {
+    return (await IDB.get('settings', 'theme')) || 'dark';
+  }
+  async function setTheme(t) {
+    await IDB.put('settings', t, 'theme');
+  }
+  async function getTosAccepted() {
+    return !!(await IDB.get('settings', 'tosAccepted'));
+  }
+  async function setTosAccepted(v) {
+    await IDB.put('settings', !!v, 'tosAccepted');
+  }
+  return { getKeys, setKeys, getGlossary, setGlossary, getTheme, setTheme, getTosAccepted, setTosAccepted };
+})();
+
+// ============================================================
+// [Hooks]  ★ 案C 移行用 ★
+//   将来 Workers + 認証/課金 に移行する際に実装するフック。
+//   現状は no-op だが、API呼び出しや重要イベントから既に呼ばれる。
+// ============================================================
+const Hooks = {
+  // サーバー側ロギング（例: Workers の /log エンドポイントへ POST）
+  async serverLog(event, payload) {
+    /* TODO(plan-c): 実ロギング実装 */
+    return;
+  },
+  // 用量制限チェック（例: Workers から残クレジット取得 → 失敗時 throw）
+  async usageCheck(kind, estimate) {
+    /* TODO(plan-c): Stripe 連携の課金状況に応じて制限 */
+    return { allowed: true, remaining: Infinity };
+  },
+  // 認証ヘッダ（案C移行後は Workers が受け取って AssemblyAI 等にプロキシ）
+  authHeaders() {
+    /* TODO(plan-c): Auth0/Clerk/Supabase の Bearer Token を返す */
+    return {};
+  }
+};
+
+// 現状のユーザーID (案C 移行後は認証後のユーザーIDに置換)
+const CURRENT_USER_ID = 'local';
+
+// ============================================================
+// [apiClient]  ★ baseUrl 差し替えで案C移行できる完全分離層 ★
+// ============================================================
+const apiClient = (() => {
+  // 案A: 直接呼び出し（クライアントがAPIキー保持）
+  // 案C: baseUrl を 'https://api.itle-neo.workers.dev' などに差し替えると
+  //       Workers がキー注入してプロキシ。下記関数のシグネチャは変えない。
+  const baseUrl = {
+    assembly: 'https://api.assemblyai.com',
+    anthropic: 'https://api.anthropic.com',
+    openai: 'https://api.openai.com',
+    youtube: 'https://www.googleapis.com/youtube/v3'
+  };
+
+  async function _fetchJson(url, opts, kind, estimate) {
+    // 用量制限チェック (Plan C で有効化)
+    await Hooks.usageCheck(kind, estimate);
+    let attempt = 0;
+    let lastErr;
+    while (attempt < 3) {
+      try {
+        const r = await fetch(url, {
+          ...opts,
+          headers: { ...(opts.headers || {}), ...Hooks.authHeaders() }
+        });
+        if (!r.ok) {
+          const text = await r.text();
+          if (r.status === 429 || r.status >= 500) throw new Error(`${r.status}: ${text}`);
+          throw new Error(`API error ${r.status}: ${text}`);
+        }
+        return await r.json();
+      } catch (e) {
+        lastErr = e;
+        attempt++;
+        if (attempt >= 3) break;
+        // 指数バックオフ
+        await new Promise(res => setTimeout(res, 500 * Math.pow(2, attempt)));
+      }
+    }
+    Hooks.serverLog('api_error', { kind, message: String(lastErr) });
+    throw lastErr;
+  }
+
+  // ----- AssemblyAI -----
+  async function assemblyUpload(apiKey, file, onProgress) {
+    // 直接 PUT ではなく、AssemblyAI の /v2/upload を使う
+    const url = `${baseUrl.assembly}/v2/upload`;
+    // XHRで進捗取得
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', url);
+      xhr.setRequestHeader('Authorization', apiKey);
+      xhr.upload.onprogress = e => { if (onProgress && e.lengthComputable) onProgress(e.loaded / e.total); };
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          try { resolve(JSON.parse(xhr.responseText)); } catch (e) { reject(e); }
+        } else reject(new Error(`Upload ${xhr.status}: ${xhr.responseText}`));
+      };
+      xhr.onerror = () => reject(new Error('upload network error'));
+      xhr.send(file);
+    });
+  }
+  async function assemblyTranscribe(apiKey, audioUrl, opts = {}) {
+    const body = {
+      audio_url: audioUrl,
+      speaker_labels: opts.diarize !== false,
+      language_code: opts.language || 'ja',
+      speech_model: opts.model === 'slam-1' ? 'slam-1' : 'universal'
+    };
+    if (!opts.language) delete body.language_code; // 自動検出
+    const j = await _fetchJson(`${baseUrl.assembly}/v2/transcript`, {
+      method: 'POST',
+      headers: { 'Authorization': apiKey, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    }, 'transcribe', 1);
+    return j.id;
+  }
+  async function assemblyPoll(apiKey, transcriptId) {
+    return _fetchJson(`${baseUrl.assembly}/v2/transcript/${transcriptId}`, {
+      headers: { 'Authorization': apiKey }
+    }, 'transcribe_poll', 0);
+  }
+  async function assemblyPing(apiKey) {
+    // /v2/transcript の GET (一覧) でキー検証
+    const r = await fetch(`${baseUrl.assembly}/v2/transcript?limit=1`, { headers: { 'Authorization': apiKey } });
+    return r.ok;
+  }
+
+  // ----- Anthropic Claude -----
+  async function anthropicMessages(apiKey, params) {
+    return _fetchJson(`${baseUrl.anthropic}/v1/messages`, {
+      method: 'POST',
+      headers: {
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true',
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        model: params.model || 'claude-sonnet-4-5',
+        max_tokens: params.max_tokens || 4096,
+        system: params.system,
+        messages: params.messages,
+        temperature: params.temperature ?? 0.3
+      })
+    }, 'anthropic', (params.max_tokens || 4096) / 1000);
+  }
+  async function anthropicPing(apiKey) {
+    try {
+      await anthropicMessages(apiKey, {
+        max_tokens: 8,
+        messages: [{ role: 'user', content: 'ping' }]
+      });
+      return true;
+    } catch (e) { return false; }
+  }
+
+  // ----- OpenAI (フォールバック) -----
+  async function openaiChat(apiKey, params) {
+    return _fetchJson(`${baseUrl.openai}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: params.model || 'gpt-4o',
+        messages: params.messages,
+        temperature: params.temperature ?? 0.3,
+        max_tokens: params.max_tokens || 4096
+      })
+    }, 'openai', (params.max_tokens || 4096) / 1000);
+  }
+  async function openaiPing(apiKey) {
+    const r = await fetch(`${baseUrl.openai}/v1/models`, { headers: { 'Authorization': `Bearer ${apiKey}` } });
+    return r.ok;
+  }
+
+  // ----- YouTube Data API v3 -----
+  async function ytVideo(apiKey, videoId) {
+    return _fetchJson(`${baseUrl.youtube}/videos?part=snippet,status,contentDetails&id=${videoId}&key=${apiKey}`, {}, 'youtube', 0);
+  }
+  async function ytCaptionsList(apiKey, videoId) {
+    return _fetchJson(`${baseUrl.youtube}/captions?part=snippet&videoId=${videoId}&key=${apiKey}`, {}, 'youtube', 0);
+  }
+  async function ytPing(apiKey) {
+    const r = await fetch(`${baseUrl.youtube}/videos?part=id&chart=mostPopular&maxResults=1&key=${apiKey}`);
+    return r.ok;
+  }
+
+  return {
+    baseUrl,
+    assemblyUpload, assemblyTranscribe, assemblyPoll, assemblyPing,
+    anthropicMessages, anthropicPing,
+    openaiChat, openaiPing,
+    ytVideo, ytCaptionsList, ytPing
+  };
+})();
+
+// ============================================================
+// [JobMgr]  ジョブ状態管理（中断再開・履歴）
+// ============================================================
+const JobMgr = (() => {
+  function newId() { return 'job_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2,6); }
+
+  async function create(meta) {
+    const id = newId();
+    const job = {
+      id,
+      userId: CURRENT_USER_ID, // ★案C移行時に認証済みIDへ
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      status: 'queued',
+      progress: 0,
+      step: 'init',
+      meta,
+      result: null
+    };
+    await IDB.put('jobs', job);
+    return job;
+  }
+  async function update(id, patch) {
+    const job = await IDB.get('jobs', id);
+    if (!job) return null;
+    Object.assign(job, patch, { updatedAt: Date.now() });
+    await IDB.put('jobs', job);
+    return job;
+  }
+  async function get(id) { return IDB.get('jobs', id); }
+  async function list() {
+    const all = await IDB.all('jobs');
+    return all.sort((a,b) => b.updatedAt - a.updatedAt);
+  }
+  async function setSegments(jobId, segments) {
+    // 既存削除 → 全件再登録
+    const db = await IDB.open();
+    return new Promise((res, rej) => {
+      const tx = db.transaction('segments', 'readwrite');
+      const s = tx.objectStore('segments');
+      const range = IDBKeyRange.bound([jobId, -Infinity], [jobId, Infinity]);
+      const cur = s.openCursor(range);
+      cur.onsuccess = e => {
+        const c = e.target.result;
+        if (c) { c.delete(); c.continue(); }
+        else {
+          segments.forEach((seg, i) => s.put({ ...seg, jobId, idx: i }));
+        }
+      };
+      tx.oncomplete = () => res();
+      tx.onerror = () => rej(tx.error);
+    });
+  }
+  async function getSegments(jobId) {
+    const db = await IDB.open();
+    return new Promise((res, rej) => {
+      const tx = db.transaction('segments', 'readonly');
+      const s = tx.objectStore('segments');
+      const range = IDBKeyRange.bound([jobId, -Infinity], [jobId, Infinity]);
+      const out = [];
+      const cur = s.openCursor(range);
+      cur.onsuccess = e => {
+        const c = e.target.result;
+        if (c) { out.push(c.value); c.continue(); }
+        else res(out.sort((a,b) => a.idx - b.idx));
+      };
+      tx.onerror = () => rej(tx.error);
+    });
+  }
+  async function patchSegment(jobId, idx, patch) {
+    const seg = await IDB.get('segments', [jobId, idx]);
+    if (!seg) return;
+    Object.assign(seg, patch);
+    await IDB.put('segments', seg);
+  }
+  return { create, update, get, list, setSegments, getSegments, patchSegment };
+})();
+
+// ============================================================
+// [UI] タブ・モーダル・トースト
+// ============================================================
+const UI = (() => {
+  const tabBtns = document.querySelectorAll('#tabs button');
+  const panels = document.querySelectorAll('.panel');
+  function switchTab(name) {
+    tabBtns.forEach(b => b.classList.toggle('active', b.dataset.tab === name));
+    panels.forEach(p => p.classList.toggle('active', p.id === `panel-${name}`));
+  }
+  tabBtns.forEach(b => b.addEventListener('click', () => switchTab(b.dataset.tab)));
+
+  function toast(msg, kind = 'ok', ms = 3500) {
+    const el = document.createElement('div');
+    el.className = `toast ${kind}`;
+    el.textContent = msg;
+    document.getElementById('toasts').appendChild(el);
+    setTimeout(() => el.remove(), ms);
+  }
+  function modal(html, opts = {}) {
+    const bg = document.getElementById('modalBg');
+    const m = document.getElementById('modal');
+    m.innerHTML = html;
+    bg.classList.add('show');
+    return {
+      close: () => bg.classList.remove('show'),
+      root: m
+    };
+  }
+  async function confirm(text) {
+    return new Promise(res => {
+      const h = `<p>${text}</p><div class="row" style="justify-content:flex-end;margin-top:16px;">
+        <button id="cBtnNo">キャンセル</button>
+        <button id="cBtnYes" class="primary">OK</button></div>`;
+      const m = modal(h);
+      m.root.querySelector('#cBtnYes').onclick = () => { m.close(); res(true); };
+      m.root.querySelector('#cBtnNo').onclick = () => { m.close(); res(false); };
+    });
+  }
+  return { switchTab, toast, modal, confirm };
+})();
+
+// ============================================================
+// [Theme]
+// ============================================================
+(async () => {
+  const t = await Settings.getTheme();
+  document.documentElement.setAttribute('data-theme', t === 'light' ? 'light' : 'dark');
+})();
+document.getElementById('themeToggle').onclick = async () => {
+  const cur = document.documentElement.getAttribute('data-theme') || 'dark';
+  const nxt = cur === 'dark' ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', nxt);
+  await Settings.setTheme(nxt);
+};
+
+// ============================================================
+// [Network] オンライン/オフライン
+// ============================================================
+const Network = (() => {
+  const el = document.getElementById('netStatus');
+  const lab = document.getElementById('netLabel');
+  let online = navigator.onLine;
+  function set(v) {
+    online = v;
+    el.classList.toggle('offline', !v);
+    lab.textContent = v ? 'オンライン' : 'オフライン';
+    Hooks.serverLog('network', { online: v });
+  }
+  window.addEventListener('online',  () => { set(true); App.onNetworkResume(); });
+  window.addEventListener('offline', () => { set(false); App.onNetworkLost(); });
+  set(online);
+  return { isOnline: () => online };
+})();
+
+// ============================================================
+// [Shortcuts]
+// ============================================================
+document.getElementById('shortcutsBtn').onclick = () => {
+  UI.modal(`<h2>キーボードショートカット</h2>
+    <table style="width:100%;border-collapse:collapse;">
+      <tr><td><code>Ctrl + Z</code></td><td>編集の取り消し</td></tr>
+      <tr><td><code>Ctrl + Shift + Z</code></td><td>やり直し</td></tr>
+      <tr><td><code>Space</code></td><td>音声再生/停止 (対訳タブ)</td></tr>
+      <tr><td><code>Ctrl + S</code></td><td>強制保存</td></tr>
+      <tr><td><code>Ctrl + F</code></td><td>キーワード検索フォーカス</td></tr>
+      <tr><td><code>Ctrl + 1〜7</code></td><td>タブ切替</td></tr>
+    </table>
+    <div class="row" style="justify-content:flex-end;margin-top:12px;">
+      <button onclick="document.getElementById('modalBg').classList.remove('show')">閉じる</button>
+    </div>`);
+};
+window.addEventListener('keydown', e => {
+  if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key >= '1' && e.key <= '7') {
+    const tabs = ['acquire','transcribe','bilingual','summary','slides','history','settings'];
+    UI.switchTab(tabs[parseInt(e.key,10) - 1]); e.preventDefault();
+  }
+});
+
+// ============================================================
+// [App] 全体オーケストレータ
+// ============================================================
+const App = (() => {
+  // 現在のアクティブジョブ。タブ間で共有。
+  let currentJobId = null;
+  let currentFile = null;     // File オブジェクト
+  let currentAudioUrl = null; // object URL
+  let speakerMap = {};        // { A: '佐藤', B: '田中', ... }
+  let glossary = [];          // [{src,tgt}]
+  let bilingualState = { segments: [], undoStack: [], redoStack: [] };
+  let saveTimer = null;
+
+  function setJob(jobId) { currentJobId = jobId; }
+  function getJob() { return currentJobId; }
+  function getSegments() { return bilingualState.segments; }
+  function setSegments(segs) { bilingualState.segments = segs; Bilingual.render(); }
+  function pushUndo() {
+    bilingualState.undoStack.push(JSON.parse(JSON.stringify(bilingualState.segments)));
+    if (bilingualState.undoStack.length > 50) bilingualState.undoStack.shift();
+    bilingualState.redoStack = [];
+  }
+  function undo() {
+    if (!bilingualState.undoStack.length) return;
+    bilingualState.redoStack.push(JSON.parse(JSON.stringify(bilingualState.segments)));
+    bilingualState.segments = bilingualState.undoStack.pop();
+    Bilingual.render();
+    scheduleSave();
+  }
+  function redo() {
+    if (!bilingualState.redoStack.length) return;
+    bilingualState.undoStack.push(JSON.parse(JSON.stringify(bilingualState.segments)));
+    bilingualState.segments = bilingualState.redoStack.pop();
+    Bilingual.render();
+    scheduleSave();
+  }
+  function scheduleSave() {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(async () => {
+      if (!currentJobId) return;
+      await JobMgr.setSegments(currentJobId, bilingualState.segments);
+      await JobMgr.update(currentJobId, { progress: 1, step: 'edited' });
+    }, 1000);
+  }
+
+  function setFile(file) {
+    currentFile = file;
+    if (currentAudioUrl) URL.revokeObjectURL(currentAudioUrl);
+    currentAudioUrl = URL.createObjectURL(file);
+    document.getElementById('audioEl').src = currentAudioUrl;
+    document.getElementById('trxFileName').textContent = `${file.name} (${(file.size/1024/1024).toFixed(1)} MB)`;
+    Bilingual.attachAudio(currentAudioUrl);
+  }
+  function getFile() { return currentFile; }
+
+  async function onNetworkLost() {
+    UI.toast('ネットワーク切断を検知。実行中ジョブを一時停止します。', 'warn');
+  }
+  async function onNetworkResume() {
+    UI.toast('ネットワーク復帰。中断ジョブを確認しています…', 'ok');
+  }
+
+  // 再開ダイアログ
+  async function checkResumable() {
+    const all = await JobMgr.list();
+    const pending = all.filter(j => j.status === 'running' || j.status === 'paused');
+    if (!pending.length) return;
+    const items = pending.map(j => `<li><b>${j.meta.fileName || '(unknown)'}</b> — ${j.step} — ${dayjs(j.updatedAt).format('YYYY-MM-DD HH:mm')}</li>`).join('');
+    UI.modal(`<h2>未完了のジョブが見つかりました</h2>
+      <ul>${items}</ul>
+      <p style="color:var(--fg-mute);">「履歴」タブから個別に再開できます。</p>
+      <div class="row" style="justify-content:flex-end;margin-top:12px;">
+        <button onclick="document.getElementById('modalBg').classList.remove('show')">閉じる</button>
+      </div>`);
+  }
+
+  return {
+    setJob, getJob, getSegments, setSegments,
+    pushUndo, undo, redo, scheduleSave,
+    setFile, getFile,
+    getAudioUrl: () => currentAudioUrl,
+    speakerMap: () => speakerMap,
+    setSpeakerMap: m => { speakerMap = m; },
+    glossary: () => glossary,
+    setGlossary: g => { glossary = g; },
+    onNetworkLost, onNetworkResume,
+    checkResumable
+  };
+})();
+
+// ============================================================
+// [Acquire] (a) D&D / (b) URL / (c) bookmarklet / (d) YouTube
+// ============================================================
+const Acquire = (() => {
+  const dz = document.getElementById('dropzone');
+  const fi = document.getElementById('fileInput');
+  dz.addEventListener('click', () => fi.click());
+  dz.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('hover'); });
+  dz.addEventListener('dragleave', () => dz.classList.remove('hover'));
+  dz.addEventListener('drop', e => {
+    e.preventDefault(); dz.classList.remove('hover');
+    if (e.dataTransfer.files && e.dataTransfer.files.length) handleFiles(e.dataTransfer.files);
+  });
+  fi.addEventListener('change', e => { if (e.target.files.length) handleFiles(e.target.files); });
+
+  async function handleFiles(fileList) {
+    const f = fileList[0]; // 複数選択時は先頭のみ採用（履歴で順次処理）
+    const allowed = /\.(mp3|mp4|wav|m4a|webm|mov)$/i;
+    if (!allowed.test(f.name)) {
+      UI.toast(`未対応形式: ${f.name}`, 'err');
+      return;
+    }
+    const job = await JobMgr.create({
+      fileName: f.name,
+      fileSize: f.size,
+      source: 'local',
+      acquiredAt: Date.now()
+    });
+    App.setJob(job.id);
+    App.setFile(f);
+    UI.toast(`取り込み完了: ${f.name}`, 'ok');
+    UI.switchTab('transcribe');
+  }
+
+  // (b) 直接URL
+  document.getElementById('directUrlBtn').onclick = async () => {
+    const u = document.getElementById('directUrl').value.trim();
+    if (!u) return;
+    if (!/^https?:\/\//.test(u)) { UI.toast('URLが不正です', 'err'); return; }
+    if (!/\.(mp3|mp4|wav|m4a|webm|mov)(\?|$)/i.test(u)) {
+      UI.toast('mp3/mp4/wav/m4a/webm/mov の直接リンクのみ対応です', 'err'); return;
+    }
+    UI.toast('ダウンロード開始…', 'ok');
+    try {
+      const r = await fetch(u);
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const blob = await r.blob();
+      const fname = u.split('/').pop().split('?')[0] || 'download';
+      // File System Access API で保存場所を指定可能にする
+      let handle;
+      try {
+        handle = await window.showSaveFilePicker({ suggestedName: fname });
+        const w = await handle.createWritable();
+        await w.write(blob);
+        await w.close();
+      } catch (_) { /* キャンセル時はインメモリのみ */ }
+      const file = new File([blob], fname, { type: blob.type });
+      const job = await JobMgr.create({ fileName: fname, fileSize: blob.size, source: 'directUrl', sourceUrl: u, acquiredAt: Date.now() });
+      App.setJob(job.id);
+      App.setFile(file);
+      UI.toast('取得完了', 'ok');
+      UI.switchTab('transcribe');
+    } catch (e) {
+      UI.toast('取得失敗: ' + e.message + ' (CORS制限の可能性)', 'err');
+    }
+  };
+
+  // (c) ブックマークレット - postMessage を受信
+  window.addEventListener('message', async ev => {
+    if (!ev.data || ev.data.__itleNeo !== true) return;
+    if (ev.data.kind === 'media' && ev.data.urls && ev.data.urls.length) {
+      const url = ev.data.urls[0];
+      document.getElementById('directUrl').value = url;
+      UI.toast('ブックマークレットからURLを受信しました', 'ok');
+    }
+  });
+
+  // (d) YouTube 判定
+  document.getElementById('ytAnalyzeBtn').onclick = async () => {
+    const url = document.getElementById('ytUrl').value.trim();
+    const m = url.match(/(?:v=|youtu\.be\/|shorts\/)([\w-]{11})/);
+    if (!m) { UI.toast('動画IDを抽出できません', 'err'); return; }
+    const vid = m[1];
+    const out = document.getElementById('ytResult');
+    out.innerHTML = '<div style="color:var(--fg-mute);">判定中…</div>';
+    const keys = await Settings.getKeys();
+    if (!keys.youtube) {
+      out.innerHTML = `<div class="banner err">YouTube Data APIキーが未設定です（設定タブ）。</div>`;
+      return;
+    }
+    try {
+      const v = await apiClient.ytVideo(keys.youtube, vid);
+      if (!v.items || !v.items.length) {
+        out.innerHTML = `<div class="banner err">動画が見つかりません（プライベートまたは削除済み）。
+          自己宣言チェック後、yt-dlp でローカル取得してください。${_renderSelfDeclare(url)}</div>`;
+        return;
+      }
+      const item = v.items[0];
+      const privacy = item.status?.privacyStatus;
+      const isPublic = privacy === 'public' || privacy === 'unlisted';
+      let captionsHtml = '';
+      try {
+        const caps = await apiClient.ytCaptionsList(keys.youtube, vid);
+        if (caps.items && caps.items.length) {
+          captionsHtml = `<p>字幕トラック: ${caps.items.map(c => c.snippet.language).join(', ')}</p>
+            <button id="ytFetchCaptions" class="primary">字幕を取得</button>`;
+        } else {
+          captionsHtml = `<div class="banner warn">字幕は提供されていません。エラー時は手動入力してください。</div>`;
+        }
+      } catch (_) {
+        captionsHtml = `<div class="banner warn">字幕情報の取得に失敗。`;
+      }
+      if (isPublic) {
+        out.innerHTML = `
+          <div class="banner warn">
+            ⚠️ YouTube利用規約により、公開動画の音声/動画取得機能は提供されません。字幕のみ取得します。
+          </div>
+          <p><b>${escapeHtml(item.snippet.title)}</b> (公開: ${privacy})</p>
+          ${captionsHtml}`;
+      } else {
+        out.innerHTML = `
+          <div class="banner info">
+            メンバー限定 / プライベート動画のため、字幕取得と自己宣言経由のローカルDL案内を提供します。
+          </div>
+          <p><b>${escapeHtml(item.snippet.title)}</b> (${privacy})</p>
+          ${_renderSelfDeclare(url)}
+          ${captionsHtml}`;
+      }
+      // 公開動画判定ならローカル取得UIを物理的に非活性化
+      const dropzone = document.getElementById('dropzone');
+      const directBtn = document.getElementById('directUrlBtn');
+      if (isPublic) {
+        // 取得UIは別ジョブのために残すが、YouTube公開動画専用の DL ボタンは表示しない方針
+      }
+    } catch (e) {
+      out.innerHTML = `<div class="banner err">取得失敗: ${escapeHtml(e.message)}</div>`;
+    }
+  };
+  function _renderSelfDeclare(url) {
+    return `<div style="margin-top:10px;">
+      <label><input type="checkbox" id="selfDeclare"> このコンテンツについて私は権利を有する、または権利者から明示的な許諾を得ています</label>
+      <pre style="margin-top:8px;">yt-dlp -f "bestaudio[ext=m4a]/bestaudio" -o "%(title)s.%(ext)s" --cookies-from-browser chrome "${escapeHtml(url)}"</pre>
+      <p style="color:var(--fg-mute);font-size:12px;">取得後、上の D&D エリアにドロップしてください。</p>
+    </div>`;
+  }
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+  return { handleFiles, escapeHtml };
+})();
+
+// ============================================================
+// [Transcribe] AssemblyAI 文字起こし
+// ============================================================
+const Transcribe = (() => {
+  let pollTimer;
+
+  document.getElementById('trxStart').onclick = run;
+  document.getElementById('trxPause').onclick = pause;
+  document.getElementById('trxResume').onclick = resume;
+
+  async function run() {
+    const file = App.getFile();
+    if (!file) { UI.toast('先に音声/動画ファイルを取得してください', 'err'); return; }
+    const keys = await Settings.getKeys();
+    if (!keys.assembly) { UI.toast('AssemblyAI APIキーが未設定です', 'err'); UI.switchTab('settings'); return; }
+
+    // 機密データ送信の事前確認
+    const ok = await UI.confirm(`AssemblyAI のサーバーへ音声を送信します。よろしいですか？<br/>
+      <small style="color:var(--fg-mute);">ファイル: ${file.name} (${(file.size/1024/1024).toFixed(1)} MB)</small>`);
+    if (!ok) return;
+
+    const jobId = App.getJob();
+    await JobMgr.update(jobId, { status: 'running', step: 'upload', progress: 0 });
+    setProg(0, 'アップロード中…');
+
+    let uploadFile = file;
+    // 大容量圧縮（500MB超）— ffmpeg.wasm を遅延ロード
+    if (file.size > 500 * 1024 * 1024 && document.getElementById('trxCompress').checked) {
+      setProg(0, '500MB超: ffmpeg.wasm で音声を抽出/圧縮中…');
+      try {
+        uploadFile = await compressWithFFmpeg(file, p => setProg(p * 0.2, 'ffmpeg.wasm 圧縮中… ' + Math.round(p * 100) + '%'));
+      } catch (e) {
+        UI.toast('圧縮失敗。原音を送信します: ' + e.message, 'warn');
+      }
+    }
+
+    let uploadUrl;
+    try {
+      const ru = await apiClient.assemblyUpload(keys.assembly, uploadFile, p => setProg(0.2 + p * 0.3, 'アップロード ' + Math.round(p * 100) + '%'));
+      uploadUrl = ru.upload_url;
+    } catch (e) {
+      await JobMgr.update(jobId, { status: 'failed', step: 'upload_failed' });
+      UI.toast('アップロード失敗: ' + e.message, 'err'); return;
+    }
+
+    setProg(0.5, '文字起こしジョブをサブミット中…');
+    let transcriptId;
+    try {
+      transcriptId = await apiClient.assemblyTranscribe(keys.assembly, uploadUrl, {
+        diarize: document.getElementById('trxDiarize').checked,
+        language: document.getElementById('trxLang').value,
+        model: document.getElementById('trxModel').value
+      });
+    } catch (e) {
+      await JobMgr.update(jobId, { status: 'failed', step: 'submit_failed' });
+      UI.toast('サブミット失敗: ' + e.message, 'err'); return;
+    }
+    await JobMgr.update(jobId, { step: 'polling', meta: { ...(await JobMgr.get(jobId)).meta, transcriptId } });
+    pollLoop(jobId, transcriptId, keys.assembly);
+  }
+
+  async function pollLoop(jobId, transcriptId, apiKey) {
+    clearTimeout(pollTimer);
+    const poll = async () => {
+      try {
+        const r = await apiClient.assemblyPoll(apiKey, transcriptId);
+        if (r.status === 'queued') setProg(0.55, 'AssemblyAI: キュー待機中');
+        else if (r.status === 'processing') setProg(0.7, 'AssemblyAI: 処理中…');
+        else if (r.status === 'completed') {
+          setProg(1, '完了。結果を取り込み中…');
+          const segs = (r.utterances || []).map((u, i) => ({
+            idx: i,
+            speaker: u.speaker || 'A',
+            start: u.start || 0,
+            end: u.end || 0,
+            text: u.text || '',
+            translation: ''
+          }));
+          await JobMgr.setSegments(jobId, segs);
+          await JobMgr.update(jobId, { status: 'completed', step: 'done', progress: 1, result: { audio_duration: r.audio_duration } });
+          App.setSegments(segs);
+          renderSpeakerList(segs);
+          UI.toast('文字起こし完了', 'ok');
+          UI.switchTab('bilingual');
+          return;
+        } else if (r.status === 'error') {
+          await JobMgr.update(jobId, { status: 'failed', step: 'transcribe_error' });
+          UI.toast('AssemblyAIエラー: ' + r.error, 'err'); return;
+        }
+        pollTimer = setTimeout(poll, 5000);
+      } catch (e) {
+        if (!Network.isOnline()) {
+          await JobMgr.update(jobId, { status: 'paused', step: 'offline' });
+          UI.toast('オフライン。復帰時に自動再開します', 'warn');
+          // 復帰検知 → 再試行
+          window.addEventListener('online', () => pollLoop(jobId, transcriptId, apiKey), { once: true });
+          return;
+        }
+        UI.toast('ポーリングエラー: ' + e.message, 'err');
+        pollTimer = setTimeout(poll, 10000);
+      }
+    };
+    poll();
+  }
+
+  // ffmpeg.wasm を CDN から遅延ロードし、音声を opus/m4a に圧縮
+  async function compressWithFFmpeg(file, onProgress) {
+    // ESMの遅延 import で取得（CDN）
+    if (!window._ffmpeg) {
+      const mod = await import('https://cdn.jsdelivr.net/npm/@ffmpeg/ffmpeg@0.12.10/+esm');
+      const utilMod = await import('https://cdn.jsdelivr.net/npm/@ffmpeg/util@0.12.1/+esm');
+      const ff = new mod.FFmpeg();
+      ff.on('progress', e => onProgress && onProgress(Math.max(0, Math.min(1, e.progress || 0))));
+      await ff.load({
+        coreURL: 'https://cdn.jsdelivr.net/npm/@ffmpeg/core@0.12.6/dist/umd/ffmpeg-core.js',
+      });
+      window._ffmpeg = { ff, fetchFile: utilMod.fetchFile };
+    }
+    const { ff, fetchFile } = window._ffmpeg;
+    const inputName = 'input' + (file.name.match(/\.[a-z0-9]+$/i)?.[0] || '');
+    await ff.writeFile(inputName, await fetchFile(file));
+    await ff.exec(['-i', inputName, '-vn', '-c:a', 'libopus', '-b:a', '32k', 'out.opus']);
+    const data = await ff.readFile('out.opus');
+    return new File([data.buffer], 'compressed.opus', { type: 'audio/opus' });
+  }
+
+  function pause() {
+    clearTimeout(pollTimer);
+    const id = App.getJob(); if (id) JobMgr.update(id, { status: 'paused' });
+    UI.toast('一時停止しました', 'warn');
+  }
+  async function resume() {
+    const id = App.getJob(); if (!id) return;
+    const job = await JobMgr.get(id);
+    if (!job) return;
+    const keys = await Settings.getKeys();
+    if (job.meta?.transcriptId && keys.assembly) {
+      await JobMgr.update(id, { status: 'running' });
+      pollLoop(id, job.meta.transcriptId, keys.assembly);
+      UI.toast('再開しました', 'ok');
+    }
+  }
+  function setProg(p, msg) {
+    document.getElementById('trxBar').style.width = (p * 100).toFixed(1) + '%';
+    if (msg) document.getElementById('trxStatus').textContent = msg;
+  }
+
+  function renderSpeakerList(segs) {
+    const speakers = [...new Set(segs.map(s => s.speaker))].sort();
+    const map = App.speakerMap();
+    const box = document.getElementById('speakerList');
+    box.innerHTML = '';
+    speakers.forEach(sp => {
+      const stats = segs.filter(s => s.speaker === sp);
+      const total = stats.reduce((a, s) => a + (s.end - s.start), 0);
+      const row = document.createElement('div');
+      row.className = 'row';
+      row.innerHTML = `
+        <label>話者${sp}</label>
+        <input data-spk="${sp}" placeholder="実名" value="${Acquire.escapeHtml(map[sp] || '')}" />
+        <span style="color:var(--fg-mute);">${stats.length}発言 / ${(total/1000).toFixed(0)}秒</span>`;
+      box.appendChild(row);
+    });
+    box.querySelectorAll('input[data-spk]').forEach(inp => {
+      inp.addEventListener('input', () => {
+        const m = App.speakerMap();
+        m[inp.dataset.spk] = inp.value;
+        App.setSpeakerMap(m);
+        Bilingual.render();
+      });
+    });
+  }
+
+  return { renderSpeakerList };
+})();
+
+// ============================================================
+// [Bilingual] 対訳エディタ
+// ============================================================
+const Bilingual = (() => {
+  const tbody = document.getElementById('bilingualBody');
+  const audioEl = document.getElementById('audioEl');
+  let ws; // wavesurfer instance
+
+  function attachAudio(url) {
+    audioEl.src = url;
+    if (window.WaveSurfer && document.getElementById('waveform')) {
+      try {
+        if (ws) ws.destroy();
+        ws = WaveSurfer.create({
+          container: '#waveform',
+          waveColor: getComputedStyle(document.documentElement).getPropertyValue('--fg-mute').trim() || '#888',
+          progressColor: getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#4f8cff',
+          height: 56,
+          url
+        });
+        ws.on('interaction', () => audioEl.currentTime = ws.getCurrentTime());
+      } catch (e) { /* フォールバック: HTML5 audio のみ */ }
+    }
+  }
+
+  function render() {
+    const segs = App.getSegments();
+    const fSpk = document.getElementById('filterSpeaker').value;
+    const fKw  = document.getElementById('filterKeyword').value.toLowerCase();
+    const fUn  = document.getElementById('filterUntranslated').checked;
+    const map  = App.speakerMap();
+
+    // 話者フィルタの選択肢更新
+    const spkSel = document.getElementById('filterSpeaker');
+    const cur = spkSel.value;
+    const speakers = [...new Set(segs.map(s => s.speaker))].sort();
+    spkSel.innerHTML = '<option value="">全話者</option>' +
+      speakers.map(s => `<option value="${s}" ${cur===s?'selected':''}>${s}${map[s]?'（'+map[s]+'）':''}</option>`).join('');
+
+    tbody.innerHTML = '';
+    segs.forEach((seg, i) => {
+      if (fSpk && seg.speaker !== fSpk) return;
+      if (fUn && seg.translation) return;
+      if (fKw && !(seg.text.toLowerCase().includes(fKw) || (seg.translation||'').toLowerCase().includes(fKw))) return;
+      const tr = document.createElement('tr');
+      tr.dataset.idx = i;
+      tr.draggable = true;
+      tr.innerHTML = `
+        <td style="color:var(--fg-mute);width:36px;">${i+1}</td>
+        <td><span class="ts-link" data-seek="${seg.start}">${fmt(seg.start)}</span></td>
+        <td><span class="ts-link" data-seek="${seg.end}">${fmt(seg.end)}</span></td>
+        <td>
+          <select data-field="speaker">${
+            [...speakers, '__new__'].map(s => `<option value="${s}" ${s===seg.speaker?'selected':''}>${s==='__new__'?'+ 新規追加':(s + (map[s]?'（'+map[s]+'）':''))}</option>`).join('')
+          }</select>
+        </td>
+        <td contenteditable="true" data-field="text" class="spk-${seg.speaker}">${Acquire.escapeHtml(seg.text)}</td>
+        <td contenteditable="true" data-field="translation">${Acquire.escapeHtml(seg.translation || '')}</td>
+        <td style="white-space:nowrap;">
+          <button data-act="split" title="分割">⤴</button>
+          <button data-act="merge" title="下と結合">⤵</button>
+          <button data-act="delete" title="削除" class="danger">✕</button>
+        </td>`;
+      tbody.appendChild(tr);
+    });
+    _bindEvents();
+  }
+
+  function _bindEvents() {
+    tbody.querySelectorAll('.ts-link').forEach(el => {
+      el.onclick = () => { const t = +el.dataset.seek / 1000; audioEl.currentTime = t; audioEl.play(); };
+    });
+    tbody.querySelectorAll('[contenteditable]').forEach(el => {
+      el.addEventListener('input', () => {
+        const tr = el.closest('tr'); const i = +tr.dataset.idx;
+        App.pushUndo();
+        App.getSegments()[i][el.dataset.field] = el.textContent;
+        App.scheduleSave();
+      });
+    });
+    tbody.querySelectorAll('select[data-field="speaker"]').forEach(sel => {
+      sel.onchange = async () => {
+        const tr = sel.closest('tr'); const i = +tr.dataset.idx;
+        if (sel.value === '__new__') {
+          const name = prompt('新しい話者ラベル（1文字推奨, 例: G）');
+          if (!name) { sel.value = App.getSegments()[i].speaker; return; }
+          App.pushUndo();
+          App.getSegments()[i].speaker = name;
+        } else {
+          App.pushUndo();
+          App.getSegments()[i].speaker = sel.value;
+        }
+        App.scheduleSave();
+        render();
+      };
+    });
+    tbody.querySelectorAll('button[data-act]').forEach(b => {
+      b.onclick = () => {
+        const tr = b.closest('tr'); const i = +tr.dataset.idx;
+        const segs = App.getSegments();
+        App.pushUndo();
+        if (b.dataset.act === 'delete') segs.splice(i, 1);
+        else if (b.dataset.act === 'merge' && i < segs.length - 1) {
+          segs[i].text += ' ' + segs[i+1].text;
+          segs[i].translation = (segs[i].translation || '') + ' ' + (segs[i+1].translation || '');
+          segs[i].end = segs[i+1].end;
+          segs.splice(i+1, 1);
+        } else if (b.dataset.act === 'split') {
+          const half = Math.floor(segs[i].text.length / 2);
+          const a = segs[i].text.slice(0, half), bt = segs[i].text.slice(half);
+          const mid = Math.floor((segs[i].start + segs[i].end) / 2);
+          segs.splice(i, 1,
+            { ...segs[i], text: a, end: mid, translation: '' },
+            { ...segs[i], text: bt, start: mid, translation: '' });
+        }
+        App.scheduleSave();
+        render();
+      };
+    });
+    // ドラッグ並び替え
+    let dragIdx = null;
+    tbody.querySelectorAll('tr').forEach(tr => {
+      tr.addEventListener('dragstart', e => { dragIdx = +tr.dataset.idx; tr.classList.add('dragging'); });
+      tr.addEventListener('dragend', () => tr.classList.remove('dragging'));
+      tr.addEventListener('dragover', e => e.preventDefault());
+      tr.addEventListener('drop', e => {
+        e.preventDefault();
+        const to = +tr.dataset.idx;
+        if (dragIdx === null || dragIdx === to) return;
+        const segs = App.getSegments();
+        App.pushUndo();
+        const [m] = segs.splice(dragIdx, 1);
+        segs.splice(to, 0, m);
+        dragIdx = null;
+        App.scheduleSave();
+        render();
+      });
+    });
+  }
+
+  function fmt(ms) {
+    const d = dayjs.duration ? dayjs.duration(ms) : null;
+    const s = Math.floor(ms/1000);
+    const h = Math.floor(s/3600), m = Math.floor((s%3600)/60), sec = s%60;
+    return (h ? String(h).padStart(2,'0')+':' : '') + String(m).padStart(2,'0')+':'+String(sec).padStart(2,'0');
+  }
+
+  // フィルタ
+  ['filterSpeaker','filterKeyword','filterUntranslated'].forEach(id => {
+    document.getElementById(id).addEventListener('input', render);
+    document.getElementById(id).addEventListener('change', render);
+  });
+
+  document.getElementById('addRowBtn').onclick = () => {
+    App.pushUndo();
+    const segs = App.getSegments();
+    segs.push({ speaker: 'A', start: 0, end: 0, text: '', translation: '' });
+    App.scheduleSave();
+    render();
+  };
+
+  // 音声プレイヤー
+  const playBtn = document.getElementById('audioPlay');
+  playBtn.onclick = () => { audioEl.paused ? audioEl.play() : audioEl.pause(); };
+  audioEl.addEventListener('play', () => playBtn.textContent = '⏸');
+  audioEl.addEventListener('pause', () => playBtn.textContent = '▶︎');
+  audioEl.addEventListener('timeupdate', () => {
+    document.getElementById('audioTime').textContent =
+      fmt(audioEl.currentTime*1000) + ' / ' + fmt((audioEl.duration||0)*1000);
+  });
+  document.getElementById('audioPrev').onclick = () => { audioEl.currentTime = Math.max(0, audioEl.currentTime - 5); };
+  document.getElementById('audioNext').onclick = () => { audioEl.currentTime = Math.min(audioEl.duration || 0, audioEl.currentTime + 5); };
+
+  // 一括翻訳
+  document.getElementById('translateAllBtn').onclick = async () => {
+    const keys = await Settings.getKeys();
+    if (!keys.anthropic && !keys.openai) { UI.toast('Claude または OpenAI のキーが必要です', 'err'); return; }
+    const targetLang = document.getElementById('targetLang').value;
+    const segs = App.getSegments();
+    if (!segs.length) { UI.toast('翻訳対象がありません', 'warn'); return; }
+    const ok = await UI.confirm(`セグメント本文を ${keys.anthropic ? 'Anthropic Claude' : 'OpenAI'} に送信して翻訳します。よろしいですか？`);
+    if (!ok) return;
+
+    const glossary = parseGlossary(await Settings.getGlossary());
+    const glossaryText = glossary.length ? `\n用語集（厳密適用）:\n${glossary.map(g => `${g.src} => ${g.tgt}`).join('\n')}` : '';
+    UI.toast('翻訳開始（5並列）', 'ok');
+
+    // 5並列
+    const queue = segs.map((s, i) => i).filter(i => !segs[i].translation);
+    const CONCURRENCY = 5;
+    let done = 0;
+    async function worker() {
+      while (queue.length) {
+        const i = queue.shift();
+        const text = segs[i].text;
+        if (!text) { done++; continue; }
+        try {
+          const out = await translateOne(text, targetLang, glossaryText, keys);
+          App.pushUndo();
+          segs[i].translation = out;
+          // インクリメンタル描画は重いので debounce
+        } catch (e) {
+          console.error(e);
+        }
+        done++;
+      }
+    }
+    await Promise.all(new Array(CONCURRENCY).fill(0).map(worker));
+    App.scheduleSave();
+    render();
+    UI.toast(`翻訳完了 (${done}件)`, 'ok');
+  };
+
+  async function translateOne(text, targetLang, glossaryText, keys) {
+    const sys = `あなたは熟練の同時通訳者です。以下のテキストを${targetLang}に自然に翻訳してください。原文に存在しない情報は加えず、専門用語は適切に訳出してください。${glossaryText}`;
+    if (keys.anthropic) {
+      const r = await apiClient.anthropicMessages(keys.anthropic, {
+        model: 'claude-sonnet-4-5',
+        system: sys,
+        max_tokens: 1024,
+        messages: [{ role: 'user', content: text }]
+      });
+      return r.content?.[0]?.text || '';
+    } else {
+      const r = await apiClient.openaiChat(keys.openai, {
+        model: 'gpt-4o',
+        messages: [
+          { role: 'system', content: sys },
+          { role: 'user', content: text }
+        ]
+      });
+      return r.choices?.[0]?.message?.content || '';
+    }
+  }
+
+  function parseGlossary(text) {
+    if (!text) return [];
+    return text.split('\n').map(l => l.trim()).filter(Boolean).map(l => {
+      const m = l.match(/^(.+?)\s*(?:=>|\t)\s*(.+)$/);
+      return m ? { src: m[1], tgt: m[2] } : null;
+    }).filter(Boolean);
+  }
+
+  // Undo / Redo
+  window.addEventListener('keydown', e => {
+    if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) { App.undo(); e.preventDefault(); }
+    else if ((e.ctrlKey || e.metaKey) && ((e.key === 'z' && e.shiftKey) || e.key === 'y')) { App.redo(); e.preventDefault(); }
+    else if ((e.ctrlKey || e.metaKey) && e.key === 'f') { document.getElementById('filterKeyword').focus(); e.preventDefault(); }
+    else if ((e.ctrlKey || e.metaKey) && e.key === 's') { App.scheduleSave(); UI.toast('保存しました', 'ok', 1000); e.preventDefault(); }
+    else if (e.key === ' ' && document.getElementById('panel-bilingual').classList.contains('active')) {
+      if (!/^(INPUT|TEXTAREA)$/.test(document.activeElement.tagName) && !document.activeElement.isContentEditable) {
+        audioEl.paused ? audioEl.play() : audioEl.pause();
+        e.preventDefault();
+      }
+    }
+  });
+
+  return { render, attachAudio, parseGlossary };
+})();
+
+// ============================================================
+// [Summary] map-reduce 要約
+// ============================================================
+const Summary = (() => {
+  document.getElementById('sumRunBtn').onclick = async () => {
+    const segs = App.getSegments();
+    if (!segs.length) { UI.toast('要約対象がありません', 'err'); return; }
+    const keys = await Settings.getKeys();
+    if (!keys.anthropic && !keys.openai) { UI.toast('Claude または OpenAI のキーが必要です', 'err'); return; }
+    const ok = await UI.confirm('文字起こし全文を要約APIに送信します。よろしいですか？');
+    if (!ok) return;
+    const len = document.getElementById('sumLength').value;
+    const isMinutes = document.getElementById('sumMinutes').checked;
+    const target = len === 'short' ? 200 : len === 'detailed' ? 2000 : 800;
+
+    setBar(0.05);
+    // 10分単位チャンク
+    const chunks = chunkByDuration(segs, 10 * 60 * 1000);
+    const partial = [];
+    for (let i = 0; i < chunks.length; i++) {
+      setBar(0.05 + (i / chunks.length) * 0.6);
+      const text = chunks[i].map(s => `[${(s.start/1000).toFixed(0)}s ${s.speaker}] ${s.text}`).join('\n');
+      const sys = `次のチャンクを200字程度に要点抽出してください。`;
+      const out = await callLLM(keys, sys, text, 600);
+      partial.push(out);
+    }
+    setBar(0.7);
+    const reduceSys = isMinutes
+      ? `以下の要点群を統合し、議事録形式で出力してください（決定事項 / アクション / 論点 の3セクション、合計${target}字程度）。`
+      : `以下の要点群を統合し、${target}字程度の${len==='short'?'簡潔':len==='detailed'?'詳細':'標準'}な要約にしてください。`;
+    const final = await callLLM(keys, reduceSys, partial.join('\n\n'), Math.ceil(target * 2));
+    document.getElementById('sumText').value = final;
+    setBar(1);
+    UI.toast('要約完了', 'ok');
+
+    const jobId = App.getJob();
+    if (jobId) await JobMgr.update(jobId, { summary: final });
+  };
+
+  function setBar(p) { document.getElementById('sumBar').style.width = (p*100).toFixed(1)+'%'; }
+
+  function chunkByDuration(segs, ms) {
+    const out = []; let cur = []; let t0 = segs[0]?.start || 0;
+    for (const s of segs) {
+      if (s.start - t0 > ms && cur.length) { out.push(cur); cur = []; t0 = s.start; }
+      cur.push(s);
+    }
+    if (cur.length) out.push(cur);
+    return out;
+  }
+
+  async function callLLM(keys, system, user, max_tokens) {
+    if (keys.anthropic) {
+      const r = await apiClient.anthropicMessages(keys.anthropic, {
+        model: 'claude-sonnet-4-5', system, max_tokens,
+        messages: [{ role: 'user', content: user }]
+      });
+      return r.content?.[0]?.text || '';
+    } else {
+      const r = await apiClient.openaiChat(keys.openai, {
+        model: 'gpt-4o',
+        max_tokens,
+        messages: [{ role:'system', content: system }, { role:'user', content: user }]
+      });
+      return r.choices?.[0]?.message?.content || '';
+    }
+  }
+
+  return { callLLM };
+})();
+
+// ============================================================
+// [Slides]  (A) 自動生成 / (B) プロンプト出力
+// ============================================================
+const Slides = (() => {
+  document.getElementById('slideGenBtn').onclick = async () => {
+    const segs = App.getSegments();
+    if (!segs.length) { UI.toast('スライド化する対象がありません', 'err'); return; }
+    const keys = await Settings.getKeys();
+    if (!keys.anthropic && !keys.openai) { UI.toast('Claude または OpenAI のキーが必要です', 'err'); return; }
+    const ok = await UI.confirm('スライド構造を生成するためにLLM APIへ送信します。よろしいですか？');
+    if (!ok) return;
+    setBar(0.1);
+
+    const theme = document.getElementById('slideTheme').value;
+    const cntPref = document.getElementById('slideCount').value;
+    const summary = document.getElementById('sumText').value || '(要約未生成)';
+    const speakers = App.speakerMap();
+    const ctx = `要約:\n${summary}\n\n話者:\n${JSON.stringify(speakers)}\n\nセグメント数: ${segs.length}`;
+    const cntInst = cntPref === 'auto'
+      ? '内容に応じて5〜30枚で自動調整。'
+      : `必ず${cntPref}枚前後に収めること。`;
+    const sys = `あなたはプレゼン作成のプロです。次のスキーマに厳密に従ったJSONのみを返してください（説明文不要）:
+{ slides: [{
+  layout: 'title'|'content'|'twoColumn'|'comparison'|'diagram',
+  title: string, subtitle?: string,
+  bodies: [{x:number,y:number,w:number,h:number,text:string,fontSize?:number,bold?:boolean,color?:string,bullet?:boolean}],
+  shapes: [{type:'rect'|'roundRect'|'ellipse'|'arrow'|'triangle'|'line'|'connector',x:number,y:number,w:number,h:number,text?:string,fill?:string,line?:string,rotate?:number,arrowHead?:string}],
+  icons: [{name:string,x:number,y:number,w:number,h:number,color?:string}],
+  notes?: string
+}]}
+座標単位はインチ。スライドは 10x5.625 インチ前提。${cntInst} 図表・矢印・コネクタを可能な限り活用しPowerPointで個別編集できる構造にすること。`;
+    let structure;
+    try {
+      const raw = await Summary.callLLM(keys, sys, ctx, 8000);
+      structure = JSON.parse(extractJson(raw));
+    } catch (e) {
+      UI.toast('スライド構造生成失敗: ' + e.message, 'err'); setBar(0); return;
+    }
+    setBar(0.5);
+
+    // PptxGenJS で組み立て
+    const pres = new PptxGenJS();
+    pres.layout = 'LAYOUT_WIDE';
+    pres.defineLayout({ name: 'iTLE', width: 10, height: 5.625 });
+    pres.layout = 'iTLE';
+    const palette = themePalette(theme);
+
+    structure.slides.forEach((sl, i) => {
+      const slide = pres.addSlide();
+      slide.background = { color: palette.bg };
+      if (sl.title) slide.addText(sl.title, { x: 0.4, y: 0.3, w: 9.2, h: 0.6, fontSize: 28, bold: true, color: palette.title });
+      if (sl.subtitle) slide.addText(sl.subtitle, { x: 0.4, y: 0.95, w: 9.2, h: 0.4, fontSize: 14, color: palette.sub });
+      (sl.bodies || []).forEach(b => {
+        slide.addText(b.text || '', {
+          x: b.x ?? 0.5, y: b.y ?? 1.5, w: b.w ?? 9, h: b.h ?? 0.5,
+          fontSize: b.fontSize || 16, bold: !!b.bold,
+          color: b.color || palette.text,
+          bullet: !!b.bullet
+        });
+      });
+      (sl.shapes || []).forEach(sh => {
+        const t = mapShape(pres, sh.type);
+        slide.addShape(t, {
+          x: sh.x, y: sh.y, w: sh.w, h: sh.h,
+          fill: { color: sh.fill || palette.shape },
+          line: { color: sh.line || palette.line, width: 1 },
+          rotate: sh.rotate || 0
+        });
+        if (sh.text) slide.addText(sh.text, { x: sh.x, y: sh.y, w: sh.w, h: sh.h, fontSize: 12, color: palette.text, align: 'center', valign: 'middle' });
+      });
+      (sl.icons || []).forEach(ic => {
+        const dataUrl = lucideToDataUrl(ic.name, ic.color || palette.title);
+        if (dataUrl) slide.addImage({ data: dataUrl, x: ic.x, y: ic.y, w: ic.w, h: ic.h });
+      });
+      if (sl.notes) slide.addNotes(sl.notes);
+    });
+
+    setBar(0.9);
+    const fname = (App.getFile()?.name || 'slides').replace(/\.[^.]+$/, '') + '_iTLE.pptx';
+    await pres.writeFile({ fileName: fname });
+    setBar(1);
+    UI.toast('PPTX 出力完了', 'ok');
+  };
+
+  function setBar(p) { document.getElementById('slideBar').style.width = (p*100).toFixed(1)+'%'; }
+  function extractJson(s) {
+    const m = s.match(/\{[\s\S]*\}/);
+    return m ? m[0] : s;
+  }
+  function mapShape(pres, type) {
+    const S = pres.ShapeType || pres.shapes;
+    const map = {
+      rect: 'rect', roundRect: 'roundRect', ellipse: 'ellipse',
+      arrow: 'rightArrow', triangle: 'triangle', line: 'line', connector: 'line'
+    };
+    return map[type] || 'rect';
+  }
+  function themePalette(t) {
+    return ({
+      light: { bg: 'FFFFFF', title: '1F2937', sub: '6B7280', text: '111827', shape: 'DBEAFE', line: '2563EB' },
+      dark:  { bg: '0F1419', title: 'E8EDF3', sub: '9AA7B4', text: 'E8EDF3', shape: '1F2937', line: '4F8CFF' },
+      corporate: { bg: 'F8FAFC', title: '0F172A', sub: '475569', text: '0F172A', shape: 'CBD5E1', line: '334155' }
+    })[t] || {};
+  }
+  // Lucide SVG → data URL（簡易）
+  function lucideToDataUrl(name, color) {
+    if (!window.lucide || !lucide.icons) return null;
+    const icon = lucide.icons[name] || lucide.icons[(name||'').replace(/-./g, m => m[1].toUpperCase())];
+    if (!icon) return null;
+    const svg = icon.toSvg({ color });
+    return 'data:image/svg+xml;base64,' + btoa(unescape(encodeURIComponent(svg)));
+  }
+
+  // (B) プロンプト出力
+  document.getElementById('promptGenBtn').onclick = () => {
+    const tool = document.getElementById('promptTool').value;
+    const segs = App.getSegments();
+    const summary = document.getElementById('sumText').value || '(要約未生成)';
+    const speakers = JSON.stringify(App.speakerMap(), null, 2);
+    const full = segs.map(s => `[${(s.start/1000).toFixed(0)}s ${s.speaker}] ${s.text}`).join('\n');
+    const header = ({
+      claude: 'あなたはプレゼン作成のプロです。以下の内容から、PowerPoint向けスライド構成案を提案してください。',
+      copilot: 'You are Copilot. Generate a PowerPoint slide outline based on the following content.',
+      gemini: 'Geminiとして、以下からスライド構成（各スライドの図表配置の指示含む）を作成してください。',
+      gpt: 'Act as a presentation expert. Build a PowerPoint slide outline from the content below.'
+    })[tool];
+    const text = `${header}
+
+=== 要約 ===
+${summary}
+
+=== 話者一覧 ===
+${speakers}
+
+=== 文字起こし全文 ===
+${full.slice(0, 16000)}${full.length>16000?'\n…(以下省略)':''}
+
+=== 希望 ===
+- テーマ: ${document.getElementById('slideTheme').value}
+- 枚数: ${document.getElementById('slideCount').value}
+- 図表は箱・矢印・コネクタを活用しPowerPointで個別編集可能な構造で。
+`;
+    document.getElementById('promptOut').value = text;
+  };
+  document.getElementById('promptCopyBtn').onclick = async () => {
+    const v = document.getElementById('promptOut').value;
+    if (!v) { UI.toast('まずプロンプトを生成してください', 'warn'); return; }
+    await navigator.clipboard.writeText(v);
+    UI.toast('コピーしました', 'ok');
+  };
+
+  return {};
+})();
+
+// ============================================================
+// [Export]
+// ============================================================
+const Exporter = (() => {
+  function _segs() { return App.getSegments(); }
+  function _file() { return App.getFile(); }
+  function _map() { return App.speakerMap(); }
+  function _resolvedSpeaker(sp) { const m = _map(); return m[sp] ? `${sp}（${m[sp]}）` : sp; }
+
+  function fmtSrt(ms) {
+    const h = Math.floor(ms/3600000); ms -= h*3600000;
+    const m = Math.floor(ms/60000);   ms -= m*60000;
+    const s = Math.floor(ms/1000);    ms -= s*1000;
+    return `${pad(h,2)}:${pad(m,2)}:${pad(s,2)},${pad(ms,3)}`;
+  }
+  function fmtVtt(ms) {
+    return fmtSrt(ms).replace(',', '.');
+  }
+  function pad(n,w){ return String(n).padStart(w,'0'); }
+  function dl(filename, content, type='text/plain') {
+    const blob = content instanceof Blob ? content : new Blob([content], { type });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob); a.download = filename; a.click();
+    setTimeout(()=>URL.revokeObjectURL(a.href), 1000);
+  }
+
+  document.getElementById('expSrtSrc').onclick = () => dlSrt('text', 'src');
+  document.getElementById('expSrtTgt').onclick = () => dlSrt('translation', 'tgt');
+  document.getElementById('expVttSrc').onclick = () => dlVtt('text', 'src');
+  document.getElementById('expVttTgt').onclick = () => dlVtt('translation', 'tgt');
+
+  function dlSrt(field, suffix) {
+    const lines = _segs().map((s, i) =>
+      `${i+1}\n${fmtSrt(s.start)} --> ${fmtSrt(s.end)}\n${(s[field]||'').trim()}\n`).join('\n');
+    dl(baseName()+`_${suffix}.srt`, lines, 'application/x-subrip');
+  }
+  function dlVtt(field, suffix) {
+    const lines = ['WEBVTT',''].concat(_segs().map((s,i) =>
+      `${fmtVtt(s.start)} --> ${fmtVtt(s.end)}\n${(s[field]||'').trim()}\n`)).join('\n');
+    dl(baseName()+`_${suffix}.vtt`, lines, 'text/vtt');
+  }
+  function baseName() { return (_file()?.name || 'export').replace(/\.[^.]+$/, ''); }
+
+  document.getElementById('expCsv').onclick = () => {
+    const rows = [['#','開始ms','終了ms','話者','原文','翻訳文']];
+    _segs().forEach((s,i)=>rows.push([i+1, s.start, s.end, _resolvedSpeaker(s.speaker), s.text, s.translation||'']));
+    const csv = rows.map(r => r.map(v => `"${String(v).replace(/"/g,'""')}"`).join(',')).join('\n');
+    dl(baseName()+'.csv', '﻿'+csv, 'text/csv');
+  };
+
+  document.getElementById('expMd').onclick = () => {
+    const lines = _segs().map(s => `**[${fmtMd(s.start)}–${fmtMd(s.end)}] ${_resolvedSpeaker(s.speaker)}**\n${s.text}${s.translation?`\n> ${s.translation}`:''}\n`);
+    const md = `# ${baseName()}\n\n${lines.join('\n')}`;
+    dl(baseName()+'.md', md, 'text/markdown');
+  };
+  function fmtMd(ms){ const s=Math.floor(ms/1000); return `${pad(Math.floor(s/60),2)}:${pad(s%60,2)}`; }
+
+  document.getElementById('expJson').onclick = async () => {
+    const job = App.getJob() ? await JobMgr.get(App.getJob()) : null;
+    const out = {
+      schemaVersion: 1,
+      job,
+      speakerMap: _map(),
+      segments: _segs(),
+      summary: document.getElementById('sumText').value
+    };
+    dl(baseName()+'.json', JSON.stringify(out, null, 2), 'application/json');
+  };
+
+  document.getElementById('expTxtSrc').onclick  = () => dl(baseName()+'_src.txt', _segs().map(s=>s.text).join('\n'));
+  document.getElementById('expTxtTgt').onclick  = () => dl(baseName()+'_tgt.txt', _segs().map(s=>s.translation||'').join('\n'));
+  document.getElementById('expTxtBoth').onclick = () => dl(baseName()+'_both.txt', _segs().map(s=>`${s.text}\n${s.translation||''}\n`).join('\n'));
+
+  // ----- Excel -----
+  document.getElementById('expXlsx').onclick = async () => {
+    const wb = XLSX.utils.book_new();
+    const segs = _segs();
+    // SheetJS Community 版はセル色のwriteに非対応のため、色分けは話者ラベルの prefix で代用
+    // ★案C移行後にサーバ側で xlsx-style を使った色付き出力に差し替え可能
+
+    // シート1: 対訳
+    const aoa1 = [['#','開始','終了','話者','原文','翻訳文']];
+    segs.forEach((s,i) => aoa1.push([i+1, fmtMd(s.start), fmtMd(s.end), _resolvedSpeaker(s.speaker), s.text, s.translation||'']));
+    const ws1 = XLSX.utils.aoa_to_sheet(aoa1);
+    ws1['!cols'] = [{wch:4},{wch:10},{wch:10},{wch:18},{wch:60},{wch:60}];
+    ws1['!freeze'] = { xSplit: 0, ySplit: 1 };
+    XLSX.utils.book_append_sheet(wb, ws1, '対訳');
+
+    // シート2: 話者一覧
+    const aoa2 = [['話者ラベル','実名','発言数','総時間(秒)']];
+    const speakers = [...new Set(segs.map(s=>s.speaker))].sort();
+    speakers.forEach(sp => {
+      const ss = segs.filter(x=>x.speaker===sp);
+      const total = ss.reduce((a,b)=>a+(b.end-b.start),0)/1000;
+      aoa2.push([sp, _map()[sp]||'', ss.length, total.toFixed(0)]);
+    });
+    const ws2 = XLSX.utils.aoa_to_sheet(aoa2);
+    ws2['!cols'] = [{wch:10},{wch:24},{wch:10},{wch:14}];
+    XLSX.utils.book_append_sheet(wb, ws2, '話者一覧');
+
+    // シート3: 要約
+    const aoa3 = [['要約'], [document.getElementById('sumText').value || '']];
+    const ws3 = XLSX.utils.aoa_to_sheet(aoa3); ws3['!cols'] = [{wch:120}];
+    XLSX.utils.book_append_sheet(wb, ws3, '要約');
+
+    // シート4: メタ情報
+    const job = App.getJob() ? await JobMgr.get(App.getJob()) : null;
+    const aoa4 = [
+      ['ファイル名', _file()?.name || ''],
+      ['日時', dayjs().format('YYYY-MM-DD HH:mm:ss')],
+      ['言語', document.getElementById('trxLang').value],
+      ['モデル', document.getElementById('trxModel').value],
+      ['翻訳先', document.getElementById('targetLang').value],
+      ['ジョブID', job?.id || ''],
+      ['userId', job?.userId || CURRENT_USER_ID]
+    ];
+    const ws4 = XLSX.utils.aoa_to_sheet(aoa4); ws4['!cols'] = [{wch:18},{wch:60}];
+    XLSX.utils.book_append_sheet(wb, ws4, 'メタ情報');
+
+    XLSX.writeFile(wb, baseName()+'.xlsx');
+  };
+})();
+
+// ============================================================
+// [History] 履歴一覧と再開
+// ============================================================
+const History = (() => {
+  async function refresh() {
+    const list = document.getElementById('historyList');
+    list.innerHTML = '';
+    const jobs = await JobMgr.list();
+    if (!jobs.length) { list.innerHTML = '<li style="color:var(--fg-mute);">履歴はまだありません。</li>'; return; }
+    for (const j of jobs) {
+      const li = document.createElement('li');
+      li.innerHTML = `
+        <span class="status-pill ${j.status}">${j.status}</span>
+        <div style="flex:1;">
+          <div><b>${Acquire.escapeHtml(j.meta?.fileName || '(unnamed)')}</b></div>
+          <div style="color:var(--fg-mute);font-size:12px;">${dayjs(j.updatedAt).format('YYYY-MM-DD HH:mm')} · ${j.step} · ${Math.round((j.progress||0)*100)}%</div>
+        </div>
+        <button data-act="open" data-id="${j.id}">開く</button>
+        <button data-act="resume" data-id="${j.id}">再開</button>
+        <button data-act="export" data-id="${j.id}">エクスポート</button>
+        <button data-act="delete" data-id="${j.id}" class="danger">削除</button>
+      `;
+      list.appendChild(li);
+    }
+    list.querySelectorAll('button[data-id]').forEach(b => b.onclick = () => onAction(b.dataset.act, b.dataset.id));
+  }
+  async function onAction(act, id) {
+    if (act === 'open') {
+      const segs = await JobMgr.getSegments(id);
+      App.setJob(id);
+      App.setSegments(segs);
+      const job = await JobMgr.get(id);
+      if (job.summary) document.getElementById('sumText').value = job.summary;
+      UI.switchTab('bilingual');
+    } else if (act === 'resume') {
+      App.setJob(id);
+      // 文字起こし中断時の再開
+      const job = await JobMgr.get(id);
+      if (job?.meta?.transcriptId) { UI.switchTab('transcribe'); UI.toast('再開を試みます', 'ok'); /* Transcribe.resume() flow */ }
+    } else if (act === 'export') {
+      App.setJob(id);
+      const segs = await JobMgr.getSegments(id);
+      App.setSegments(segs);
+      UI.switchTab('bilingual');
+      UI.toast('対訳タブからエクスポートしてください', 'ok');
+    } else if (act === 'delete') {
+      const ok = await UI.confirm('この履歴を削除しますか？');
+      if (!ok) return;
+      await IDB.del('jobs', id);
+      refresh();
+    }
+  }
+  document.querySelector('#tabs button[data-tab="history"]').addEventListener('click', refresh);
+  return { refresh };
+})();
+
+// ============================================================
+// [SettingsUI]
+// ============================================================
+const SettingsUI = (() => {
+  async function init() {
+    const keys = await Settings.getKeys();
+    document.getElementById('keyAssembly').value = keys.assembly || '';
+    document.getElementById('keyAnthropic').value = keys.anthropic || '';
+    document.getElementById('keyOpenAI').value = keys.openai || '';
+    document.getElementById('keyYouTube').value = keys.youtube || '';
+    document.getElementById('glossaryText').value = await Settings.getGlossary();
+    renderBookmarklet();
+    renderUsage();
+  }
+  document.getElementById('saveKeysBtn').onclick = async () => {
+    await Settings.setKeys({
+      assembly: document.getElementById('keyAssembly').value.trim(),
+      anthropic: document.getElementById('keyAnthropic').value.trim(),
+      openai: document.getElementById('keyOpenAI').value.trim(),
+      youtube: document.getElementById('keyYouTube').value.trim()
+    });
+    UI.toast('APIキーを暗号化して保存しました', 'ok');
+  };
+  document.querySelectorAll('button[data-test]').forEach(b => {
+    b.onclick = async () => {
+      const kind = b.dataset.test;
+      const keys = await Settings.getKeys();
+      let ok = false;
+      try {
+        if (kind === 'assembly') ok = await apiClient.assemblyPing(keys.assembly);
+        if (kind === 'anthropic') ok = await apiClient.anthropicPing(keys.anthropic);
+        if (kind === 'openai') ok = await apiClient.openaiPing(keys.openai);
+        if (kind === 'youtube') ok = await apiClient.ytPing(keys.youtube);
+      } catch (e) { ok = false; }
+      UI.toast(ok ? `${kind}: OK` : `${kind}: 失敗`, ok ? 'ok' : 'err');
+    };
+  });
+
+  document.getElementById('saveGlossaryBtn').onclick = async () => {
+    await Settings.setGlossary(document.getElementById('glossaryText').value);
+    App.setGlossary(Bilingual.parseGlossary(document.getElementById('glossaryText').value));
+    UI.toast('用語集を保存しました', 'ok');
+  };
+
+  function renderBookmarklet() {
+    const origin = location.origin + location.pathname;
+    // ブックマークレットは対象ページのDOMからメディアURLを抽出し、
+    // 本アプリのウィンドウを開いて postMessage で送信する。
+    const code = `javascript:(function(){
+      var urls=[];
+      document.querySelectorAll('video, audio').forEach(function(v){ if(v.src) urls.push(v.src); v.querySelectorAll('source').forEach(function(s){ if(s.src) urls.push(s.src); }); });
+      if(!urls.length){ alert('メディアURLが見つかりません'); return; }
+      var w = window.open('${origin}','itleNeo');
+      setTimeout(function(){ w.postMessage({__itleNeo:true,kind:'media',urls:urls}, '*'); }, 1500);
+    })();`.replace(/\s+/g,' ');
+    document.getElementById('bookmarkletCode').value = code;
+  }
+  document.getElementById('copyBookmarkletBtn').onclick = async () => {
+    await navigator.clipboard.writeText(document.getElementById('bookmarkletCode').value);
+    UI.toast('コピーしました。ブックマークの「URL」欄に貼り付けて保存してください。', 'ok');
+  };
+
+  async function renderUsage() {
+    // 案A の段階では概算のみ（ローカルジョブ数ベース）。案C で実 API へ問合せ予定。
+    const jobs = await JobMgr.list();
+    const monthAgo = Date.now() - 30*86400000;
+    const recent = jobs.filter(j => j.updatedAt > monthAgo);
+    const totalSec = recent.reduce((a, j) => a + (j.result?.audio_duration || 0), 0);
+    document.getElementById('usageBox').innerHTML =
+      `直近30日のジョブ数: <b>${recent.length}</b> · 推定文字起こし合計: <b>${(totalSec/3600).toFixed(1)} 時間</b>` +
+      `<br/><span style="color:var(--fg-mute);font-size:11px;">※ プロバイダー側の請求/残量は各管理画面で確認してください（案C移行後にAPI経由で表示予定）。</span>`;
+  }
+
+  document.getElementById('exportAllBtn').onclick = async () => {
+    const dump = {
+      schemaVersion: 1,
+      exportedAt: Date.now(),
+      settings: { glossary: await Settings.getGlossary(), theme: await Settings.getTheme() },
+      jobs: await JobMgr.list(),
+      segmentsByJob: {}
+    };
+    for (const j of dump.jobs) {
+      dump.segmentsByJob[j.id] = await JobMgr.getSegments(j.id);
+    }
+    // APIキーは含めない（セキュリティ）
+    const blob = new Blob([JSON.stringify(dump, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+    a.download = `itle-neo-export-${dayjs().format('YYYYMMDD-HHmm')}.json`; a.click();
+    UI.toast('エクスポートしました（APIキーは含めません）', 'ok');
+  };
+  document.getElementById('importAllBtn').onclick = () => document.getElementById('importAllInput').click();
+  document.getElementById('importAllInput').onchange = async e => {
+    const f = e.target.files[0]; if (!f) return;
+    const text = await f.text();
+    let data;
+    try { data = JSON.parse(text); } catch { UI.toast('JSON parse error', 'err'); return; }
+    const ok = await UI.confirm('既存のジョブ/セグメントと統合インポートします。よろしいですか？');
+    if (!ok) return;
+    if (data.settings?.glossary) await Settings.setGlossary(data.settings.glossary);
+    for (const j of (data.jobs || [])) {
+      await IDB.put('jobs', j);
+      const segs = data.segmentsByJob?.[j.id] || [];
+      await JobMgr.setSegments(j.id, segs);
+    }
+    UI.toast('インポート完了', 'ok');
+    History.refresh();
+  };
+  document.getElementById('wipeBtn').onclick = async () => {
+    const ok = await UI.confirm('IndexedDBの全データ（APIキー含む）を削除します。よろしいですか？');
+    if (!ok) return;
+    await IDB.clear('jobs'); await IDB.clear('segments'); await IDB.clear('settings'); await IDB.clear('glossary'); await IDB.clear('cache');
+    UI.toast('削除しました。ページをリロードしてください。', 'warn');
+  };
+
+  return { init };
+})();
+
+// ============================================================
+// [TOS] 初回起動時に利用規約同意
+// ============================================================
+(async () => {
+  const ok = await Settings.getTosAccepted();
+  if (ok) return;
+  const m = UI.modal(`
+    <h2>利用規約への同意</h2>
+    <p>iTLE Neo は単一HTMLで動作するスタンドアロンアプリです。</p>
+    <ul>
+      <li>APIキーは <b>ローカルのみ</b>（Web Crypto で暗号化保存）に保持されます。</li>
+      <li>音声/テキストは各APIプロバイダ（AssemblyAI, Anthropic, OpenAI, YouTube）へ送信されます。送信前に毎回確認します。</li>
+      <li><b>YouTube公開動画の音声/動画ダウンロード機能は提供しません</b>（規約遵守のため）。字幕のみ取得可能です。</li>
+      <li>メンバー限定・プライベート動画は、権利者または許諾保有者であることを自己宣言してから案内します。</li>
+    </ul>
+    <div class="row" style="justify-content:flex-end;margin-top:12px;">
+      <button id="tosCancel">キャンセル</button>
+      <button id="tosOK" class="primary">同意して使用する</button>
+    </div>
+  `);
+  m.root.querySelector('#tosOK').onclick = async () => { await Settings.setTosAccepted(true); m.close(); };
+  m.root.querySelector('#tosCancel').onclick = () => location.href = 'about:blank';
+})();
+
+// ============================================================
+// 初期化
+// ============================================================
+window.addEventListener('DOMContentLoaded', async () => {
+  await SettingsUI.init();
+  const g = await Settings.getGlossary();
+  App.setGlossary(Bilingual.parseGlossary(g));
+  await App.checkResumable();
+  if (window.lucide && lucide.createIcons) lucide.createIcons();
+  if (window.dayjs_plugin_duration && dayjs.extend) dayjs.extend(window.dayjs_plugin_duration);
+});
+
+// 終了時の保存
+window.addEventListener('beforeunload', () => {
+  if (App.getJob()) JobMgr.setSegments(App.getJob(), App.getSegments());
+});
+</script>
+</body>
+</html>
