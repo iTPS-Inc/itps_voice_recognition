@@ -237,7 +237,7 @@
 <div id="unsupported">
   <h1>⚠️ 非対応ブラウザ</h1>
   <p>iTLE Neo は Chrome / Edge の最新版でのみ動作します（File System Access API使用）。</p>
-  <p>HTTPS または localhost 環境でアクセスしてください。</p>
+  <p>file:// でローカルファイルを直接開く、または https:// / localhost で配信してください。</p>
 </div>
 
 <!-- ==================== ヘッダ ==================== -->
@@ -545,8 +545,10 @@
     <h2>ブックマークレット</h2>
     <p style="color:var(--fg-mute);font-size:12px;margin-top:0;">
       下のコードをブックマークの「URL」欄に貼り付けて保存し、対象ページで実行してください。
-      検出されたメディアURLが本アプリに送られます（このページの origin を許可するため、
-      本アプリを HTTPS で公開した URL に書き換えてください）。
+      検出されたメディアURLが本アプリに送られます。
+      <br/>※ ブックマークレット機能のみ、本アプリを <code>https://</code> 上に配置する必要があります
+      （ブラウザのセキュリティ上、外部サイトから <code>file://</code> を開けないため）。
+      他のすべての機能は <code>file://</code> でダブルクリック起動でも動作します。
     </p>
     <textarea id="bookmarkletCode" rows="6" readonly></textarea>
     <div class="row" style="margin-top:8px;">
@@ -627,8 +629,9 @@ const BrowserCheck = (() => {
     if (!('showSaveFilePicker' in window) && !('showOpenFilePicker' in window)) {
       return { ok: false, reason: 'File System Access API がありません' };
     }
+    // secure context (file://, https://, localhost のいずれかで true)
     const secure = window.isSecureContext;
-    if (!secure) return { ok: false, reason: 'HTTPS または localhost で開いてください' };
+    if (!secure) return { ok: false, reason: 'セキュアコンテキストではありません（file:// / https:// / localhost で開いてください）' };
     return { ok: true };
   }
   function enforce() {
