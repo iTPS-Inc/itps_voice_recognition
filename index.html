@@ -1,0 +1,1942 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TP Bench - Transfer Pricing Benchmarking Tool</title>
+
+<!-- =====================================================================
+  CDN dependencies
+  All dependencies are loaded from public CDNs so the file works under
+  file:// without a bundler. ESModules are intentionally avoided so that
+  the page can be opened as a static asset on any browser.
+===================================================================== -->
+<script src="https://cdn.tailwindcss.com"></script>
+<script defer src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dexie@4.0.8/dist/dexie.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mammoth@1.7.2/mammoth.browser.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/pptxgenjs@3.12.0/dist/pptxgen.bundle.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jspdf-autotable@3.8.2/dist/jspdf.plugin.autotable.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/docx@8.5.0/build/index.umd.js"></script>
+
+<style>
+  /* Avoid FOUC: hide Alpine-managed elements until Alpine boots. */
+  [x-cloak] { display: none !important; }
+  /* Drag & drop highlight. */
+  .dz-active { outline: 2px dashed #2563eb; background: #eff6ff; }
+  /* Scrollbar tweaks for sidebar. */
+  aside::-webkit-scrollbar { width: 6px; }
+  aside::-webkit-scrollbar-thumb { background: #475569; border-radius: 4px; }
+</style>
+</head>
+
+<body class="bg-slate-50 text-slate-800 font-sans antialiased">
+
+<!-- =====================================================================
+  SCRIPT BLOCK 1 / 8 : Data Models (JSDoc only)
+  These typedefs are the single source of truth for shapes used across
+  the app. Adding fields here documents future Phase additions even when
+  they are not yet implemented.
+===================================================================== -->
+<script id="data-models">
+/**
+ * @typedef {Object} Project
+ * @property {string} id - UUID-ish primary key.
+ * @property {string} name - User-facing project name.
+ * @property {number} createdAt - Epoch millis at creation.
+ * @property {number} updatedAt - Epoch millis at last save.
+ * @property {string[]} targetJurisdiction - ISO 3166 alpha-2 codes the report covers.
+ * @property {string|null} testedPartyId - Company.id under examination.
+ * @property {string[]} comparables - Company.id list selected as comparables.
+ * @property {string[]} excludedCompanies - Company.id list filtered out by screening.
+ * @property {ScreeningHistory[]} screeningHistory - Append-only audit of each screening stage.
+ * @property {ScoringConfig} scoringConfig - Phase 5 scoring weights/PLI definition.
+ * @property {FxData} fxData - FX snapshot used for normalization.
+ * @property {ProjectSettings} settings - Project-scoped overrides over global settings.
+ * @property {string} notes - Free-text user notes.
+ */
+
+/**
+ * @typedef {Object} Company
+ * @property {string} id
+ * @property {string} name
+ * @property {string} country - ISO 3166 alpha-2.
+ * @property {string} industryCode - e.g. NAICS "334413".
+ * @property {('NAICS'|'NACE'|'JSIC'|'ISIC')} industryCodeSystem
+ * @property {boolean} isListed
+ * @property {IndependenceData} independenceData - Shareholder / related-party info.
+ * @property {Financials[]} financials - Time series keyed by year.
+ * @property {FarProfile} farProfile - Functions, Assets, Risks profile.
+ * @property {string} businessDescription - Free text for later AI semantic matching.
+ * @property {SourceInfo} sourceInfo - Where this record came from.
+ * @property {('manufacturing'|'service'|'distribution'|'other')} sector - Coarse classification.
+ * @property {string[]} tags - Free-form tags for user organisation.
+ */
+
+/**
+ * @typedef {Object} Financials
+ * @property {number} year - Fiscal year (calendar approximation).
+ * @property {number} revenue
+ * @property {number} operatingProfit
+ * @property {number} totalAssets
+ * @property {number} fixedAssets
+ * @property {number} inventory
+ * @property {number} receivables
+ * @property {number} payables
+ * @property {number} cogs
+ * @property {number} sga
+ * @property {number} rd
+ * @property {number} depreciation
+ * @property {string} currency - ISO 4217.
+ */
+
+/**
+ * @typedef {Object} ScreeningHistory
+ * @property {string} stage - e.g. "independence", "industry", "qualitative".
+ * @property {Object} conditions - Snapshot of criteria applied at this stage.
+ * @property {number} beforeCount
+ * @property {number} afterCount
+ * @property {string[]} excludedIds
+ * @property {number} timestamp
+ * @property {string} [reasonText] - Optional human-readable rationale.
+ */
+
+/**
+ * @typedef {Object} IndependenceData
+ * @property {number} largestShareholderPct - 0-100.
+ * @property {string|null} parentCompany
+ * @property {boolean} hasRelatedPartyTx
+ * @property {string} [notes]
+ */
+
+/**
+ * @typedef {Object} FarProfile
+ * @property {string[]} functions - e.g. "manufacturing", "R&D", "distribution".
+ * @property {string[]} assets - e.g. "manufacturing equipment", "patents".
+ * @property {string[]} risks - e.g. "inventory", "currency".
+ * @property {string} [intensityNote]
+ */
+
+/**
+ * @typedef {Object} SourceInfo
+ * @property {('manual'|'file'|'api'|'sample')} kind
+ * @property {string} [provider] - For api kind.
+ * @property {string} [filename] - For file kind.
+ * @property {number} importedAt
+ */
+
+/**
+ * @typedef {Object} ScoringConfig
+ * @property {string} pli - Profit-level indicator label (e.g. "OM", "BPL", "ROA").
+ * @property {Object<string, number>} weights - Stage->weight, populated in Phase 5.
+ * @property {Object} pliFormula - Reserved for Phase 5 expression DSL.
+ */
+
+/**
+ * @typedef {Object} FxData
+ * @property {string} base - Base currency.
+ * @property {Object<string, number>} rates - {currency: rateVsBase}.
+ * @property {string} asOf - ISO date.
+ * @property {('manual'|'csv'|'api')} source
+ */
+
+/**
+ * @typedef {Object} ProjectSettings
+ * @property {string} [language]
+ * @property {string[]} [industryCodePriority]
+ */
+
+/**
+ * @typedef {Object} ApiProvider
+ * @property {string} id
+ * @property {string} name
+ * @property {string} endpoint
+ * @property {('apiKey'|'bearer'|'basic'|'none')} authKind
+ * @property {string} apiKey - Stored as-is in IndexedDB; encrypted at-rest in Phase 8.
+ * @property {string} [username]
+ * @property {string} [password]
+ * @property {string} [notes]
+ */
+
+/**
+ * @typedef {Object} AiProvider
+ * @property {('openai'|'anthropic'|'google'|'azure')} kind
+ * @property {string} apiKey
+ * @property {string} [model]
+ * @property {string} [endpoint] - Override (Azure resource URL, etc.).
+ * @property {boolean} enabled
+ */
+
+/**
+ * @typedef {Object} ColumnMappingPreset
+ * @property {string} id
+ * @property {string} name - e.g. "Orbis Standard Layout".
+ * @property {Object<string, string>} mapping - sourceColumn -> appField.
+ * @property {number} createdAt
+ */
+
+/**
+ * @typedef {Object} AuditLogEntry
+ * @property {number} [id] - Auto-increment.
+ * @property {number} ts
+ * @property {string} action
+ * @property {string} [projectId]
+ * @property {Object} [payload]
+ */
+
+/**
+ * @typedef {Object} JurisdictionRule
+ * Reserved for Phase 2. The shape below is illustrative only.
+ * @property {string} id
+ * @property {string} jurisdiction - ISO alpha-2 or named region.
+ * @property {string} version
+ * @property {Object} screening - Threshold definitions.
+ * @property {Object} scoring - PLI rules and acceptance thresholds.
+ * @property {Object} reporting - Mandatory disclosures.
+ */
+</script>
+
+<!-- =====================================================================
+  SCRIPT BLOCK 2 / 8 : Constants & enumerations
+===================================================================== -->
+<script id="constants">
+/* eslint-disable no-unused-vars */
+
+const APP_VERSION = '1.0.0-phase1';
+const DB_NAME = 'tp_bench_db';
+
+/** ISO 3166 jurisdictions exposed in the UI. Extend as needed. */
+const JURISDICTIONS = [
+  { code: 'JP', nameJa: '日本', nameEn: 'Japan' },
+  { code: 'US', nameJa: '米国', nameEn: 'United States' },
+  { code: 'GB', nameJa: '英国', nameEn: 'United Kingdom' },
+  { code: 'DE', nameJa: 'ドイツ', nameEn: 'Germany' },
+  { code: 'FR', nameJa: 'フランス', nameEn: 'France' },
+  { code: 'NL', nameJa: 'オランダ', nameEn: 'Netherlands' },
+  { code: 'CN', nameJa: '中国', nameEn: 'China' },
+  { code: 'KR', nameJa: '韓国', nameEn: 'Korea' },
+  { code: 'SG', nameJa: 'シンガポール', nameEn: 'Singapore' },
+  { code: 'IN', nameJa: 'インド', nameEn: 'India' },
+  { code: 'AU', nameJa: '豪州', nameEn: 'Australia' },
+  { code: 'CA', nameJa: 'カナダ', nameEn: 'Canada' },
+  { code: 'BR', nameJa: 'ブラジル', nameEn: 'Brazil' },
+  { code: 'MX', nameJa: 'メキシコ', nameEn: 'Mexico' },
+];
+
+const INDUSTRY_CODE_SYSTEMS = ['NAICS', 'NACE', 'JSIC', 'ISIC'];
+
+/** Canonical app fields available as targets in the column-mapping UI. */
+const APP_FIELDS = [
+  { key: 'name', label: '企業名', group: 'identity' },
+  { key: 'country', label: '国 (ISO2)', group: 'identity' },
+  { key: 'industryCode', label: '業種コード', group: 'identity' },
+  { key: 'industryCodeSystem', label: '業種コード体系', group: 'identity' },
+  { key: 'isListed', label: '上場区分', group: 'identity' },
+  { key: 'businessDescription', label: '事業内容', group: 'identity' },
+  { key: 'largestShareholderPct', label: '筆頭株主比率(%)', group: 'independence' },
+  { key: 'parentCompany', label: '親会社名', group: 'independence' },
+  { key: 'year', label: '会計年度', group: 'financials' },
+  { key: 'revenue', label: '売上高', group: 'financials' },
+  { key: 'operatingProfit', label: '営業利益', group: 'financials' },
+  { key: 'totalAssets', label: '総資産', group: 'financials' },
+  { key: 'fixedAssets', label: '固定資産', group: 'financials' },
+  { key: 'inventory', label: '棚卸資産', group: 'financials' },
+  { key: 'receivables', label: '売上債権', group: 'financials' },
+  { key: 'payables', label: '仕入債務', group: 'financials' },
+  { key: 'cogs', label: '売上原価', group: 'financials' },
+  { key: 'sga', label: '販管費', group: 'financials' },
+  { key: 'rd', label: '研究開発費', group: 'financials' },
+  { key: 'depreciation', label: '減価償却費', group: 'financials' },
+  { key: 'currency', label: '通貨', group: 'financials' },
+];
+
+const AI_PROVIDERS = ['openai', 'anthropic', 'google', 'azure'];
+
+/** Features that can be assigned to a specific AI provider (Phase 4+). */
+const AI_FEATURES = [
+  { key: 'businessDescriptionSummary', label: '事業内容要約' },
+  { key: 'qualitativeScreening', label: '定性スクリーニング' },
+  { key: 'reportNarrative', label: 'レポート文章生成' },
+  { key: 'translationJaEn', label: '日英翻訳' },
+];
+</script>
+
+<!-- =====================================================================
+  SCRIPT BLOCK 3 / 8 : Database (Dexie / IndexedDB)
+  All DB operations are async/await. Tables are versioned via Dexie's
+  version() chain so additional indexes can be appended in later phases
+  without breaking installed databases.
+===================================================================== -->
+<script id="database">
+/** @type {import('dexie').Dexie} */
+const db = new Dexie(DB_NAME);
+
+db.version(1).stores({
+  // Use plain string ids so JSON import/export is round-trippable.
+  projects:          'id, name, createdAt, updatedAt',
+  companies:         'id, name, country, industryCode, sector',
+  fxRates:           '[base+quote+asOf], asOf',
+  jurisdictionRules: 'id, jurisdiction, version',   // Phase 2 fills this.
+  settings:          'key',
+  auditLog:          '++id, ts, action, projectId',
+  mappingPresets:    'id, name, createdAt',
+});
+
+/**
+ * Persist a single audit entry. All user-visible mutations should call
+ * this so the future Phase 7 report appendix can render a tamper-evident
+ * trail.
+ * @param {string} action
+ * @param {Object} [payload]
+ * @param {string} [projectId]
+ * @returns {Promise<void>}
+ */
+async function logAudit(action, payload = {}, projectId = null) {
+  try {
+    await db.auditLog.add({ ts: Date.now(), action, payload, projectId });
+  } catch (e) {
+    console.error('logAudit failed', e);
+  }
+}
+
+/**
+ * Read a settings value by key.
+ * @template T
+ * @param {string} key
+ * @param {T} fallback
+ * @returns {Promise<T>}
+ */
+async function getSetting(key, fallback) {
+  const row = await db.settings.get(key);
+  return row ? row.value : fallback;
+}
+
+/**
+ * Upsert a settings value by key.
+ * @param {string} key
+ * @param {*} value
+ * @returns {Promise<void>}
+ */
+async function putSetting(key, value) {
+  await db.settings.put({ key, value });
+}
+
+/**
+ * Export a full project (project record + every company referenced by
+ * it) into a single JSON envelope suitable for backup.
+ *
+ * NOTE: Phase 8 will wrap this payload with passphrase encryption. The
+ * file shape is intentionally a top-level `{version, exportedAt, data}`
+ * envelope so the encrypted form can replace `data` without breaking
+ * existing importers.
+ *
+ * @param {string} projectId
+ * @returns {Promise<Blob>}
+ */
+async function exportProjectJson(projectId) {
+  const project = await db.projects.get(projectId);
+  if (!project) throw new Error('Project not found: ' + projectId);
+  const referenced = new Set([
+    ...(project.comparables || []),
+    ...(project.excludedCompanies || []),
+    project.testedPartyId,
+  ].filter(Boolean));
+  const companies = await db.companies.bulkGet([...referenced]);
+  const payload = {
+    version: APP_VERSION,
+    exportedAt: new Date().toISOString(),
+    data: { project, companies: companies.filter(Boolean) },
+  };
+  return new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+}
+
+/**
+ * Import a previously-exported project JSON. Generates fresh ids if a
+ * project with the same id already exists so the user can keep both.
+ * @param {Object} payload
+ * @returns {Promise<string>} the imported project id
+ */
+async function importProjectJson(payload) {
+  if (!payload || !payload.data || !payload.data.project) {
+    throw new Error('Invalid project JSON');
+  }
+  const { project, companies = [] } = payload.data;
+  const existing = await db.projects.get(project.id);
+  if (existing) {
+    const newId = uuid();
+    const idMap = {};
+    for (const c of companies) { idMap[c.id] = uuid(); }
+    project.id = newId;
+    project.testedPartyId = idMap[project.testedPartyId] || project.testedPartyId;
+    project.comparables = (project.comparables || []).map(id => idMap[id] || id);
+    project.excludedCompanies = (project.excludedCompanies || []).map(id => idMap[id] || id);
+    for (const c of companies) { c.id = idMap[c.id]; }
+  }
+  await db.transaction('rw', db.projects, db.companies, async () => {
+    await db.projects.put(project);
+    if (companies.length) await db.companies.bulkPut(companies);
+  });
+  await logAudit('project.import', { projectId: project.id, companyCount: companies.length });
+  return project.id;
+}
+</script>
+
+<!-- =====================================================================
+  SCRIPT BLOCK 4 / 8 : Utilities and i18n
+===================================================================== -->
+<script id="utilities">
+/**
+ * Lightweight UUID v4-ish. Sufficient for client-side primary keys; not
+ * cryptographically random.
+ * @returns {string}
+ */
+function uuid() {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
+/**
+ * Mask all but the trailing 4 characters of an API key for display.
+ * @param {string} key
+ * @returns {string}
+ */
+function maskApiKey(key) {
+  if (!key) return '';
+  if (key.length <= 4) return '****';
+  return '*'.repeat(Math.max(4, key.length - 4)) + key.slice(-4);
+}
+
+/**
+ * Read a File as ArrayBuffer.
+ * @param {File} file
+ * @returns {Promise<ArrayBuffer>}
+ */
+function readFileAsArrayBuffer(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.onerror = () => reject(r.error);
+    r.readAsArrayBuffer(file);
+  });
+}
+
+/**
+ * Read a File as text.
+ * @param {File} file
+ * @returns {Promise<string>}
+ */
+function readFileAsText(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.onerror = () => reject(r.error);
+    r.readAsText(file);
+  });
+}
+
+/**
+ * Trigger a browser download for a Blob.
+ * @param {Blob} blob
+ * @param {string} filename
+ */
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+}
+
+/**
+ * Best-effort parser for tabular data into rows + headers.
+ * Supports XLSX, CSV, JSON, and DOCX (text-only fallback).
+ * @param {File} file
+ * @returns {Promise<{headers:string[], rows:Object[], kind:string}>}
+ */
+async function parseTabularFile(file) {
+  const name = (file.name || '').toLowerCase();
+  if (name.endsWith('.csv') || name.endsWith('.tsv') || file.type === 'text/csv') {
+    const text = await readFileAsText(file);
+    const out = Papa.parse(text, { header: true, skipEmptyLines: true });
+    const headers = out.meta.fields || [];
+    return { headers, rows: out.data, kind: 'csv' };
+  }
+  if (name.endsWith('.json')) {
+    const text = await readFileAsText(file);
+    const obj = JSON.parse(text);
+    if (Array.isArray(obj)) {
+      const headers = [...new Set(obj.flatMap(o => Object.keys(o || {})))];
+      return { headers, rows: obj, kind: 'json' };
+    }
+    if (obj && obj.data && Array.isArray(obj.data.companies)) {
+      const rows = obj.data.companies;
+      const headers = [...new Set(rows.flatMap(o => Object.keys(o || {})))];
+      return { headers, rows, kind: 'json-project' };
+    }
+    throw new Error('JSON shape not recognised');
+  }
+  if (name.endsWith('.xlsx') || name.endsWith('.xls')) {
+    const buf = await readFileAsArrayBuffer(file);
+    const wb = XLSX.read(buf, { type: 'array' });
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    const rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
+    const headers = rows.length ? Object.keys(rows[0]) : [];
+    return { headers, rows, kind: 'xlsx' };
+  }
+  if (name.endsWith('.docx')) {
+    const buf = await readFileAsArrayBuffer(file);
+    const out = await mammoth.extractRawText({ arrayBuffer: buf });
+    return { headers: ['text'], rows: [{ text: out.value }], kind: 'docx' };
+  }
+  throw new Error('Unsupported file type: ' + file.name);
+}
+
+/**
+ * Apply a column mapping to a row set, producing partial Company objects
+ * that callers can post-process (assign id, defaults, etc.).
+ * @param {Object[]} rows
+ * @param {Object<string,string>} mapping - sourceColumn -> appField key
+ * @returns {Partial<Company & Financials & IndependenceData>[]}
+ */
+function applyMapping(rows, mapping) {
+  return rows.map(r => {
+    const out = {};
+    for (const [src, target] of Object.entries(mapping)) {
+      if (!target) continue;
+      out[target] = r[src];
+    }
+    return out;
+  });
+}
+
+/**
+ * Heuristic column auto-mapping based on header substring matches.
+ * The Phase 2 rule engine can override these defaults via region-specific
+ * column-name dictionaries (see ruleEngine.suggestMapping below).
+ * @param {string[]} headers
+ * @returns {Object<string,string>}
+ */
+function autoSuggestMapping(headers) {
+  const hints = {
+    name: ['name', '企業', '会社', 'company'],
+    country: ['country', '国', 'iso'],
+    industryCode: ['industry code', 'naics', 'nace', 'jsic', '業種コード'],
+    industryCodeSystem: ['code system', 'classification', '体系'],
+    isListed: ['listed', '上場'],
+    businessDescription: ['description', '事業内容', 'business'],
+    largestShareholderPct: ['shareholder', '株主', 'ownership'],
+    parentCompany: ['parent', '親会社'],
+    year: ['year', '年度', 'fy'],
+    revenue: ['revenue', 'sales', '売上'],
+    operatingProfit: ['operating', '営業利益', 'op income'],
+    totalAssets: ['total assets', '総資産'],
+    fixedAssets: ['fixed assets', '固定資産'],
+    inventory: ['inventory', '棚卸'],
+    receivables: ['receivable', '売上債権'],
+    payables: ['payable', '仕入債務'],
+    cogs: ['cogs', '売上原価'],
+    sga: ['sga', '販管費'],
+    rd: ['r&d', 'research', '研究開発'],
+    depreciation: ['depreciation', '減価償却'],
+    currency: ['currency', '通貨'],
+  };
+  const map = {};
+  for (const h of headers) {
+    const lower = String(h).toLowerCase();
+    for (const [field, kws] of Object.entries(hints)) {
+      if (kws.some(k => lower.includes(k))) { map[h] = field; break; }
+    }
+  }
+  return map;
+}
+
+/* --- i18n: tiny built-in dictionary; expand alongside the UI. --- */
+const I18N = {
+  ja: {
+    'app.title': 'TP Bench - 移転価格ベンチマーク',
+    'splash.new': '新規プロジェクト',
+    'splash.open': '既存プロジェクトを開く',
+    'splash.sample': 'サンプルで試す',
+  },
+  en: {
+    'app.title': 'TP Bench - Transfer Pricing Benchmarking',
+    'splash.new': 'New project',
+    'splash.open': 'Open existing project',
+    'splash.sample': 'Try with sample data',
+  },
+};
+function t(key, lang) { return (I18N[lang] && I18N[lang][key]) || (I18N.ja[key] || key); }
+</script>
+
+<!-- =====================================================================
+  SCRIPT BLOCK 5 / 8 : Sample data generator
+  Deterministic-ish synthetic companies used for the "Try with sample
+  data" splash entry. 30 manufacturing + 30 service.
+===================================================================== -->
+<script id="sample-data">
+/** Seeded pseudo-random so sample data is stable across runs in a session. */
+function makeRng(seed) {
+  let s = seed | 0;
+  return () => { s = (s * 1664525 + 1013904223) | 0; return ((s >>> 0) % 100000) / 100000; };
+}
+
+/**
+ * Build the synthetic comparable-set used by the sample project.
+ * @returns {Company[]}
+ */
+function generateSampleCompanies() {
+  const rng = makeRng(20260514);
+  const countries = ['JP', 'US', 'DE', 'GB', 'CN', 'KR', 'SG', 'IN', 'NL', 'FR'];
+  const mfgIndustries = ['334413', '336111', '333120', '325211', '332710'];
+  const svcIndustries = ['541611', '541512', '561499', '541330', '541219'];
+  const currencies = ['JPY', 'USD', 'EUR', 'GBP', 'CNY', 'KRW', 'SGD', 'INR'];
+  const sectors = [
+    { kind: 'manufacturing', prefix: 'Mfg', industries: mfgIndustries, count: 30 },
+    { kind: 'service',       prefix: 'Svc', industries: svcIndustries, count: 30 },
+  ];
+  /** @type {Company[]} */
+  const list = [];
+  for (const s of sectors) {
+    for (let i = 1; i <= s.count; i++) {
+      const country = countries[Math.floor(rng() * countries.length)];
+      const currency = currencies[Math.floor(rng() * currencies.length)];
+      const baseRevenue = Math.round(1_000_000 * (50 + rng() * 950));
+      const opMargin = -0.05 + rng() * 0.20;
+      const years = [2022, 2023, 2024];
+      const financials = years.map(y => {
+        const growth = 1 + (-0.05 + rng() * 0.15);
+        const rev = Math.round(baseRevenue * Math.pow(growth, y - 2022));
+        const op  = Math.round(rev * opMargin);
+        const ta  = Math.round(rev * (0.4 + rng() * 0.8));
+        return {
+          year: y, revenue: rev, operatingProfit: op,
+          totalAssets: ta,
+          fixedAssets: Math.round(ta * (0.3 + rng() * 0.4)),
+          inventory:   Math.round(rev * (0.05 + rng() * 0.15)),
+          receivables: Math.round(rev * (0.08 + rng() * 0.12)),
+          payables:    Math.round(rev * (0.05 + rng() * 0.10)),
+          cogs:        Math.round(rev * (0.45 + rng() * 0.30)),
+          sga:         Math.round(rev * (0.10 + rng() * 0.15)),
+          rd:          Math.round(rev * (0.00 + rng() * 0.05)),
+          depreciation:Math.round(ta * 0.05),
+          currency,
+        };
+      });
+      list.push({
+        id: uuid(),
+        name: `${s.prefix} Comparable ${String(i).padStart(2, '0')}`,
+        country,
+        industryCode: s.industries[Math.floor(rng() * s.industries.length)],
+        industryCodeSystem: 'NAICS',
+        isListed: rng() > 0.4,
+        independenceData: {
+          largestShareholderPct: Math.round(15 + rng() * 70),
+          parentCompany: rng() > 0.7 ? `Parent Holdings ${Math.floor(rng() * 50)}` : null,
+          hasRelatedPartyTx: rng() > 0.5,
+        },
+        financials,
+        farProfile: {
+          functions: s.kind === 'manufacturing'
+            ? ['manufacturing', 'quality control']
+            : ['consulting', 'project delivery'],
+          assets: s.kind === 'manufacturing'
+            ? ['production equipment', 'inventory']
+            : ['human capital', 'know-how'],
+          risks: ['inventory', 'currency', 'market'].filter(() => rng() > 0.3),
+        },
+        businessDescription: s.kind === 'manufacturing'
+          ? 'Manufactures and sells industrial components to OEM customers.'
+          : 'Provides professional services on a time-and-materials basis.',
+        sourceInfo: { kind: 'sample', importedAt: Date.now() },
+        sector: s.kind,
+        tags: ['sample'],
+      });
+    }
+  }
+  return list;
+}
+</script>
+
+<!-- =====================================================================
+  SCRIPT BLOCK 6 / 8 : Rules engine stub (PHASE 2 EXTENSION POINT)
+  ---------------------------------------------------------------------
+  Everything below is intentionally a no-op or a stub. Phase 2 will:
+    1. Populate `db.jurisdictionRules` with rule packages keyed by
+       jurisdiction + version.
+    2. Replace `ruleEngine.loadFor(...)` so it returns a merged ruleset
+       for the project's selected jurisdictions.
+    3. Implement `applyTo*` adapters which inject jurisdiction-specific
+       behaviour into the corresponding screen (mapping, screening,
+       scoring, reporting).
+  Each screen below already calls `ruleEngine.applyTo*(...)`; in Phase 1
+  these calls just return the input unchanged, so wiring the real engine
+  becomes a localised change with no screen-level refactors.
+===================================================================== -->
+<script id="rules-engine">
+const ruleEngine = {
+  /**
+   * Return the merged ruleset for a set of jurisdictions.
+   * Phase 1: returns an empty placeholder ruleset.
+   * @param {string[]} jurisdictionCodes
+   * @returns {Promise<JurisdictionRule|null>}
+   */
+  async loadFor(jurisdictionCodes) {
+    // TODO(Phase 2): merge db.jurisdictionRules where jurisdiction in codes,
+    // resolving version conflicts and producing a single computed ruleset.
+    return null;
+  },
+
+  /**
+   * Phase 2 hook: suggest a column mapping using region-specific
+   * column-name dictionaries. Phase 1 returns the heuristic mapping.
+   * @param {string[]} headers
+   * @param {JurisdictionRule|null} rules
+   * @returns {Object<string,string>}
+   */
+  suggestMapping(headers, rules) {
+    // TODO(Phase 2): if rules?.columnDictionary, override autoSuggestMapping.
+    return autoSuggestMapping(headers);
+  },
+
+  /**
+   * Phase 2 hook: filter the available screening conditions based on
+   * jurisdiction. Phase 1: returns the input list unchanged.
+   * @param {Object[]} conditions
+   * @param {JurisdictionRule|null} rules
+   */
+  applyToScreening(conditions, rules) {
+    // TODO(Phase 2): inject mandatory conditions (e.g. independence
+    // threshold for JP, related-party tx for US).
+    return conditions;
+  },
+
+  /**
+   * Phase 2 hook: choose the default PLI per jurisdiction.
+   * @param {ScoringConfig} cfg
+   * @param {JurisdictionRule|null} rules
+   * @returns {ScoringConfig}
+   */
+  applyToScoring(cfg, rules) {
+    // TODO(Phase 2): set cfg.pli based on jurisdiction default and add
+    // mandatory acceptance ranges.
+    return cfg;
+  },
+
+  /**
+   * Phase 2 hook: enumerate mandatory sections for the final report.
+   * @param {JurisdictionRule|null} rules
+   * @returns {string[]}
+   */
+  applyToReport(rules) {
+    // TODO(Phase 2): return ordered mandatory section keys.
+    return [];
+  },
+};
+</script>
+
+<!-- =====================================================================
+  SCRIPT BLOCK 7 / 8 : Main Alpine.js application
+===================================================================== -->
+<script id="app">
+/**
+ * Root Alpine.js component. All UI state lives here; methods are
+ * deliberately short so each screen's logic is easy to locate.
+ * @returns {Object}
+ */
+function tpApp() {
+  return {
+    /* ---------------- core state ---------------- */
+    booted: false,
+    lang: 'ja',
+    currentView: 'splash',
+    currentProject: /** @type {Project|null} */ (null),
+    projects: /** @type {Project[]} */ ([]),
+    sidebarItems: [
+      { id: 'project',    labelJa: 'プロジェクト',          labelEn: 'Project' },
+      { id: 'dataInput',  labelJa: 'データ入力',            labelEn: 'Data Input' },
+      { id: 'rules',      labelJa: '法域・ルール設定',      labelEn: 'Jurisdiction Rules' },
+      { id: 'screening',  labelJa: 'スクリーニング',        labelEn: 'Screening' },
+      { id: 'scoring',    labelJa: 'スコア & PLI',         labelEn: 'Score & PLI' },
+      { id: 'results',    labelJa: '結果',                  labelEn: 'Results' },
+      { id: 'reports',    labelJa: 'レポート出力',          labelEn: 'Reports' },
+      { id: 'settings',   labelJa: '設定',                  labelEn: 'Settings' },
+    ],
+
+    /* ---------------- toasts + modals + drawer ---------------- */
+    toasts: [],
+    modal: { open: false, title: '', body: '', kind: 'info', onConfirm: null },
+    drawer: { open: false, title: '', component: null, data: null },
+
+    /** Push a toast message. Auto-dismisses after `ttl` ms. */
+    toast(message, type = 'info', ttl = 4000) {
+      const id = uuid();
+      this.toasts.push({ id, message, type });
+      setTimeout(() => { this.toasts = this.toasts.filter(t => t.id !== id); }, ttl);
+    },
+    toastClass(type) {
+      return {
+        success: 'bg-emerald-600 text-white',
+        error:   'bg-rose-600   text-white',
+        warning: 'bg-amber-500  text-white',
+        info:    'bg-slate-700  text-white',
+      }[type] || 'bg-slate-700 text-white';
+    },
+    openModal(opts) { this.modal = { open: true, kind: 'info', ...opts }; },
+    closeModal() { this.modal.open = false; this.modal.onConfirm = null; },
+    openDrawer(opts) { this.drawer = { open: true, ...opts }; },
+    closeDrawer() { this.drawer.open = false; },
+
+    /* ---------------- bootstrap ---------------- */
+    async init() {
+      try {
+        await db.open();
+        this.lang = await getSetting('lang', 'ja');
+        this.aiProviders = await getSetting('aiProviders', this.defaultAiProviders());
+        this.apiProviders = await getSetting('apiProviders', []);
+        this.fxData = await getSetting('fxData', { base: 'JPY', rates: { USD: 0.0067, EUR: 0.0061 }, asOf: new Date().toISOString().slice(0, 10), source: 'manual' });
+        this.industryCodePriority = await getSetting('industryCodePriority', ['NAICS', 'NACE', 'JSIC', 'ISIC']);
+        this.mappingPresets = await db.mappingPresets.toArray();
+        await this.refreshProjects();
+        this.booted = true;
+        await logAudit('app.boot', { version: APP_VERSION });
+      } catch (e) {
+        console.error(e);
+        this.toast('起動に失敗しました: ' + e.message, 'error');
+      }
+    },
+
+    /* ---------------- navigation ---------------- */
+    navigate(id) {
+      if (!this.currentProject && id !== 'settings') {
+        this.toast('先にプロジェクトを作成または読み込んでください', 'warning');
+        return;
+      }
+      this.currentView = id;
+      logAudit('nav.change', { view: id }, this.currentProject?.id);
+    },
+    labelOf(item) { return this.lang === 'en' ? item.labelEn : item.labelJa; },
+
+    /* ---------------- splash actions ---------------- */
+    newProjectDraft: { name: '', testedPartyName: '', jurisdictions: [] },
+    showNewProjectForm: false,
+    async refreshProjects() {
+      this.projects = await db.projects.orderBy('updatedAt').reverse().toArray();
+    },
+
+    /** Create a brand-new project with a tested-party stub Company. */
+    async createProject() {
+      const d = this.newProjectDraft;
+      if (!d.name.trim()) { this.toast('プロジェクト名を入力してください', 'warning'); return; }
+      if (!d.testedPartyName.trim()) { this.toast('検証対象企業名を入力してください', 'warning'); return; }
+      if (!d.jurisdictions.length) { this.toast('税務管轄を1つ以上選択してください', 'warning'); return; }
+      try {
+        const testedParty = this.makeBlankCompany({ name: d.testedPartyName, sector: 'other' });
+        await db.companies.put(testedParty);
+        /** @type {Project} */
+        const project = {
+          id: uuid(),
+          name: d.name.trim(),
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          targetJurisdiction: [...d.jurisdictions],
+          testedPartyId: testedParty.id,
+          comparables: [],
+          excludedCompanies: [],
+          screeningHistory: [],
+          scoringConfig: { pli: 'OM', weights: {}, pliFormula: {} },
+          fxData: this.fxData,
+          settings: { language: this.lang, industryCodePriority: this.industryCodePriority },
+          notes: '',
+        };
+        await db.projects.put(project);
+        await logAudit('project.create', { projectId: project.id }, project.id);
+        this.currentProject = project;
+        this.newProjectDraft = { name: '', testedPartyName: '', jurisdictions: [] };
+        this.showNewProjectForm = false;
+        this.currentView = 'project';
+        await this.refreshProjects();
+        this.toast('プロジェクトを作成しました', 'success');
+      } catch (e) {
+        console.error(e);
+        this.toast('作成に失敗しました: ' + e.message, 'error');
+      }
+    },
+
+    async openProject(id) {
+      const p = await db.projects.get(id);
+      if (!p) { this.toast('プロジェクトが見つかりません', 'error'); return; }
+      this.currentProject = p;
+      this.currentView = 'project';
+      await logAudit('project.open', { projectId: id }, id);
+    },
+
+    async loadSampleProject() {
+      try {
+        const companies = generateSampleCompanies();
+        await db.companies.bulkPut(companies);
+        const tested = this.makeBlankCompany({
+          name: 'Tested Party (Sample)',
+          sector: 'manufacturing',
+          businessDescription: 'Sample tested party for demo purposes.',
+        });
+        await db.companies.put(tested);
+        /** @type {Project} */
+        const project = {
+          id: uuid(),
+          name: 'サンプルプロジェクト ' + new Date().toISOString().slice(0, 10),
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+          targetJurisdiction: ['JP'],
+          testedPartyId: tested.id,
+          comparables: companies.map(c => c.id),
+          excludedCompanies: [],
+          screeningHistory: [],
+          scoringConfig: { pli: 'OM', weights: {}, pliFormula: {} },
+          fxData: this.fxData,
+          settings: { language: this.lang, industryCodePriority: this.industryCodePriority },
+          notes: 'Auto-generated sample.',
+        };
+        await db.projects.put(project);
+        this.currentProject = project;
+        this.currentView = 'project';
+        await logAudit('project.sample', { projectId: project.id, companyCount: companies.length }, project.id);
+        await this.refreshProjects();
+        this.toast(`サンプル ${companies.length} 社を読み込みました`, 'success');
+      } catch (e) {
+        console.error(e);
+        this.toast('サンプル読込に失敗しました: ' + e.message, 'error');
+      }
+    },
+
+    /** Build an empty Company record with required defaults filled in. */
+    makeBlankCompany(overrides = {}) {
+      return {
+        id: uuid(),
+        name: '',
+        country: 'JP',
+        industryCode: '',
+        industryCodeSystem: 'NAICS',
+        isListed: false,
+        independenceData: { largestShareholderPct: 0, parentCompany: null, hasRelatedPartyTx: false },
+        financials: [],
+        farProfile: { functions: [], assets: [], risks: [] },
+        businessDescription: '',
+        sourceInfo: { kind: 'manual', importedAt: Date.now() },
+        sector: 'other',
+        tags: [],
+        ...overrides,
+      };
+    },
+
+    async saveProject() {
+      if (!this.currentProject) return;
+      this.currentProject.updatedAt = Date.now();
+      await db.projects.put(JSON.parse(JSON.stringify(this.currentProject)));
+      await logAudit('project.save', { projectId: this.currentProject.id }, this.currentProject.id);
+      this.toast('保存しました', 'success', 2000);
+    },
+
+    async deleteProject(id) {
+      this.openModal({
+        title: '削除確認',
+        body: 'このプロジェクトを削除しますか？関連する企業データは残ります。',
+        onConfirm: async () => {
+          await db.projects.delete(id);
+          await logAudit('project.delete', { projectId: id });
+          if (this.currentProject?.id === id) { this.currentProject = null; this.currentView = 'splash'; }
+          await this.refreshProjects();
+          this.toast('削除しました', 'success');
+          this.closeModal();
+        },
+      });
+    },
+
+    async exportCurrent() {
+      if (!this.currentProject) return;
+      const blob = await exportProjectJson(this.currentProject.id);
+      downloadBlob(blob, `${this.currentProject.name}.tpbench.json`);
+      await logAudit('project.export', { projectId: this.currentProject.id }, this.currentProject.id);
+    },
+
+    async importFromPicker(ev) {
+      const file = ev.target.files?.[0];
+      if (!file) return;
+      try {
+        const text = await readFileAsText(file);
+        const payload = JSON.parse(text);
+        const id = await importProjectJson(payload);
+        await this.refreshProjects();
+        this.toast('インポートしました', 'success');
+        await this.openProject(id);
+      } catch (e) {
+        this.toast('インポート失敗: ' + e.message, 'error');
+      } finally {
+        ev.target.value = '';
+      }
+    },
+
+    /* ---------------- data input ---------------- */
+    dataInputTab: 'file',
+    dz: { active: false },
+    fileImport: {
+      file: null,
+      headers: [],
+      rows: [],
+      mapping: {},
+      presetName: '',
+      preview: [],
+    },
+    async onDropFiles(ev) {
+      this.dz.active = false;
+      const files = ev.dataTransfer?.files;
+      if (files && files.length) await this.handleImportFile(files[0]);
+    },
+    async onPickFile(ev) {
+      const f = ev.target.files?.[0]; if (!f) return;
+      await this.handleImportFile(f); ev.target.value = '';
+    },
+    async handleImportFile(file) {
+      try {
+        const parsed = await parseTabularFile(file);
+        this.fileImport.file = file;
+        this.fileImport.headers = parsed.headers;
+        this.fileImport.rows = parsed.rows;
+        const rules = await ruleEngine.loadFor(this.currentProject?.targetJurisdiction || []);
+        this.fileImport.mapping = ruleEngine.suggestMapping(parsed.headers, rules);
+        this.fileImport.preview = parsed.rows.slice(0, 5);
+        this.toast(`${parsed.rows.length} 行を読み込みました`, 'success');
+      } catch (e) {
+        this.toast('ファイル読込失敗: ' + e.message, 'error');
+      }
+    },
+    async commitImportedFile() {
+      if (!this.fileImport.rows.length) { this.toast('ファイルを先に読み込んでください', 'warning'); return; }
+      const mapped = applyMapping(this.fileImport.rows, this.fileImport.mapping);
+      const byName = new Map();
+      for (const r of mapped) {
+        const key = (r.name || '').trim();
+        if (!key) continue;
+        if (!byName.has(key)) byName.set(key, this.makeBlankCompany({ name: key }));
+        const c = byName.get(key);
+        if (r.country) c.country = String(r.country).slice(0, 2).toUpperCase();
+        if (r.industryCode) c.industryCode = String(r.industryCode);
+        if (r.industryCodeSystem) c.industryCodeSystem = String(r.industryCodeSystem);
+        if (r.businessDescription) c.businessDescription = String(r.businessDescription);
+        if (r.isListed !== undefined && r.isListed !== '') c.isListed = /^(true|1|yes|y|上場)$/i.test(String(r.isListed));
+        if (r.parentCompany !== undefined) c.independenceData.parentCompany = r.parentCompany || null;
+        if (r.largestShareholderPct !== undefined && r.largestShareholderPct !== '') c.independenceData.largestShareholderPct = Number(r.largestShareholderPct) || 0;
+        if (r.year) {
+          c.financials.push({
+            year: Number(r.year),
+            revenue: Number(r.revenue) || 0,
+            operatingProfit: Number(r.operatingProfit) || 0,
+            totalAssets: Number(r.totalAssets) || 0,
+            fixedAssets: Number(r.fixedAssets) || 0,
+            inventory: Number(r.inventory) || 0,
+            receivables: Number(r.receivables) || 0,
+            payables: Number(r.payables) || 0,
+            cogs: Number(r.cogs) || 0,
+            sga: Number(r.sga) || 0,
+            rd: Number(r.rd) || 0,
+            depreciation: Number(r.depreciation) || 0,
+            currency: String(r.currency || 'JPY'),
+          });
+        }
+        c.sourceInfo = { kind: 'file', filename: this.fileImport.file?.name, importedAt: Date.now() };
+      }
+      const companies = [...byName.values()];
+      await db.companies.bulkPut(companies);
+      if (this.currentProject) {
+        const ids = companies.map(c => c.id);
+        this.currentProject.comparables = [...new Set([...(this.currentProject.comparables || []), ...ids])];
+        await this.saveProject();
+      }
+      await logAudit('import.file', { count: companies.length, file: this.fileImport.file?.name }, this.currentProject?.id);
+      this.toast(`${companies.length} 社を取り込みました`, 'success');
+      this.fileImport = { file: null, headers: [], rows: [], mapping: {}, presetName: '', preview: [] };
+    },
+    async savePreset() {
+      const name = (this.fileImport.presetName || '').trim();
+      if (!name) { this.toast('プリセット名を入力してください', 'warning'); return; }
+      const preset = { id: uuid(), name, mapping: { ...this.fileImport.mapping }, createdAt: Date.now() };
+      await db.mappingPresets.put(preset);
+      this.mappingPresets = await db.mappingPresets.toArray();
+      this.toast('プリセットを保存しました', 'success');
+    },
+    applyPreset(id) {
+      const p = this.mappingPresets.find(p => p.id === id);
+      if (!p) return;
+      this.fileImport.mapping = { ...p.mapping };
+      this.toast(`プリセット "${p.name}" を適用`, 'success');
+    },
+
+    /* ---------------- API connector ---------------- */
+    apiProviders: /** @type {ApiProvider[]} */ ([]),
+    apiDraft: /** @type {ApiProvider} */ ({ id: '', name: '', endpoint: '', authKind: 'apiKey', apiKey: '', username: '', password: '', notes: '' }),
+    apiQuery: { industryCode: '', country: '', minRevenue: '', maxRevenue: '' },
+    apiResults: [],
+    async saveApiProvider() {
+      const d = this.apiDraft;
+      if (!d.name || !d.endpoint) { this.toast('名称とエンドポイントは必須です', 'warning'); return; }
+      d.id = d.id || uuid();
+      const next = [...this.apiProviders.filter(p => p.id !== d.id), { ...d }];
+      this.apiProviders = next;
+      await putSetting('apiProviders', next);
+      await logAudit('api.providerSave', { providerId: d.id });
+      this.apiDraft = { id: '', name: '', endpoint: '', authKind: 'apiKey', apiKey: '', username: '', password: '', notes: '' };
+      this.toast('API設定を保存しました', 'success');
+    },
+    async deleteApiProvider(id) {
+      this.apiProviders = this.apiProviders.filter(p => p.id !== id);
+      await putSetting('apiProviders', this.apiProviders);
+    },
+    editApiProvider(id) {
+      const p = this.apiProviders.find(p => p.id === id);
+      if (p) this.apiDraft = { ...p };
+    },
+    /**
+     * Smoke-test an API endpoint. Most enterprise company DBs do not
+     * allow browser CORS so we surface a helpful fallback message when
+     * the fetch is blocked by the browser.
+     */
+    async testApiConnection(id) {
+      const p = this.apiProviders.find(p => p.id === id);
+      if (!p) return;
+      try {
+        const headers = { 'Accept': 'application/json' };
+        if (p.authKind === 'apiKey' && p.apiKey) headers['X-API-Key'] = p.apiKey;
+        if (p.authKind === 'bearer' && p.apiKey) headers['Authorization'] = 'Bearer ' + p.apiKey;
+        if (p.authKind === 'basic' && p.username) headers['Authorization'] = 'Basic ' + btoa(`${p.username}:${p.password || ''}`);
+        const res = await fetch(p.endpoint, { method: 'GET', headers, mode: 'cors' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        this.toast('接続に成功しました', 'success');
+      } catch (e) {
+        this.openModal({
+          title: '接続に失敗しました',
+          body: `エラー: ${e.message}\n\n` +
+                `多くの企業データベースAPIはブラウザからの直接アクセス（CORS）を許可していません。\n` +
+                `その場合は「ファイル経由でインポート」してください（データ入力 > ファイルインポート）。`,
+          kind: 'warning',
+        });
+      }
+    },
+    /** Phase 2+ will branch on provider.kind and parse response shape. */
+    async runApiSearch(id) {
+      const p = this.apiProviders.find(p => p.id === id);
+      if (!p) return;
+      this.toast('Phase 1 では実呼出しはスタブです。CORS可能なエンドポイントでのみ動作します', 'info');
+      this.apiResults = [];
+    },
+
+    /* ---------------- manual entry ---------------- */
+    manualDraft: null,
+    pastedText: '',
+    pastedCsv: '',
+    startManualEntry() { this.manualDraft = this.makeBlankCompany({}); },
+    async commitManualEntry() {
+      const c = this.manualDraft;
+      if (!c?.name?.trim()) { this.toast('企業名は必須です', 'warning'); return; }
+      await db.companies.put(c);
+      if (this.currentProject) {
+        this.currentProject.comparables = [...new Set([...(this.currentProject.comparables || []), c.id])];
+        await this.saveProject();
+      }
+      await logAudit('import.manual', { companyId: c.id }, this.currentProject?.id);
+      this.toast(`${c.name} を追加しました`, 'success');
+      this.manualDraft = null;
+    },
+    async commitPastedCsv() {
+      if (!this.pastedCsv.trim()) { this.toast('CSVを貼り付けてください', 'warning'); return; }
+      const parsed = Papa.parse(this.pastedCsv, { header: true, skipEmptyLines: true });
+      this.fileImport.headers = parsed.meta.fields || [];
+      this.fileImport.rows = parsed.data;
+      const rules = await ruleEngine.loadFor(this.currentProject?.targetJurisdiction || []);
+      this.fileImport.mapping = ruleEngine.suggestMapping(this.fileImport.headers, rules);
+      this.dataInputTab = 'file';
+      this.toast(`${parsed.data.length} 行をマッピング画面に送りました`, 'success');
+    },
+
+    /* ---------------- settings ---------------- */
+    aiProviders: /** @type {AiProvider[]} */ ([]),
+    fxData: /** @type {FxData} */ ({ base: 'JPY', rates: {}, asOf: '', source: 'manual' }),
+    fxApiUrl: '',
+    fxCsvText: '',
+    industryCodePriority: ['NAICS', 'NACE', 'JSIC', 'ISIC'],
+    featureProviderAssignment: {},
+    defaultAiProviders() {
+      return AI_PROVIDERS.map(k => ({ kind: k, apiKey: '', model: '', endpoint: '', enabled: false }));
+    },
+    async saveAiProviders() {
+      await putSetting('aiProviders', this.aiProviders);
+      await putSetting('aiFeatureAssignment', this.featureProviderAssignment);
+      await logAudit('settings.aiSave');
+      this.toast('AI設定を保存しました', 'success');
+    },
+    async saveFxManual() {
+      this.fxData.source = 'manual';
+      this.fxData.asOf = this.fxData.asOf || new Date().toISOString().slice(0, 10);
+      await putSetting('fxData', this.fxData);
+      await logAudit('settings.fxManual');
+      this.toast('為替レートを保存しました', 'success');
+    },
+    async importFxCsv() {
+      if (!this.fxCsvText.trim()) return;
+      try {
+        const out = Papa.parse(this.fxCsvText, { header: true, skipEmptyLines: true });
+        const rates = {};
+        for (const row of out.data) {
+          if (row.currency && row.rate) rates[String(row.currency).toUpperCase()] = Number(row.rate);
+        }
+        this.fxData = { base: this.fxData.base || 'JPY', rates, asOf: new Date().toISOString().slice(0, 10), source: 'csv' };
+        await putSetting('fxData', this.fxData);
+        this.toast(`${Object.keys(rates).length} 通貨を読み込みました`, 'success');
+      } catch (e) {
+        this.toast('CSV解析失敗: ' + e.message, 'error');
+      }
+    },
+    async saveLanguage() {
+      await putSetting('lang', this.lang);
+      await logAudit('settings.language', { lang: this.lang });
+    },
+    async saveIndustryCodePriority() {
+      await putSetting('industryCodePriority', this.industryCodePriority);
+      await logAudit('settings.industryCodePriority', { priority: this.industryCodePriority });
+      this.toast('業種コード優先順位を保存しました', 'success');
+    },
+    moveIndustryCode(code, dir) {
+      const arr = [...this.industryCodePriority];
+      const i = arr.indexOf(code);
+      const j = i + dir;
+      if (i < 0 || j < 0 || j >= arr.length) return;
+      [arr[i], arr[j]] = [arr[j], arr[i]];
+      this.industryCodePriority = arr;
+    },
+
+    /* ---------------- audit log viewer ---------------- */
+    auditLogEntries: [],
+    async openAuditLog() {
+      this.auditLogEntries = await db.auditLog.orderBy('ts').reverse().limit(200).toArray();
+      this.openDrawer({ title: '監査ログ', component: 'audit', data: null });
+    },
+
+    /* ---------------- companies tab helpers ---------------- */
+    companies: [],
+    async refreshCompanies() {
+      if (!this.currentProject) { this.companies = []; return; }
+      const ids = [...(this.currentProject.comparables || []),
+                   ...(this.currentProject.excludedCompanies || []),
+                   this.currentProject.testedPartyId].filter(Boolean);
+      const all = await db.companies.bulkGet(ids);
+      this.companies = all.filter(Boolean);
+    },
+
+    /* ---------------- derived helpers ---------------- */
+    jurisdictionLabel(code) {
+      const j = JURISDICTIONS.find(x => x.code === code);
+      return j ? (this.lang === 'en' ? j.nameEn : j.nameJa) : code;
+    },
+  };
+}
+</script>
+
+<!-- =====================================================================
+  SCRIPT BLOCK 8 / 8 : Self-test (Phase 1 acceptance harness)
+  Run from the Settings screen. Verifies IndexedDB CRUD and file parsing.
+===================================================================== -->
+<script id="self-test">
+/**
+ * Phase 1 self-test. Returns an array of pass/fail records suitable for
+ * rendering inline. Catches and reports its own errors per check.
+ * @returns {Promise<{name:string, ok:boolean, detail?:string}[]>}
+ */
+async function runSelfTest() {
+  const out = [];
+  const check = async (name, fn) => {
+    try { await fn(); out.push({ name, ok: true }); }
+    catch (e) { out.push({ name, ok: false, detail: e.message }); }
+  };
+
+  await check('IndexedDB open', async () => {
+    if (!db.isOpen()) await db.open();
+  });
+
+  const tmpId = 'selftest-' + uuid();
+  await check('projects.put', async () => {
+    await db.projects.put({
+      id: tmpId, name: 'self-test', createdAt: Date.now(), updatedAt: Date.now(),
+      targetJurisdiction: ['JP'], testedPartyId: null, comparables: [],
+      excludedCompanies: [], screeningHistory: [], scoringConfig: {}, fxData: {}, settings: {}, notes: '',
+    });
+  });
+  await check('projects.get', async () => {
+    const r = await db.projects.get(tmpId);
+    if (!r || r.name !== 'self-test') throw new Error('readback mismatch');
+  });
+  await check('projects.delete', async () => {
+    await db.projects.delete(tmpId);
+    const r = await db.projects.get(tmpId);
+    if (r) throw new Error('still present');
+  });
+
+  await check('auditLog.add', async () => { await logAudit('selftest.audit', { ok: true }); });
+
+  await check('CSV parse', async () => {
+    const blob = new Blob(['name,country\nFoo,US\nBar,JP'], { type: 'text/csv' });
+    const file = new File([blob], 'test.csv', { type: 'text/csv' });
+    const r = await parseTabularFile(file);
+    if (r.rows.length !== 2) throw new Error('row count');
+  });
+
+  await check('JSON parse', async () => {
+    const blob = new Blob([JSON.stringify([{ name: 'A' }, { name: 'B' }])], { type: 'application/json' });
+    const file = new File([blob], 'test.json');
+    const r = await parseTabularFile(file);
+    if (r.rows.length !== 2) throw new Error('row count');
+  });
+
+  await check('sample generator', async () => {
+    const cs = generateSampleCompanies();
+    if (cs.length !== 60) throw new Error('expected 60 companies, got ' + cs.length);
+  });
+
+  await check('auto mapping heuristics', async () => {
+    const m = autoSuggestMapping(['Company Name', '売上高', 'Country']);
+    if (m['Company Name'] !== 'name' || m['売上高'] !== 'revenue') throw new Error('mapping miss');
+  });
+
+  return out;
+}
+</script>
+
+
+<!-- =====================================================================
+  ROOT TEMPLATE
+===================================================================== -->
+<div x-data="tpApp()" x-init="init()" x-cloak class="h-screen flex flex-col">
+
+  <!-- =================== Toast container =================== -->
+  <div class="fixed top-4 right-4 z-50 space-y-2 w-80">
+    <template x-for="t in toasts" :key="t.id">
+      <div class="px-4 py-3 rounded shadow-lg text-sm whitespace-pre-wrap"
+           :class="toastClass(t.type)" x-text="t.message"></div>
+    </template>
+  </div>
+
+  <!-- =================== Modal =================== -->
+  <div x-show="modal.open" class="fixed inset-0 z-40 bg-black/40 flex items-center justify-center p-4" @keydown.escape.window="closeModal()">
+    <div class="bg-white rounded-lg shadow-xl max-w-lg w-full">
+      <div class="px-5 py-3 border-b flex items-center justify-between">
+        <h3 class="font-semibold" x-text="modal.title"></h3>
+        <button class="text-slate-500 hover:text-slate-800" @click="closeModal()">&times;</button>
+      </div>
+      <div class="p-5 text-sm whitespace-pre-wrap" x-text="modal.body"></div>
+      <div class="px-5 py-3 border-t flex justify-end gap-2">
+        <button class="px-3 py-1.5 rounded border" @click="closeModal()">閉じる</button>
+        <template x-if="modal.onConfirm">
+          <button class="px-3 py-1.5 rounded bg-rose-600 text-white" @click="modal.onConfirm()">実行</button>
+        </template>
+      </div>
+    </div>
+  </div>
+
+  <!-- =================== Drawer =================== -->
+  <div x-show="drawer.open" class="fixed inset-0 z-30 flex" @keydown.escape.window="closeDrawer()">
+    <div class="flex-1 bg-black/30" @click="closeDrawer()"></div>
+    <aside class="w-[480px] bg-white shadow-2xl flex flex-col">
+      <div class="px-5 py-3 border-b flex items-center justify-between">
+        <h3 class="font-semibold" x-text="drawer.title"></h3>
+        <button class="text-slate-500 hover:text-slate-800" @click="closeDrawer()">&times;</button>
+      </div>
+      <div class="flex-1 overflow-auto p-5 text-sm">
+        <!-- Audit log drawer content -->
+        <template x-if="drawer.component === 'audit'">
+          <div>
+            <table class="w-full text-xs">
+              <thead><tr class="text-left text-slate-500"><th class="py-1">日時</th><th>アクション</th><th>詳細</th></tr></thead>
+              <tbody>
+                <template x-for="e in auditLogEntries" :key="e.id">
+                  <tr class="border-t">
+                    <td class="py-1 align-top" x-text="new Date(e.ts).toLocaleString()"></td>
+                    <td class="align-top font-mono" x-text="e.action"></td>
+                    <td class="align-top text-slate-600" x-text="JSON.stringify(e.payload || {})"></td>
+                  </tr>
+                </template>
+              </tbody>
+            </table>
+          </div>
+        </template>
+      </div>
+    </aside>
+  </div>
+
+  <!-- =================== Splash =================== -->
+  <div x-show="currentView === 'splash'" class="flex-1 flex items-center justify-center bg-gradient-to-br from-slate-100 to-slate-200">
+    <div class="w-full max-w-3xl p-8">
+      <h1 class="text-3xl font-bold text-slate-800 mb-2" x-text="t('app.title', lang)"></h1>
+      <p class="text-slate-500 mb-8">Phase 1 - 基盤版</p>
+
+      <!-- Action cards -->
+      <div x-show="!showNewProjectForm" class="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <button @click="showNewProjectForm = true"
+                class="p-6 bg-white rounded-lg shadow hover:shadow-md text-left border border-transparent hover:border-blue-500 transition">
+          <div class="font-semibold text-lg mb-1" x-text="t('splash.new', lang)"></div>
+          <div class="text-sm text-slate-500">プロジェクト名・対象企業・税務管轄を入力して開始</div>
+        </button>
+        <label class="p-6 bg-white rounded-lg shadow hover:shadow-md text-left border border-transparent hover:border-blue-500 transition cursor-pointer">
+          <div class="font-semibold text-lg mb-1" x-text="t('splash.open', lang)"></div>
+          <div class="text-sm text-slate-500">バックアップJSONを読み込む</div>
+          <input type="file" accept="application/json" class="hidden" @change="importFromPicker($event)">
+        </label>
+        <button @click="loadSampleProject()"
+                class="p-6 bg-white rounded-lg shadow hover:shadow-md text-left border border-transparent hover:border-blue-500 transition">
+          <div class="font-semibold text-lg mb-1" x-text="t('splash.sample', lang)"></div>
+          <div class="text-sm text-slate-500">製造業 30 社 + サービス業 30 社</div>
+        </button>
+      </div>
+
+      <!-- Recent project list -->
+      <div x-show="!showNewProjectForm && projects.length" class="mt-8">
+        <h2 class="text-sm font-semibold text-slate-600 mb-2">最近のプロジェクト</h2>
+        <div class="bg-white rounded-lg shadow divide-y">
+          <template x-for="p in projects.slice(0, 5)" :key="p.id">
+            <div class="p-3 flex items-center justify-between hover:bg-slate-50">
+              <div>
+                <div class="font-medium" x-text="p.name"></div>
+                <div class="text-xs text-slate-500">
+                  <span x-text="new Date(p.updatedAt).toLocaleString()"></span>
+                  &middot;
+                  <span x-text="(p.targetJurisdiction || []).join(', ')"></span>
+                </div>
+              </div>
+              <div class="flex gap-2">
+                <button class="text-sm px-3 py-1 rounded bg-blue-600 text-white" @click="openProject(p.id)">開く</button>
+                <button class="text-sm px-3 py-1 rounded border" @click="deleteProject(p.id)">削除</button>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
+
+      <!-- New-project form -->
+      <div x-show="showNewProjectForm" class="bg-white rounded-lg shadow p-6">
+        <h2 class="text-xl font-semibold mb-4">新規プロジェクト</h2>
+        <div class="space-y-4">
+          <div>
+            <label class="block text-sm font-medium mb-1">プロジェクト名</label>
+            <input type="text" x-model="newProjectDraft.name" class="w-full px-3 py-2 border rounded">
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-1">検証対象企業名</label>
+            <input type="text" x-model="newProjectDraft.testedPartyName" class="w-full px-3 py-2 border rounded">
+          </div>
+          <div>
+            <label class="block text-sm font-medium mb-1">報告対象税務管轄（複数選択可）</label>
+            <div class="grid grid-cols-3 md:grid-cols-4 gap-2 p-3 border rounded bg-slate-50 max-h-48 overflow-auto">
+              <template x-for="j in JURISDICTIONS" :key="j.code">
+                <label class="text-sm flex items-center gap-2">
+                  <input type="checkbox" :value="j.code" x-model="newProjectDraft.jurisdictions">
+                  <span><span class="font-mono text-xs" x-text="j.code"></span> <span x-text="lang === 'en' ? j.nameEn : j.nameJa"></span></span>
+                </label>
+              </template>
+            </div>
+          </div>
+          <div class="flex justify-end gap-2 pt-2">
+            <button class="px-4 py-2 rounded border" @click="showNewProjectForm = false">キャンセル</button>
+            <button class="px-4 py-2 rounded bg-blue-600 text-white" @click="createProject()">作成</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- =================== Main app shell =================== -->
+  <div x-show="currentView !== 'splash'" class="flex-1 flex overflow-hidden">
+
+    <!-- Sidebar -->
+    <aside class="w-60 bg-slate-800 text-slate-100 flex flex-col overflow-y-auto">
+      <div class="p-4 border-b border-slate-700">
+        <div class="font-bold text-lg">TP Bench</div>
+        <div class="text-xs text-slate-400" x-text="'v' + APP_VERSION"></div>
+      </div>
+      <nav class="flex-1 py-2">
+        <template x-for="item in sidebarItems" :key="item.id">
+          <button @click="navigate(item.id)"
+                  class="w-full text-left px-4 py-2 text-sm hover:bg-slate-700 transition flex items-center justify-between"
+                  :class="currentView === item.id ? 'bg-slate-900 border-l-4 border-blue-500' : ''">
+            <span x-text="labelOf(item)"></span>
+          </button>
+        </template>
+      </nav>
+      <div class="p-3 border-t border-slate-700 text-xs space-y-2">
+        <button class="w-full text-left text-slate-300 hover:text-white" @click="openAuditLog()">監査ログ</button>
+        <button class="w-full text-left text-slate-300 hover:text-white" @click="currentView = 'splash'">スプラッシュに戻る</button>
+      </div>
+    </aside>
+
+    <!-- Content -->
+    <main class="flex-1 overflow-auto">
+
+      <!-- Top bar -->
+      <header class="bg-white border-b px-6 py-3 flex items-center justify-between sticky top-0 z-10">
+        <div>
+          <div class="text-xs text-slate-500">現在のプロジェクト</div>
+          <div class="font-semibold" x-text="currentProject?.name || '(未選択)'"></div>
+        </div>
+        <div class="flex items-center gap-2 text-sm">
+          <template x-if="currentProject">
+            <div class="flex items-center gap-2">
+              <span class="text-slate-500">管轄:</span>
+              <template x-for="j in currentProject.targetJurisdiction" :key="j">
+                <span class="px-2 py-0.5 bg-slate-200 rounded text-xs" x-text="j"></span>
+              </template>
+              <button class="ml-2 px-3 py-1 border rounded" @click="saveProject()">保存</button>
+              <button class="px-3 py-1 border rounded" @click="exportCurrent()">エクスポート</button>
+            </div>
+          </template>
+        </div>
+      </header>
+
+      <!-- ============== Project view ============== -->
+      <section x-show="currentView === 'project'" class="p-6 space-y-6">
+        <template x-if="currentProject">
+          <div class="space-y-6">
+            <div class="bg-white rounded-lg shadow p-5">
+              <h2 class="font-semibold text-lg mb-3">プロジェクト概要</h2>
+              <div class="grid grid-cols-2 gap-4 text-sm">
+                <div><label class="block text-slate-500">名称</label><input type="text" x-model="currentProject.name" class="w-full px-3 py-2 border rounded"></div>
+                <div><label class="block text-slate-500">作成日時</label><div class="px-3 py-2 border rounded bg-slate-50" x-text="new Date(currentProject.createdAt).toLocaleString()"></div></div>
+                <div class="col-span-2">
+                  <label class="block text-slate-500 mb-1">税務管轄</label>
+                  <div class="flex flex-wrap gap-2 p-2 border rounded bg-slate-50">
+                    <template x-for="j in JURISDICTIONS" :key="j.code">
+                      <label class="text-xs flex items-center gap-1 px-2 py-1 bg-white border rounded">
+                        <input type="checkbox" :value="j.code" x-model="currentProject.targetJurisdiction">
+                        <span x-text="j.code"></span>
+                      </label>
+                    </template>
+                  </div>
+                </div>
+                <div class="col-span-2">
+                  <label class="block text-slate-500 mb-1">メモ</label>
+                  <textarea x-model="currentProject.notes" rows="3" class="w-full px-3 py-2 border rounded"></textarea>
+                </div>
+              </div>
+            </div>
+
+            <div class="bg-white rounded-lg shadow p-5">
+              <div class="flex items-center justify-between mb-3">
+                <h2 class="font-semibold text-lg">企業一覧</h2>
+                <button class="px-3 py-1 text-sm border rounded" @click="refreshCompanies()">再読込</button>
+              </div>
+              <div class="text-sm text-slate-500 mb-3">
+                比較対象候補: <span x-text="currentProject.comparables?.length || 0"></span> 社 /
+                除外済: <span x-text="currentProject.excludedCompanies?.length || 0"></span> 社
+              </div>
+              <div class="overflow-auto max-h-96 border rounded">
+                <table class="w-full text-xs">
+                  <thead class="bg-slate-100 text-left">
+                    <tr><th class="px-2 py-1">企業名</th><th>国</th><th>業種</th><th>セクター</th><th>上場</th><th>ソース</th></tr>
+                  </thead>
+                  <tbody>
+                    <template x-for="c in companies" :key="c.id">
+                      <tr class="border-t hover:bg-slate-50">
+                        <td class="px-2 py-1" x-text="c.name"></td>
+                        <td x-text="c.country"></td>
+                        <td x-text="c.industryCode + ' (' + c.industryCodeSystem + ')'"></td>
+                        <td x-text="c.sector"></td>
+                        <td x-text="c.isListed ? '上場' : '非上場'"></td>
+                        <td x-text="c.sourceInfo?.kind"></td>
+                      </tr>
+                    </template>
+                    <template x-if="!companies.length">
+                      <tr><td colspan="6" class="px-2 py-4 text-center text-slate-400">データなし。「データ入力」から取り込んでください</td></tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </template>
+      </section>
+
+      <!-- ============== Data input view ============== -->
+      <section x-show="currentView === 'dataInput'" class="p-6 space-y-6">
+        <div class="flex gap-2 border-b">
+          <button class="px-4 py-2 text-sm" :class="dataInputTab === 'file' ? 'border-b-2 border-blue-600 font-semibold' : 'text-slate-500'" @click="dataInputTab = 'file'">ファイルインポート</button>
+          <button class="px-4 py-2 text-sm" :class="dataInputTab === 'api'  ? 'border-b-2 border-blue-600 font-semibold' : 'text-slate-500'" @click="dataInputTab = 'api'">企業DB API</button>
+          <button class="px-4 py-2 text-sm" :class="dataInputTab === 'manual' ? 'border-b-2 border-blue-600 font-semibold' : 'text-slate-500'" @click="dataInputTab = 'manual'">手動入力 / 貼付け</button>
+        </div>
+
+        <!-- D-1 file import -->
+        <div x-show="dataInputTab === 'file'" class="space-y-6">
+          <div class="bg-white rounded-lg shadow p-5">
+            <h3 class="font-semibold mb-3">ドラッグ&ドロップ または ファイル選択</h3>
+            <div class="border-2 border-dashed rounded p-8 text-center text-slate-500"
+                 :class="dz.active ? 'dz-active' : ''"
+                 @dragover.prevent="dz.active = true"
+                 @dragleave.prevent="dz.active = false"
+                 @drop.prevent="onDropFiles($event)">
+              <div>Excel / CSV / Word / JSON をここにドロップ</div>
+              <div class="mt-3"><label class="inline-block px-3 py-1.5 bg-blue-600 text-white rounded cursor-pointer">ファイルを選択<input type="file" class="hidden" @change="onPickFile($event)" accept=".xlsx,.xls,.csv,.tsv,.json,.docx"></label></div>
+              <div class="mt-2 text-xs">対応形式: .xlsx, .xls, .csv, .tsv, .json, .docx</div>
+            </div>
+          </div>
+
+          <!-- Column mapping -->
+          <div x-show="fileImport.headers.length" class="bg-white rounded-lg shadow p-5">
+            <h3 class="font-semibold mb-3">列マッピング</h3>
+            <p class="text-xs text-slate-500 mb-3">読み込んだ列をアプリ内項目に割り当ててください。ヒューリスティック推測値が初期表示されています。</p>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <template x-for="h in fileImport.headers" :key="h">
+                <div class="flex items-center gap-2">
+                  <div class="w-1/2 text-sm truncate" x-text="h" :title="h"></div>
+                  <select x-model="fileImport.mapping[h]" class="w-1/2 px-2 py-1 border rounded text-sm">
+                    <option value="">(未割当)</option>
+                    <template x-for="f in APP_FIELDS" :key="f.key">
+                      <option :value="f.key" x-text="f.label + ' [' + f.group + ']'"></option>
+                    </template>
+                  </select>
+                </div>
+              </template>
+            </div>
+
+            <div class="mt-4 flex items-end gap-3">
+              <div>
+                <label class="block text-xs text-slate-500 mb-1">マッピングプリセット名</label>
+                <input type="text" x-model="fileImport.presetName" class="px-2 py-1 border rounded text-sm" placeholder="例: Orbis Standard">
+              </div>
+              <button class="px-3 py-1.5 text-sm border rounded" @click="savePreset()">プリセット保存</button>
+              <div class="flex-1"></div>
+              <select class="px-2 py-1.5 border rounded text-sm" @change="applyPreset($event.target.value)">
+                <option value="">プリセット適用…</option>
+                <template x-for="p in mappingPresets" :key="p.id"><option :value="p.id" x-text="p.name"></option></template>
+              </select>
+              <button class="px-4 py-2 text-sm bg-blue-600 text-white rounded" @click="commitImportedFile()">取り込み実行</button>
+            </div>
+
+            <div class="mt-5">
+              <h4 class="text-sm font-semibold mb-2">プレビュー (先頭5行)</h4>
+              <div class="overflow-auto max-h-64 border rounded">
+                <table class="w-full text-xs">
+                  <thead class="bg-slate-100 text-left"><tr><template x-for="h in fileImport.headers" :key="h"><th class="px-2 py-1" x-text="h"></th></template></tr></thead>
+                  <tbody>
+                    <template x-for="(r, i) in fileImport.preview" :key="i">
+                      <tr class="border-t"><template x-for="h in fileImport.headers" :key="h"><td class="px-2 py-1" x-text="r[h]"></td></template></tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- D-2 API connectors -->
+        <div x-show="dataInputTab === 'api'" class="space-y-6">
+          <div class="bg-white rounded-lg shadow p-5">
+            <h3 class="font-semibold mb-3">API設定一覧</h3>
+            <table class="w-full text-sm mb-4">
+              <thead class="text-left text-slate-500"><tr><th>名称</th><th>エンドポイント</th><th>認証</th><th>APIキー</th><th></th></tr></thead>
+              <tbody>
+                <template x-for="p in apiProviders" :key="p.id">
+                  <tr class="border-t">
+                    <td class="py-1.5" x-text="p.name"></td>
+                    <td class="font-mono text-xs" x-text="p.endpoint"></td>
+                    <td x-text="p.authKind"></td>
+                    <td class="font-mono text-xs" x-text="maskApiKey(p.apiKey)"></td>
+                    <td class="text-right space-x-1">
+                      <button class="px-2 py-0.5 text-xs border rounded" @click="testApiConnection(p.id)">テスト接続</button>
+                      <button class="px-2 py-0.5 text-xs border rounded" @click="runApiSearch(p.id)">検索</button>
+                      <button class="px-2 py-0.5 text-xs border rounded" @click="editApiProvider(p.id)">編集</button>
+                      <button class="px-2 py-0.5 text-xs border rounded text-rose-600" @click="deleteApiProvider(p.id)">削除</button>
+                    </td>
+                  </tr>
+                </template>
+                <template x-if="!apiProviders.length"><tr><td colspan="5" class="text-center text-slate-400 py-3">未設定</td></tr></template>
+              </tbody>
+            </table>
+
+            <h4 class="font-semibold mb-2">追加 / 編集</h4>
+            <div class="grid grid-cols-2 gap-3">
+              <div><label class="block text-xs text-slate-500">名称</label><input class="w-full px-2 py-1 border rounded text-sm" x-model="apiDraft.name"></div>
+              <div><label class="block text-xs text-slate-500">エンドポイント</label><input class="w-full px-2 py-1 border rounded text-sm" x-model="apiDraft.endpoint"></div>
+              <div><label class="block text-xs text-slate-500">認証方式</label>
+                <select class="w-full px-2 py-1 border rounded text-sm" x-model="apiDraft.authKind">
+                  <option value="apiKey">API Key (X-API-Key)</option>
+                  <option value="bearer">Bearer Token</option>
+                  <option value="basic">Basic Auth</option>
+                  <option value="none">なし</option>
+                </select>
+              </div>
+              <div><label class="block text-xs text-slate-500">APIキー / トークン</label><input type="password" class="w-full px-2 py-1 border rounded text-sm" x-model="apiDraft.apiKey"></div>
+              <div x-show="apiDraft.authKind === 'basic'"><label class="block text-xs text-slate-500">ユーザー名</label><input class="w-full px-2 py-1 border rounded text-sm" x-model="apiDraft.username"></div>
+              <div x-show="apiDraft.authKind === 'basic'"><label class="block text-xs text-slate-500">パスワード</label><input type="password" class="w-full px-2 py-1 border rounded text-sm" x-model="apiDraft.password"></div>
+              <div class="col-span-2"><label class="block text-xs text-slate-500">メモ</label><textarea rows="2" class="w-full px-2 py-1 border rounded text-sm" x-model="apiDraft.notes"></textarea></div>
+            </div>
+            <div class="mt-3 flex justify-end"><button class="px-3 py-1.5 bg-blue-600 text-white text-sm rounded" @click="saveApiProvider()">保存</button></div>
+          </div>
+
+          <div class="bg-white rounded-lg shadow p-5">
+            <h3 class="font-semibold mb-3">検索クエリ</h3>
+            <div class="grid grid-cols-4 gap-3 text-sm">
+              <div><label class="block text-xs text-slate-500">業種コード</label><input class="w-full px-2 py-1 border rounded" x-model="apiQuery.industryCode"></div>
+              <div><label class="block text-xs text-slate-500">国</label><input class="w-full px-2 py-1 border rounded" x-model="apiQuery.country" placeholder="ISO2"></div>
+              <div><label class="block text-xs text-slate-500">最小売上</label><input type="number" class="w-full px-2 py-1 border rounded" x-model="apiQuery.minRevenue"></div>
+              <div><label class="block text-xs text-slate-500">最大売上</label><input type="number" class="w-full px-2 py-1 border rounded" x-model="apiQuery.maxRevenue"></div>
+            </div>
+            <div class="mt-3 text-xs text-slate-500">
+              Phase 1 では検索結果は表示されません。CORS制限がある場合は「ファイル経由でインポート」してください。
+            </div>
+          </div>
+        </div>
+
+        <!-- D-3 manual entry -->
+        <div x-show="dataInputTab === 'manual'" class="space-y-6">
+          <div class="bg-white rounded-lg shadow p-5">
+            <div class="flex items-center justify-between mb-3">
+              <h3 class="font-semibold">単一企業追加</h3>
+              <button class="px-3 py-1 text-sm border rounded" @click="startManualEntry()">新規フォーム</button>
+            </div>
+            <template x-if="manualDraft">
+              <div class="space-y-3 text-sm">
+                <div class="grid grid-cols-2 gap-3">
+                  <div><label class="block text-xs text-slate-500">企業名</label><input class="w-full px-2 py-1 border rounded" x-model="manualDraft.name"></div>
+                  <div><label class="block text-xs text-slate-500">国 (ISO2)</label><input class="w-full px-2 py-1 border rounded" x-model="manualDraft.country"></div>
+                  <div><label class="block text-xs text-slate-500">業種コード</label><input class="w-full px-2 py-1 border rounded" x-model="manualDraft.industryCode"></div>
+                  <div><label class="block text-xs text-slate-500">業種コード体系</label>
+                    <select class="w-full px-2 py-1 border rounded" x-model="manualDraft.industryCodeSystem">
+                      <template x-for="s in INDUSTRY_CODE_SYSTEMS" :key="s"><option :value="s" x-text="s"></option></template>
+                    </select>
+                  </div>
+                  <div><label class="block text-xs text-slate-500">セクター</label>
+                    <select class="w-full px-2 py-1 border rounded" x-model="manualDraft.sector">
+                      <option value="manufacturing">manufacturing</option>
+                      <option value="service">service</option>
+                      <option value="distribution">distribution</option>
+                      <option value="other">other</option>
+                    </select>
+                  </div>
+                  <div><label class="block text-xs text-slate-500 flex items-center gap-2"><input type="checkbox" x-model="manualDraft.isListed"> 上場区分</label></div>
+                  <div class="col-span-2"><label class="block text-xs text-slate-500">事業内容</label><textarea rows="3" class="w-full px-2 py-1 border rounded" x-model="manualDraft.businessDescription"></textarea></div>
+                  <div><label class="block text-xs text-slate-500">筆頭株主比率(%)</label><input type="number" class="w-full px-2 py-1 border rounded" x-model.number="manualDraft.independenceData.largestShareholderPct"></div>
+                  <div><label class="block text-xs text-slate-500">親会社名</label><input class="w-full px-2 py-1 border rounded" x-model="manualDraft.independenceData.parentCompany"></div>
+                </div>
+                <div class="flex justify-end gap-2">
+                  <button class="px-3 py-1.5 text-sm border rounded" @click="manualDraft = null">キャンセル</button>
+                  <button class="px-3 py-1.5 text-sm bg-blue-600 text-white rounded" @click="commitManualEntry()">追加</button>
+                </div>
+              </div>
+            </template>
+            <template x-if="!manualDraft"><div class="text-sm text-slate-500">「新規フォーム」をクリックして入力を開始してください</div></template>
+          </div>
+
+          <div class="bg-white rounded-lg shadow p-5">
+            <h3 class="font-semibold mb-3">事業内容説明文の貼り付け (後のAI解析用)</h3>
+            <textarea rows="4" class="w-full px-2 py-1 border rounded text-sm" x-model="pastedText" placeholder="後のフェーズでAI解析に使用するテキストをここに貼り付け"></textarea>
+            <div class="text-xs text-slate-500 mt-1">Phase 4 のAI解析でこのテキストを利用します。Phase 1 では保存されません。</div>
+          </div>
+
+          <div class="bg-white rounded-lg shadow p-5">
+            <h3 class="font-semibold mb-3">CSV貼り付け (複数社一括)</h3>
+            <textarea rows="6" class="w-full px-2 py-1 border rounded text-sm font-mono" x-model="pastedCsv" placeholder="name,country,industryCode,year,revenue,operatingProfit,...
+Foo Corp,JP,334413,2024,1000000,80000,..."></textarea>
+            <div class="flex justify-end mt-2"><button class="px-3 py-1.5 text-sm bg-blue-600 text-white rounded" @click="commitPastedCsv()">マッピング画面へ送る</button></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============== Jurisdiction rules (placeholder) ============== -->
+      <section x-show="currentView === 'rules'" class="p-6">
+        <div class="bg-white rounded-lg shadow p-6">
+          <h2 class="font-semibold text-lg mb-3">法域・ルール設定 <span class="text-xs text-amber-600 font-normal">(Phase 2 で実装)</span></h2>
+          <p class="text-sm text-slate-600 mb-4">
+            Phase 2 では各税務管轄のスクリーニング基準、推奨PLI、レポート必須セクションを定義したルールパックを読み込み、各画面に自動反映します。
+            このセクションはルール選択UIの枠組みです。
+          </p>
+          <div class="border rounded p-4 bg-slate-50">
+            <h3 class="text-sm font-semibold mb-2">適用予定ルール</h3>
+            <template x-if="currentProject">
+              <div class="text-sm">
+                <template x-for="j in currentProject.targetJurisdiction" :key="j">
+                  <div class="flex items-center justify-between py-1 border-b last:border-b-0">
+                    <div><span class="font-mono" x-text="j"></span> - <span x-text="jurisdictionLabel(j)"></span></div>
+                    <select class="px-2 py-1 border rounded text-sm bg-white" disabled>
+                      <option>(Phase 2 でルール選択)</option>
+                    </select>
+                  </div>
+                </template>
+              </div>
+            </template>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============== Screening placeholder ============== -->
+      <section x-show="currentView === 'screening'" class="p-6">
+        <div class="bg-white rounded-lg shadow p-6">
+          <h2 class="font-semibold text-lg mb-3">スクリーニング <span class="text-xs text-amber-600 font-normal">(Phase 3 で実装)</span></h2>
+          <p class="text-sm text-slate-600">独立性、業種、定量、定性の各ステージを順次実行します。Phase 3 で実装予定です。</p>
+        </div>
+      </section>
+
+      <!-- ============== Scoring placeholder ============== -->
+      <section x-show="currentView === 'scoring'" class="p-6">
+        <div class="bg-white rounded-lg shadow p-6">
+          <h2 class="font-semibold text-lg mb-3">スコア & PLI <span class="text-xs text-amber-600 font-normal">(Phase 5 で実装)</span></h2>
+          <p class="text-sm text-slate-600">PLI 算定（OM, BPL, ROA, Berry Ratio 等）、四分位レンジ、外れ値処理を実装予定です。</p>
+        </div>
+      </section>
+
+      <!-- ============== Results placeholder ============== -->
+      <section x-show="currentView === 'results'" class="p-6">
+        <div class="bg-white rounded-lg shadow p-6">
+          <h2 class="font-semibold text-lg mb-3">結果 <span class="text-xs text-amber-600 font-normal">(Phase 6 で実装)</span></h2>
+          <p class="text-sm text-slate-600">最終比較対象企業群、PLI 分布、ベンチマークレンジを表示します。</p>
+        </div>
+      </section>
+
+      <!-- ============== Report placeholder ============== -->
+      <section x-show="currentView === 'reports'" class="p-6">
+        <div class="bg-white rounded-lg shadow p-6">
+          <h2 class="font-semibold text-lg mb-3">レポート出力 <span class="text-xs text-amber-600 font-normal">(Phase 7 で実装)</span></h2>
+          <p class="text-sm text-slate-600">PPTX / PDF / DOCX 形式で移転価格文書を生成します。CDN: pptxgenjs, jspdf-autotable, docx が事前読込済みです。</p>
+        </div>
+      </section>
+
+      <!-- ============== Settings ============== -->
+      <section x-show="currentView === 'settings'" class="p-6 space-y-6">
+
+        <!-- AI providers -->
+        <div class="bg-white rounded-lg shadow p-5">
+          <h2 class="font-semibold text-lg mb-3">AI APIキー</h2>
+          <table class="w-full text-sm">
+            <thead class="text-left text-slate-500"><tr><th>プロバイダ</th><th>有効</th><th>モデル</th><th>エンドポイント</th><th>APIキー</th></tr></thead>
+            <tbody>
+              <template x-for="p in aiProviders" :key="p.kind">
+                <tr class="border-t">
+                  <td class="py-1.5 capitalize" x-text="p.kind"></td>
+                  <td><input type="checkbox" x-model="p.enabled"></td>
+                  <td><input class="px-2 py-1 border rounded text-sm" x-model="p.model" placeholder="(任意)"></td>
+                  <td><input class="px-2 py-1 border rounded text-sm w-64" x-model="p.endpoint" placeholder="(任意 - Azure等)"></td>
+                  <td><input type="password" class="px-2 py-1 border rounded text-sm" x-model="p.apiKey" :placeholder="maskApiKey(p.apiKey) || '未設定'"></td>
+                </tr>
+              </template>
+            </tbody>
+          </table>
+
+          <h3 class="font-semibold mt-5 mb-2 text-sm">機能別プロバイダ割当</h3>
+          <div class="grid grid-cols-2 gap-3 text-sm">
+            <template x-for="f in AI_FEATURES" :key="f.key">
+              <div class="flex items-center gap-3">
+                <span class="w-48" x-text="f.label"></span>
+                <select class="px-2 py-1 border rounded" x-model="featureProviderAssignment[f.key]">
+                  <option value="">(未割当)</option>
+                  <template x-for="p in aiProviders" :key="p.kind"><option :value="p.kind" x-text="p.kind"></option></template>
+                </select>
+              </div>
+            </template>
+          </div>
+
+          <div class="mt-4 flex justify-end"><button class="px-3 py-1.5 bg-blue-600 text-white text-sm rounded" @click="saveAiProviders()">保存</button></div>
+        </div>
+
+        <!-- FX -->
+        <div class="bg-white rounded-lg shadow p-5">
+          <h2 class="font-semibold text-lg mb-3">為替設定</h2>
+          <div class="grid grid-cols-3 gap-3 text-sm mb-3">
+            <div><label class="block text-xs text-slate-500">基準通貨</label><input class="w-full px-2 py-1 border rounded" x-model="fxData.base"></div>
+            <div><label class="block text-xs text-slate-500">基準日</label><input type="date" class="w-full px-2 py-1 border rounded" x-model="fxData.asOf"></div>
+            <div><label class="block text-xs text-slate-500">参照API URL (任意)</label><input class="w-full px-2 py-1 border rounded" x-model="fxApiUrl" placeholder="https://..."></div>
+          </div>
+
+          <h3 class="text-sm font-semibold mb-2">手動レート (vs <span x-text="fxData.base"></span>)</h3>
+          <div class="grid grid-cols-4 gap-2 text-sm">
+            <template x-for="cur in ['USD','EUR','GBP','CNY','KRW','SGD','INR','AUD']" :key="cur">
+              <div class="flex items-center gap-2">
+                <span class="w-12 font-mono" x-text="cur"></span>
+                <input type="number" step="0.0001" class="flex-1 px-2 py-1 border rounded" :value="fxData.rates[cur] || ''" @input="fxData.rates[cur] = parseFloat($event.target.value) || 0">
+              </div>
+            </template>
+          </div>
+
+          <h3 class="text-sm font-semibold mt-4 mb-1">CSVインポート (currency,rate)</h3>
+          <textarea rows="3" class="w-full px-2 py-1 border rounded text-sm font-mono" x-model="fxCsvText" placeholder="currency,rate&#10;USD,0.0067&#10;EUR,0.0061"></textarea>
+
+          <div class="mt-3 flex justify-end gap-2">
+            <button class="px-3 py-1.5 text-sm border rounded" @click="importFxCsv()">CSV取り込み</button>
+            <button class="px-3 py-1.5 text-sm bg-blue-600 text-white rounded" @click="saveFxManual()">保存</button>
+          </div>
+        </div>
+
+        <!-- Language -->
+        <div class="bg-white rounded-lg shadow p-5">
+          <h2 class="font-semibold text-lg mb-3">表示言語</h2>
+          <div class="flex items-center gap-3 text-sm">
+            <label class="flex items-center gap-2"><input type="radio" value="ja" x-model="lang" @change="saveLanguage()"> 日本語</label>
+            <label class="flex items-center gap-2"><input type="radio" value="en" x-model="lang" @change="saveLanguage()"> English</label>
+          </div>
+        </div>
+
+        <!-- Industry codes -->
+        <div class="bg-white rounded-lg shadow p-5">
+          <h2 class="font-semibold text-lg mb-3">業種コード体系の優先順位</h2>
+          <p class="text-xs text-slate-500 mb-3">上から順にマッチングの優先度が高くなります。</p>
+          <ol class="space-y-1 text-sm">
+            <template x-for="(c, i) in industryCodePriority" :key="c">
+              <li class="flex items-center gap-2 border rounded px-2 py-1 bg-slate-50">
+                <span class="w-6 text-slate-500" x-text="(i+1) + '.'"></span>
+                <span class="flex-1 font-mono" x-text="c"></span>
+                <button class="text-xs px-2 py-0.5 border rounded" @click="moveIndustryCode(c, -1)">↑</button>
+                <button class="text-xs px-2 py-0.5 border rounded" @click="moveIndustryCode(c, +1)">↓</button>
+              </li>
+            </template>
+          </ol>
+          <div class="mt-3 flex justify-end"><button class="px-3 py-1.5 text-sm bg-blue-600 text-white rounded" @click="saveIndustryCodePriority()">保存</button></div>
+        </div>
+
+        <!-- Self-test -->
+        <div class="bg-white rounded-lg shadow p-5">
+          <div class="flex items-center justify-between mb-3">
+            <h2 class="font-semibold text-lg">セルフテスト</h2>
+            <button class="px-3 py-1.5 text-sm bg-emerald-600 text-white rounded" @click="selfTestResults = await runSelfTest()">実行</button>
+          </div>
+          <template x-if="selfTestResults && selfTestResults.length">
+            <ul class="text-sm space-y-1">
+              <template x-for="r in selfTestResults" :key="r.name">
+                <li class="flex items-center gap-2">
+                  <span class="w-5 text-center" :class="r.ok ? 'text-emerald-600' : 'text-rose-600'" x-text="r.ok ? '✓' : '✗'"></span>
+                  <span x-text="r.name"></span>
+                  <span class="text-xs text-rose-600 ml-2" x-text="r.detail"></span>
+                </li>
+              </template>
+            </ul>
+          </template>
+        </div>
+
+      </section>
+
+    </main>
+  </div>
+
+</div>
+
+<!-- =====================================================================
+  Inject selfTestResults onto the Alpine root.
+  Done after the tpApp() factory above so Alpine can pick the property up
+  on first init. (Alpine reads the object as-is; new keys must exist on
+  the returned object before init().)
+===================================================================== -->
+<script>
+  // Patch the factory's return so the self-test bound `x-text` doesn't blow up.
+  const _origTpApp = tpApp;
+  tpApp = function () { return Object.assign(_origTpApp(), { selfTestResults: [] }); };
+</script>
+
+</body>
+</html>
