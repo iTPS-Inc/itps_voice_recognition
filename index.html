@@ -286,6 +286,22 @@ db.version(1).stores({
   mappingPresets:    'id, name, createdAt',
 });
 
+// Phase 2: added industry-code concordance overrides and TODO items.
+// Companies upgrade transparently: the `financials` array form from
+// Phase 1 is migrated to a year-keyed dict on read (see migrateFinancials).
+db.version(2).stores({
+  industryCodeMappings: 'id, fromSystem, fromCode, toSystem, toCode',
+  todoItems:            'id, status, priority, createdAt, source',
+}).upgrade(async (tx) => {
+  await tx.table('companies').toCollection().modify(c => {
+    if (Array.isArray(c.financials)) {
+      const dict = {};
+      for (const row of c.financials) { if (row && row.year != null) dict[String(row.year)] = row; }
+      c.financials = dict;
+    }
+  });
+});
+
 /**
  * Persist a single audit entry. All user-visible mutations should call
  * this so the future Phase 7 report appendix can render a tamper-evident
@@ -594,8 +610,9 @@ function makeRng(seed) {
 function generateSampleCompanies() {
   const rng = makeRng(20260514);
   const countries = ['JP', 'US', 'DE', 'GB', 'CN', 'KR', 'SG', 'IN', 'NL', 'FR'];
-  const mfgIndustries = ['334413', '336111', '333120', '325211', '332710'];
-  const svcIndustries = ['541611', '541512', '561499', '541330', '541219'];
+  // Phase 2: use real SIC codes so the SIC↔NAICS concordance is exercised.
+  const mfgIndustries = ['3674', '3711', '3714', '2834', '3559'];
+  const svcIndustries = ['7372', '8742', '7371', '8711', '7389'];
   const currencies = ['JPY', 'USD', 'EUR', 'GBP', 'CNY', 'KRW', 'SGD', 'INR'];
   const sectors = [
     { kind: 'manufacturing', prefix: 'Mfg', industries: mfgIndustries, count: 30 },
@@ -609,14 +626,23 @@ function generateSampleCompanies() {
       const currency = currencies[Math.floor(rng() * currencies.length)];
       const baseRevenue = Math.round(1_000_000 * (50 + rng() * 950));
       const opMargin = -0.05 + rng() * 0.20;
-      const years = [2022, 2023, 2024];
-      const financials = years.map(y => {
+      // Phase 2: variable year coverage per company (3-7 years) so the
+      // mixed-coverage scenarios in the spec exercise the engine.
+      const yearCount = 3 + Math.floor(rng() * 5);
+      const latest = 2024;
+      const years = [];
+      for (let k = 0; k < yearCount; k++) years.unshift(latest - k);
+      const financials = {};
+      for (const y of years) {
         const growth = 1 + (-0.05 + rng() * 0.15);
-        const rev = Math.round(baseRevenue * Math.pow(growth, y - 2022));
+        const rev = Math.round(baseRevenue * Math.pow(growth, y - years[0]));
         const op  = Math.round(rev * opMargin);
         const ta  = Math.round(rev * (0.4 + rng() * 0.8));
-        return {
+        financials[String(y)] = {
           year: y, revenue: rev, operatingProfit: op,
+          // Capital IQ-style field names alongside the Phase 1 ones so
+          // either set is queryable from the condition tree evaluator.
+          netSales: rev, operatingIncome: op, rdExpense: Math.round(rev * (0.00 + rng() * 0.05)),
           totalAssets: ta,
           fixedAssets: Math.round(ta * (0.3 + rng() * 0.4)),
           inventory:   Math.round(rev * (0.05 + rng() * 0.15)),
@@ -628,13 +654,13 @@ function generateSampleCompanies() {
           depreciation:Math.round(ta * 0.05),
           currency,
         };
-      });
+      }
       list.push({
         id: uuid(),
         name: `${s.prefix} Comparable ${String(i).padStart(2, '0')}`,
         country,
         industryCode: s.industries[Math.floor(rng() * s.industries.length)],
-        industryCodeSystem: 'NAICS',
+        industryCodeSystem: 'SIC',
         isListed: rng() > 0.4,
         independenceData: {
           largestShareholderPct: Math.round(15 + rng() * 70),
@@ -801,8 +827,13 @@ function tpApp() {
         this.aiProviders = await getSetting('aiProviders', this.defaultAiProviders());
         this.apiProviders = await getSetting('apiProviders', []);
         this.fxData = await getSetting('fxData', { base: 'JPY', rates: { USD: 0.0067, EUR: 0.0061 }, asOf: new Date().toISOString().slice(0, 10), source: 'manual' });
-        this.industryCodePriority = await getSetting('industryCodePriority', ['NAICS', 'NACE', 'JSIC', 'ISIC']);
+        this.industryCodePriority = await getSetting('industryCodePriority', ['SIC', 'NAICS_2017', 'NACE_REV_2', 'JSIC', 'ISIC']);
         this.mappingPresets = await db.mappingPresets.toArray();
+        // Phase 2: bring up rules + TODO and refresh state derived from them.
+        await rulesEngine.loadDefaults();
+        await todoStore.ensureStandingTodos();
+        this.allRules = await rulesEngine.list();
+        await this.refreshTodos();
         await this.refreshProjects();
         this.booted = true;
         await logAudit('app.boot', { version: APP_VERSION });
@@ -1226,6 +1257,269 @@ function tpApp() {
       this.openDrawer({ title: '監査ログ', component: 'audit', data: null });
     },
 
+    /* ====================================================================
+       PHASE 2 STATE & METHODS
+       ==================================================================== */
+
+    /* ---- Rule list & editor ---- */
+    allRules: [],
+    editingRule: /** @type {JurisdictionRuleV2|null} */ (null),
+    ruleEditTab: 'basic',
+    showRuleList: true,
+    /** Refresh `allRules` from Dexie; called after CRUD. */
+    async refreshRules() { this.allRules = await rulesEngine.list(); },
+    /** Import a rule pack JSON (single rule or `{rules: [...]}` shape). */
+    async importRulesJson(ev) {
+      const file = ev.target.files?.[0]; if (!file) return;
+      try {
+        const text = await readFileAsText(file);
+        const payload = JSON.parse(text);
+        if (Array.isArray(payload?.rules)) {
+          for (const r of payload.rules) await rulesEngine.save({ ...r, _forceOverwrite: true });
+        } else if (payload?.rule) {
+          await rulesEngine.save({ ...payload.rule, _forceOverwrite: true });
+        } else {
+          throw new Error('ルールJSONの形式が不正です');
+        }
+        await this.refreshRules();
+        this.toast('ルールをインポートしました', 'success');
+      } catch (e) { this.toast('インポート失敗: ' + e.message, 'error'); }
+      ev.target.value = '';
+    },
+    /** Export all rules as one JSON file. */
+    async exportAllRules() {
+      const blob = new Blob([JSON.stringify({ version: APP_VERSION, exportedAt: new Date().toISOString(), rules: this.allRules }, null, 2)], { type: 'application/json' });
+      downloadBlob(blob, 'tp-rules.json');
+      await logAudit('RULE_EXPORT', { count: this.allRules.length });
+    },
+    /** Open the editor for an existing rule (deep cloned). */
+    async openRuleEditor(id) {
+      const r = await rulesEngine.getActive(id);
+      if (!r) return;
+      this.editingRule = JSON.parse(JSON.stringify(r));
+      this.ruleEditTab = 'basic';
+      this.showRuleList = false;
+    },
+    /** Start from a blank rule template (forked off OECD_GENERIC). */
+    async newRuleFromTemplate() {
+      const base = await rulesEngine.getOECDTPG();
+      this.editingRule = {
+        ...JSON.parse(JSON.stringify(base)),
+        jurisdictionId: 'CUSTOM_' + Date.now(),
+        name: 'New custom rule', nameLocal: '',
+        isOfficial: false, isGenericModel: false,
+        parentId: base.jurisdictionId,
+      };
+      this.ruleEditTab = 'basic';
+      this.showRuleList = false;
+    },
+    async saveEditingRule() {
+      if (!this.editingRule) return;
+      try {
+        const saved = await rulesEngine.save({ ...this.editingRule, id: this.editingRule.jurisdictionId });
+        this.toast(`ルール "${saved.name}" を保存しました`, 'success');
+        await this.refreshRules();
+        this.editingRule = saved;
+      } catch (e) { this.toast('保存失敗: ' + e.message, 'error'); }
+    },
+    cancelEditingRule() { this.editingRule = null; this.showRuleList = true; },
+    async deleteEditingRule() {
+      if (!this.editingRule) return;
+      this.openModal({
+        title: 'ルール削除', body: 'このルールを削除しますか？',
+        onConfirm: async () => {
+          try { await rulesEngine.delete(this.editingRule.jurisdictionId); await this.refreshRules(); this.editingRule = null; this.showRuleList = true; this.toast('削除しました', 'success'); }
+          catch (e) { this.toast(e.message, 'error'); }
+          this.closeModal();
+        },
+      });
+    },
+    ruleColorClass(rule) {
+      if (rule.isGenericModel) return 'border-purple-500 bg-purple-50';
+      if (rule.isOfficial)     return 'border-blue-500 bg-blue-50';
+      return 'border-emerald-500 bg-emerald-50';
+    },
+
+    /* ---- Screening-stage drag-drop ---- */
+    draggedStageIdx: null,
+    /** Reorder a stage list in-place + renumber order. */
+    moveStage(stages, fromIdx, toIdx) {
+      if (toIdx < 0 || toIdx >= stages.length) return;
+      const [item] = stages.splice(fromIdx, 1);
+      stages.splice(toIdx, 0, item);
+      stages.forEach((s, i) => { s.order = i + 1; });
+    },
+    onStageDragStart(idx) { this.draggedStageIdx = idx; },
+    onStageDrop(stages, idx) {
+      if (this.draggedStageIdx == null || this.draggedStageIdx === idx) return;
+      this.moveStage(stages, this.draggedStageIdx, idx);
+      this.draggedStageIdx = null;
+    },
+    addStage(stages, type = 'CUSTOM') {
+      stages.push({
+        id: 'S' + (stages.length + 1) + '_' + Date.now().toString(36).slice(-4),
+        type, enabled: true, order: stages.length + 1,
+        label: type === 'CUSTOM' ? 'Custom stage' : type, params: {},
+        ...(type === 'CUSTOM' ? { conditionTree: { kind: 'group', op: 'AND', not: false, children: [] } } : {}),
+      });
+    },
+    removeStage(stages, idx) { stages.splice(idx, 1); stages.forEach((s, i) => s.order = i + 1); },
+
+    /* ---- Condition tree editor (inline, recursive via x-html template) ---- */
+    editingStageIdx: -1,
+    conditionFieldRefs: CONDITION_FIELD_REFS,
+    conditionOperators: CONDITION_OPERATORS,
+    conditionPresets: CONDITION_PRESETS,
+    conditionTreeText: '',
+    livePreviewCount: null,
+    openConditionEditor(stageIdx) {
+      this.editingStageIdx = stageIdx;
+      const stage = this.editingRule.screeningStages[stageIdx] || this.editingRule.customStages[stageIdx - (this.editingRule.screeningStages?.length || 0)];
+      if (!stage) return;
+      if (!stage.conditionTree) stage.conditionTree = { kind: 'group', op: 'AND', not: false, children: [] };
+      this.conditionTreeText = conditionTreeToString(stage.conditionTree);
+      this.recomputeLivePreview();
+    },
+    closeConditionEditor() { this.editingStageIdx = -1; },
+    /** Apply a preset to the current stage's tree. */
+    applyConditionPreset(idx) {
+      const stage = this.editingRule.screeningStages[this.editingStageIdx];
+      if (!stage) return;
+      stage.conditionTree = JSON.parse(JSON.stringify(this.conditionPresets[idx].tree));
+      this.conditionTreeText = conditionTreeToString(stage.conditionTree);
+      this.recomputeLivePreview();
+    },
+    addConditionTo(group) {
+      group.children = group.children || [];
+      group.children.push({ kind: 'condition', field: 'financials.latest.netSales', op: '>', value: 0, not: false });
+      this.recomputeLivePreview();
+    },
+    addGroupTo(group) {
+      group.children = group.children || [];
+      group.children.push({ kind: 'group', op: 'AND', not: false, children: [] });
+      this.recomputeLivePreview();
+    },
+    removeFromParent(parent, idx) {
+      parent.children.splice(idx, 1);
+      this.recomputeLivePreview();
+    },
+    /** Live preview: how many companies in current project match the condition. */
+    async recomputeLivePreview() {
+      const stage = this.editingRule?.screeningStages?.[this.editingStageIdx];
+      if (!stage?.conditionTree || !this.currentProject) { this.livePreviewCount = null; return; }
+      const ids = [...(this.currentProject.comparables || [])];
+      const companies = (await db.companies.bulkGet(ids)).filter(Boolean).map(c => ({ ...c, financials: migrateFinancials(c.financials) }));
+      let count = 0;
+      for (const c of companies) { try { if (evaluateConditionTree(stage.conditionTree, c)) count++; } catch {} }
+      this.livePreviewCount = count;
+      this.conditionTreeText = conditionTreeToString(stage.conditionTree);
+    },
+
+    /* ---- Project rule binding ---- */
+    /** Year range picker for project-level override. */
+    async setProjectYearRange(fromYear, toYear) {
+      if (!this.currentProject) return;
+      this.currentProject.analysisYearRange = { from: Number(fromYear), to: Number(toYear) };
+      await this.saveProject();
+    },
+    projectMergeMode: 'parallel', // or 'strictest'
+
+    /* ---- TODO state ---- */
+    todos: [],
+    showTodoPanel: false,
+    todoDraft: { title: '', description: '', priority: 'medium' },
+    async refreshTodos() { this.todos = await todoStore.list(); },
+    openTodos: function () { return this.todos.filter(t => t.status !== 'completed'); },
+    async addTodo() {
+      if (!this.todoDraft.title.trim()) return;
+      await todoStore.add({ ...this.todoDraft, source: 'manual' });
+      this.todoDraft = { title: '', description: '', priority: 'medium' };
+      await this.refreshTodos();
+    },
+    async completeTodo(id) { await todoStore.complete(id); await this.refreshTodos(); },
+    async reopenTodo(id)   { await todoStore.reopen(id);   await this.refreshTodos(); },
+    async exportTodos() {
+      const blob = await todoStore.exportJson();
+      downloadBlob(blob, 'todos.tpbench.json');
+    },
+    todoBadgeCount() {
+      return (this.todos || []).filter(t => t.status !== 'completed').length;
+    },
+
+    /* ---- Capital IQ Excel import state ---- */
+    cIQResult: null, cIQStatusMode: 'overlay', cIQYearsSelected: [],
+    cIQWordResult: null,
+    async onCIQExcelPick(ev) {
+      const f = ev.target.files?.[0]; if (!f) return;
+      try {
+        const r = await parseCapitalIQExcel(f);
+        this.cIQResult = r;
+        this.cIQYearsSelected = [...r.detectedYears];
+        if (r.warnings.length) this.toast(r.warnings.join('\n'), 'warning', 8000);
+        else this.toast(`${r.companies.length} 社 / 検出年度 ${r.detectedYears.join(', ')} (${r.detectedYears.length}年)`, 'success', 6000);
+      } catch (e) { this.toast('Capital IQ Excel解析失敗: ' + e.message, 'error'); }
+      ev.target.value = '';
+    },
+    async onCIQWordPick(ev) {
+      const f = ev.target.files?.[0]; if (!f) return;
+      try {
+        const r = await parseCapitalIQWord(f);
+        this.cIQWordResult = r;
+        this.toast(`Step段階 ${r.steps.length} / 棄却理由 ${r.rejections.length} 件`, 'success');
+      } catch (e) { this.toast('Capital IQ Word解析失敗: ' + e.message, 'error'); }
+      ev.target.value = '';
+    },
+    async commitCIQImport() {
+      if (!this.cIQResult) return;
+      const keep = new Set(this.cIQYearsSelected.map(String));
+      const companies = this.cIQResult.companies.map(c => {
+        const fin = {};
+        for (const [y, v] of Object.entries(c.financials)) if (keep.has(y)) fin[y] = v;
+        return { ...c, financials: fin };
+      });
+      await db.companies.bulkPut(companies);
+      if (this.currentProject) {
+        const exclude = this.cIQStatusMode === 'preserve'
+          ? companies.filter(c => String(c.cIQStatus || '').toLowerCase().includes('reject')).map(c => c.id)
+          : [];
+        const ids = companies.map(c => c.id).filter(id => !exclude.includes(id));
+        this.currentProject.comparables = [...new Set([...(this.currentProject.comparables || []), ...ids])];
+        this.currentProject.excludedCompanies = [...new Set([...(this.currentProject.excludedCompanies || []), ...exclude])];
+        await this.saveProject();
+      }
+      await logAudit('CAPITAL_IQ_IMPORT', { committed: companies.length, years: [...keep], statusMode: this.cIQStatusMode }, this.currentProject?.id);
+      this.toast(`${companies.length} 社をコミット`, 'success');
+      this.cIQResult = null;
+    },
+
+    /* ---- Industry code lookup UI ---- */
+    industrySearchSystem: 'SIC',
+    industrySearchQuery: '',
+    industrySearchResults: [],
+    industryCodeCoverage: INDUSTRY_CODE_COVERAGE,
+    runIndustrySearch() {
+      this.industrySearchResults = searchIndustryCode(this.industrySearchSystem, this.industrySearchQuery, 100);
+    },
+    /** Show conversion candidates for a SIC code. */
+    showConversionCandidates(code) {
+      const naics = convertIndustryCode('SIC', 'NAICS_2017', code);
+      const body = naics.length
+        ? naics.map(n => `${n.code} - ${n.description || ''}`).join('\n')
+        : '対応する NAICS 2017 マッピングが見つかりませんでした (TODO「SIC↔NAICS全件対応」を参照)';
+      this.openModal({ title: `SIC ${code} → NAICS 2017`, body });
+    },
+    /** Import a Census Bureau concordance CSV file. */
+    async onConcordanceCsvPick(ev) {
+      const f = ev.target.files?.[0]; if (!f) return;
+      try {
+        const text = await readFileAsText(f);
+        const r = await importIndustryConcordanceCsv(text);
+        this.industryCodeCoverage = { ...INDUSTRY_CODE_COVERAGE };
+        this.toast(`${r.added} 件のマッピングを追加 (合計 ${r.total})`, 'success');
+      } catch (e) { this.toast('CSV取込失敗: ' + e.message, 'error'); }
+      ev.target.value = '';
+    },
+
     /* ---------------- companies tab helpers ---------------- */
     companies: [],
     async refreshCompanies() {
@@ -1311,8 +1605,1716 @@ async function runSelfTest() {
     if (m['Company Name'] !== 'name' || m['売上高'] !== 'revenue') throw new Error('mapping miss');
   });
 
+  /* ================== Phase 2 acceptance checks ================== */
+
+  await check('Phase 2 - default rules loaded (≥8 jurisdictions)', async () => {
+    await rulesEngine.loadDefaults();
+    const rules = await rulesEngine.list();
+    if (rules.length < 8) throw new Error('expected ≥8, got ' + rules.length);
+    const oecd = rules.find(r => r.jurisdictionId === 'OECD_GENERIC');
+    if (!oecd?.isGenericModel) throw new Error('OECD generic model missing');
+  });
+
+  await check('Phase 2 - rule CRUD', async () => {
+    const draft = { jurisdictionId: 'TEST_RULE_' + Date.now(), name: 'Test', nameLocal: '', isOfficial: false, parentId: 'OECD_GENERIC', version: '1', isGenericModel: false, rangeMethod: { type: 'IQR', lowerPercentile: 25, upperPercentile: 75, centralTendency: 'MEDIAN' }, yearsAnalysis: { default: 3, min: 1, max: 10, averaging: 'WEIGHTED_AVG' }, workingCapitalAdjustment: { requirement: 'OPTIONAL', formula: 'STANDARD_OECD' }, lossMakers: { treatment: 'EXCLUDE_PERSISTENT', rule: 'LOSS_IN_N_OF_M_YEARS', ruleParams: { n: 2, m: 3 }, customCondition: null }, minComparables: 5, preferredIndustryCodes: ['SIC'], preferredPLI: ['OPERATING_MARGIN'], referenceLaw: { primary: '', url: '', note: '' }, screeningStages: makeStandardStages(), customStages: [], reportTemplates: [], notes: '', lastModified: '2024-01-01', createdBy: 'test' };
+    const saved = await rulesEngine.save(draft);
+    const got = await rulesEngine.getActive(saved.jurisdictionId);
+    if (!got) throw new Error('saved rule not retrievable');
+    await rulesEngine.delete(saved.jurisdictionId);
+  });
+
+  await check('Phase 2 - SIC↔NAICS conversion (sample 10 pairs)', async () => {
+    const samples = ['3674', '3711', '3714', '2834', '7372', '7371', '8742', '8711', '5812', '6020'];
+    const missing = samples.filter(s => convertIndustryCode('SIC', 'NAICS_2017', s).length === 0);
+    if (missing.length) throw new Error('missing mappings: ' + missing.join(','));
+  });
+
+  await check('Phase 2 - industry coverage reporting', async () => {
+    const cov = TPApp.industry.getCoverage();
+    if (!cov.sicEmbedded || cov.sicEmbedded < 100) throw new Error('SIC catalogue too small');
+    if (cov.concordancePairs < 200) throw new Error('concordance too small');
+  });
+
+  await check('Phase 2 - mergeStrictest (JP+US+IN+OECD)', async () => {
+    const merged = await rulesEngine.mergeStrictest(['JP', 'US', 'IN', 'OECD_GENERIC']);
+    if (merged.rangeMethod.lowerPercentile < 25) throw new Error('lower should tighten ≥25');
+    if (merged.rangeMethod.upperPercentile > 75) throw new Error('upper should tighten ≤75');
+  });
+
+  await check('Phase 2 - condition tree evaluator: (A AND B) OR (C AND D)', async () => {
+    const tree = { kind: 'group', op: 'OR', not: false, children: [
+      { kind: 'group', op: 'AND', not: false, children: [
+        { kind: 'condition', field: 'country', op: '=', value: 'US' },
+        { kind: 'condition', field: 'isListed', op: '=', value: true },
+      ]},
+      { kind: 'group', op: 'AND', not: false, children: [
+        { kind: 'condition', field: 'country', op: '=', value: 'JP' },
+        { kind: 'condition', field: 'isListed', op: '=', value: false },
+      ]},
+    ]};
+    const c1 = { country: 'US', isListed: true,  financials: {} };
+    const c2 = { country: 'JP', isListed: false, financials: {} };
+    const c3 = { country: 'DE', isListed: true,  financials: {} };
+    if (!evaluateConditionTree(tree, c1)) throw new Error('c1 should match');
+    if (!evaluateConditionTree(tree, c2)) throw new Error('c2 should match');
+    if (evaluateConditionTree(tree, c3))  throw new Error('c3 should not match');
+  });
+
+  await check('Phase 2 - condition tree evaluator: 3-layer nesting + NOT', async () => {
+    const tree = { kind: 'group', op: 'AND', not: false, children: [
+      { kind: 'group', op: 'OR', not: false, children: [
+        { kind: 'group', op: 'AND', not: false, children: [
+          { kind: 'condition', field: 'country', op: '=', value: 'US' },
+        ]},
+        { kind: 'condition', field: 'country', op: '=', value: 'JP' },
+      ]},
+      { kind: 'condition', field: 'isListed', op: '=', value: true, not: true },
+    ]};
+    const c1 = { country: 'US', isListed: false, financials: {} };
+    if (!evaluateConditionTree(tree, c1)) throw new Error('c1 should match');
+  });
+
+  await check('Phase 2 - weightedAverage handles arbitrary N years', async () => {
+    for (const n of [1, 3, 5, 10]) {
+      const data = Array.from({ length: n }, (_, i) => ({ numerator: 10 + i, denominator: 100 }));
+      const r = weightedAverage(data);
+      if (Math.abs(r - simpleAverage(data.map(d => d.numerator / d.denominator))) > 1e-9) throw new Error('mismatch at n=' + n);
+    }
+    if (weightedAverage([]) !== null) throw new Error('empty must be null');
+  });
+
+  await check('Phase 2 - loss-makers count(years where ≤ 0)', async () => {
+    const company = { country: 'US', financials: {
+      '2020': { year: 2020, operatingIncome: -100, netSales: 1000 },
+      '2021': { year: 2021, operatingIncome: -50,  netSales: 1100 },
+      '2022': { year: 2022, operatingIncome: 200,  netSales: 1200 },
+    }};
+    const tree = { kind: 'condition', field: 'count(years where financials[y].operatingIncome <= 0)', op: '>=', value: 2 };
+    if (!evaluateConditionTree(tree, company)) throw new Error('should flag persistent loss');
+    const tree2 = { kind: 'condition', field: 'count(years where financials[y].operatingIncome <= 0)', op: '>=', value: 3 };
+    if (evaluateConditionTree(tree2, company)) throw new Error('should not be 3-of-3');
+  });
+
+  await check('Phase 2 - financials.latest / lastMinusN resolution', async () => {
+    const c = { financials: { '2020': { year: 2020, netSales: 10 }, '2021': { year: 2021, netSales: 20 }, '2022': { year: 2022, netSales: 30 } } };
+    if (resolveConditionField('financials.latest.netSales', c) !== 30) throw new Error('latest mismatch');
+    if (resolveConditionField('financials.lastMinus1.netSales', c) !== 20) throw new Error('lastMinus1 mismatch');
+    if (resolveConditionField('financials.lastMinus2.netSales', c) !== 10) throw new Error('lastMinus2 mismatch');
+  });
+
+  await check('Phase 2 - getYearsAvailable + getLatestN', async () => {
+    const c = { financials: { '2018': {}, '2019': {}, '2020': {}, '2021': {}, '2022': {} } };
+    const ys = getYearsAvailable(c);
+    if (ys.length !== 5 || ys[0] !== 2018 || ys[4] !== 2022) throw new Error('years sort mismatch');
+    const last3 = getLatestN(c, 3);
+    if (Object.keys(last3).length !== 3 || !last3['2022']) throw new Error('latest3 mismatch');
+  });
+
+  await check('Phase 2 - Capital IQ Excel: 1-year layout', async () => {
+    const sheet = [
+      ['', '', '', 'Net Sales', 'Operating Income'],
+      ['Company Name', 'Country', 'Currency', '2024', '2024'],
+      ['Sample 1Y', 'US', 'USD', 1000, 100],
+    ];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(sheet), 'Sheet1');
+    const buf = XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
+    const file = new File([buf], 'ciq-1y.xlsx');
+    const r = await parseCapitalIQExcel(file);
+    if (r.detectedYears.length !== 1) throw new Error('expected 1 year, got ' + r.detectedYears.length);
+    if (r.companies[0].financials['2024'].netSales !== 1000) throw new Error('netSales mapping miss');
+  });
+
+  await check('Phase 2 - Capital IQ Excel: 5-year forward-fill', async () => {
+    const sheet = [
+      ['', '', '', 'Net Sales', '', '', '', '', 'Operating Income', '', '', '', ''],
+      ['Company Name', 'Country', 'Currency', '2024', '2023', '2022', '2021', '2020', '2024', '2023', '2022', '2021', '2020'],
+      ['Sample 5Y', 'US', 'USD', 500, 450, 400, 350, 300, 50, 40, 30, 20, 10],
+    ];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(sheet), 'Sheet1');
+    const buf = XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
+    const file = new File([buf], 'ciq-5y.xlsx');
+    const r = await parseCapitalIQExcel(file);
+    if (r.detectedYears.length !== 5) throw new Error('expected 5, got ' + r.detectedYears.length);
+    const c = r.companies[0];
+    if (c.financials['2020'].netSales !== 300) throw new Error('forward-fill failed for 2020');
+    if (c.financials['2024'].operatingIncome !== 50) throw new Error('opInc 2024 miss');
+  });
+
+  await check('Phase 2 - Capital IQ Excel: 10-year layout', async () => {
+    const years = ['2024','2023','2022','2021','2020','2019','2018','2017','2016','2015'];
+    const sheet = [
+      ['', '', 'Net Sales', ...Array(9).fill('')],
+      ['Company Name', 'Country', ...years],
+      ['Sample 10Y', 'US', ...years.map(y => Number(y))],
+    ];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(sheet), 'Sheet1');
+    const buf = XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
+    const file = new File([buf], 'ciq-10y.xlsx');
+    const r = await parseCapitalIQExcel(file);
+    if (r.detectedYears.length !== 10) throw new Error('expected 10, got ' + r.detectedYears.length);
+  });
+
+  await check('Phase 2 - mixed-year companies (3/5/7 years)', async () => {
+    const samples = generateSampleCompanies();
+    const counts = samples.map(c => Object.keys(c.financials).length);
+    const unique = [...new Set(counts)];
+    if (unique.length < 2) throw new Error('expected variable-year coverage');
+    if (counts.some(c => c < 1 || c > YEARS_ANALYSIS_HARD_MAX)) throw new Error('coverage out of bounds');
+    // weighted average across 3-7 year ranges should produce a finite number per company.
+    for (const c of samples.slice(0, 5)) {
+      const ys = getYearsAvailable(c);
+      const wa = weightedAverage(ys.map(y => ({ numerator: c.financials[String(y)].operatingIncome, denominator: c.financials[String(y)].netSales })));
+      if (wa == null || !Number.isFinite(wa)) throw new Error('wa not finite for ' + c.name);
+    }
+  });
+
+  await check('Phase 2 - loss-makers rule N=2/M=3 and N=3/M=5', async () => {
+    const c1 = { financials: { '2022': { operatingIncome: -1 }, '2023': { operatingIncome: -1 }, '2024': { operatingIncome: 10 } }};
+    const c2 = { financials: { '2020': { operatingIncome: -1 }, '2021': { operatingIncome: -1 }, '2022': { operatingIncome: -1 }, '2023': { operatingIncome: 5 }, '2024': { operatingIncome: 5 } }};
+    const ruleN2M3 = { kind: 'condition', field: 'count(years where financials[y].operatingIncome <= 0)', op: '>=', value: 2 };
+    const ruleN3M5 = { kind: 'condition', field: 'count(years where financials[y].operatingIncome <= 0)', op: '>=', value: 3 };
+    if (!evaluateConditionTree(ruleN2M3, c1)) throw new Error('c1 N=2/M=3 should flag');
+    if (!evaluateConditionTree(ruleN3M5, c2)) throw new Error('c2 N=3/M=5 should flag');
+  });
+
+  await check('Phase 2 - drag-drop preserves stage order', async () => {
+    const stages = [
+      { id: 'S1', order: 1 }, { id: 'S2', order: 2 },
+      { id: 'S3', order: 3 }, { id: 'S4', order: 4 }, { id: 'S5', order: 5 },
+    ];
+    const app = tpApp();
+    app.moveStage(stages, 0, 3);
+    if (stages.map(s => s.id).join(',') !== 'S2,S3,S4,S1,S5') throw new Error('reorder failed');
+    if (stages[3].order !== 4) throw new Error('order renumber failed');
+  });
+
+  await check('Phase 2 - JSON export → import roundtrip preserves rule', async () => {
+    const rule = await rulesEngine.getActive('JP');
+    const blob = new Blob([JSON.stringify({ rule })], { type: 'application/json' });
+    const txt = await blob.text();
+    const parsed = JSON.parse(txt);
+    if (parsed.rule.jurisdictionId !== rule.jurisdictionId) throw new Error('roundtrip mismatch');
+    if (parsed.rule.rangeMethod.lowerPercentile !== rule.rangeMethod.lowerPercentile) throw new Error('deep field mismatch');
+  });
+
+  await check('Phase 2 - TODO standing item registered', async () => {
+    await todoStore.ensureStandingTodos();
+    const list = await todoStore.list();
+    const concordance = list.find(t => t.metadata?.standingKey === 'SIC_NAICS_FULL_COVERAGE');
+    if (!concordance) throw new Error('standing TODO missing');
+  });
+
+  await check('Phase 2 - TODO programmatic add via TPApp', async () => {
+    const t = await TPApp.todo.add({ title: 'selftest todo', source: 'selftest', priority: 'low' });
+    await TPApp.todo.complete(t.id);
+    const list = await TPApp.todo.list();
+    const it = list.find(x => x.id === t.id);
+    if (it.status !== 'completed') throw new Error('not completed');
+  });
+
+  await check('Phase 2 - >10 years warning', async () => {
+    const years = ['2024','2023','2022','2021','2020','2019','2018','2017','2016','2015','2014'];
+    const sheet = [
+      ['', '', 'Net Sales', ...Array(10).fill('')],
+      ['Company Name', 'Country', ...years],
+      ['Sample 11Y', 'US', ...years.map(Number)],
+    ];
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(sheet), 'Sheet1');
+    const buf = XLSX.write(wb, { type: 'array', bookType: 'xlsx' });
+    const file = new File([buf], 'ciq-11y.xlsx');
+    const r = await parseCapitalIQExcel(file);
+    if (!r.warnings.some(w => /最大値/.test(w))) throw new Error('warning missing for >10');
+  });
+
   return out;
 }
+</script>
+
+
+<!-- =====================================================================
+  PHASE 2 / BLOCK 9 : Industry code catalogues + SIC↔NAICS concordance
+  ---------------------------------------------------------------------
+  The SIC↔NAICS concordance is the U.S. Census Bureau's "1987 SIC →
+  2017 NAICS" crosswalk. The full crosswalk is ~3,000-5,000 pairs.
+  This file embeds the major-industry subset (≈220 pairs) covering
+  the most common manufacturing, trade, finance, and service codes
+  used in transfer pricing comparable searches. Coverage and gaps
+  are reported via `INDUSTRY_CODE_COVERAGE` and surfaced as a
+  standing TODO so users can supplement via CSV import.
+===================================================================== -->
+<script id="industry-codes">
+/* ---------------- SIC 1987 catalogue (major divisions, abbreviated) ---------------- */
+/** @type {Object<string,string>} */
+const SIC_1987_CODES = {
+  // Agriculture, Forestry, and Fishing (01-09)
+  '0111': 'Wheat', '0112': 'Rice', '0115': 'Corn', '0116': 'Soybeans',
+  '0211': 'Beef Cattle Feedlots', '0241': 'Dairy Farms',
+  // Mining (10-14)
+  '1011': 'Iron Ores', '1311': 'Crude Petroleum and Natural Gas', '1411': 'Dimension Stone',
+  // Construction (15-17)
+  '1521': 'General Contractors - Single-Family Houses', '1731': 'Electrical Work',
+  // Manufacturing - Food & Kindred (20)
+  '2011': 'Meat Packing Plants', '2013': 'Sausages and Other Prepared Meat Products',
+  '2015': 'Poultry Slaughtering and Processing', '2024': 'Ice Cream and Frozen Desserts',
+  '2026': 'Fluid Milk', '2033': 'Canned Fruits, Vegetables, Preserves',
+  '2041': 'Flour and Other Grain Mill Products', '2050': 'Bakery Products',
+  '2074': 'Cottonseed Oil Mills', '2080': 'Beverages',
+  // Manufacturing - Tobacco/Textile/Apparel (21-23)
+  '2111': 'Cigarettes', '2211': 'Broadwoven Fabric Mills, Cotton', '2300': 'Apparel and Other Finished Products',
+  // Lumber, Furniture, Paper, Printing (24-27)
+  '2411': 'Logging', '2421': 'Sawmills and Planing Mills', '2511': 'Wood Household Furniture',
+  '2611': 'Pulp Mills', '2621': 'Paper Mills', '2711': 'Newspapers',
+  // Chemicals (28)
+  '2812': 'Alkalies and Chlorine', '2821': 'Plastics Materials and Resins',
+  '2833': 'Medicinal Chemicals and Botanical Products', '2834': 'Pharmaceutical Preparations',
+  '2836': 'Biological Products', '2841': 'Soap and Other Detergents',
+  '2844': 'Perfumes, Cosmetics and Other Toilet Preparations',
+  '2851': 'Paints, Varnishes, Lacquers, Enamels',
+  '2869': 'Industrial Organic Chemicals NEC', '2873': 'Nitrogenous Fertilizers',
+  '2891': 'Adhesives and Sealants',
+  // Petroleum & Rubber/Plastics (29-30)
+  '2911': 'Petroleum Refining', '3011': 'Tires and Inner Tubes', '3089': 'Plastics Products NEC',
+  // Leather (31)
+  '3140': 'Footwear, Except Rubber',
+  // Stone, Clay, Glass (32)
+  '3211': 'Flat Glass', '3241': 'Cement, Hydraulic',
+  // Primary & Fabricated Metal (33-34)
+  '3312': 'Steel Works, Blast Furnaces', '3334': 'Primary Production of Aluminum',
+  '3411': 'Metal Cans', '3441': 'Fabricated Structural Metal',
+  // Industrial Machinery (35)
+  '3511': 'Steam, Gas and Hydraulic Turbines', '3523': 'Farm Machinery and Equipment',
+  '3531': 'Construction Machinery', '3541': 'Machine Tools, Metal Cutting Types',
+  '3559': 'Special Industry Machinery NEC', '3561': 'Pumps and Pumping Equipment',
+  '3571': 'Electronic Computers', '3572': 'Computer Storage Devices',
+  '3577': 'Computer Peripheral Equipment NEC', '3585': 'Refrigeration and Heating Equipment',
+  // Electronics (36)
+  '3612': 'Power, Distribution and Specialty Transformers',
+  '3621': 'Motors and Generators', '3625': 'Relays and Industrial Controls',
+  '3651': 'Household Audio and Video Equipment', '3661': 'Telephone and Telegraph Apparatus',
+  '3663': 'Radio and Television Broadcasting and Communications Equipment',
+  '3669': 'Communications Equipment NEC', '3671': 'Electron Tubes',
+  '3674': 'Semiconductors and Related Devices', '3679': 'Electronic Components NEC',
+  // Transportation Equipment (37)
+  '3711': 'Motor Vehicles and Passenger Car Bodies', '3714': 'Motor Vehicle Parts and Accessories',
+  '3721': 'Aircraft', '3724': 'Aircraft Engines and Engine Parts',
+  '3728': 'Aircraft Parts and Auxiliary Equipment NEC', '3731': 'Ship Building and Repairing',
+  // Instruments (38)
+  '3812': 'Search, Detection, Navigation Instruments', '3821': 'Laboratory Apparatus',
+  '3825': 'Instruments for Measuring and Testing of Electricity',
+  '3826': 'Laboratory Analytical Instruments', '3827': 'Optical Instruments and Lenses',
+  '3841': 'Surgical and Medical Instruments', '3842': 'Orthopedic, Prosthetic Supplies',
+  '3843': 'Dental Equipment and Supplies', '3845': 'Electromedical Apparatus',
+  '3861': 'Photographic Equipment and Supplies',
+  // Misc Manufacturing (39)
+  '3911': 'Jewelry, Precious Metal', '3942': 'Dolls and Stuffed Toys', '3944': 'Games, Toys',
+  // Transportation, Communications, Utilities (40-49)
+  '4011': 'Railroads, Line-Haul Operating', '4213': 'Trucking, Except Local',
+  '4412': 'Deep Sea Foreign Transportation of Freight', '4512': 'Air Transportation, Scheduled',
+  '4612': 'Crude Petroleum Pipelines', '4731': 'Arrangement of Transportation of Freight',
+  '4812': 'Radiotelephone Communications', '4813': 'Telephone Communications',
+  '4832': 'Radio Broadcasting Stations', '4833': 'Television Broadcasting Stations',
+  '4911': 'Electric Services', '4922': 'Natural Gas Transmission',
+  // Wholesale Trade (50-51)
+  '5013': 'Motor Vehicle Supplies and New Parts', '5045': 'Computers and Computer Peripheral Equipment',
+  '5065': 'Electronic Parts and Equipment NEC', '5122': 'Drugs, Drug Proprietaries',
+  '5141': 'Groceries, General Line',
+  // Retail Trade (52-59)
+  '5211': 'Lumber and Other Building Materials Dealers', '5311': 'Department Stores',
+  '5411': 'Grocery Stores', '5511': 'Motor Vehicle Dealers, New and Used',
+  '5712': 'Furniture Stores', '5734': 'Computer and Computer Software Stores',
+  '5812': 'Eating Places', '5912': 'Drug Stores and Proprietary Stores',
+  // Finance, Insurance, Real Estate (60-67)
+  '6020': 'Commercial Banks', '6021': 'National Commercial Banks',
+  '6022': 'State Commercial Banks', '6035': 'Savings Institution, Federally Chartered',
+  '6111': 'Federal and Federally-Sponsored Credit Agencies',
+  '6141': 'Personal Credit Institutions', '6211': 'Security Brokers, Dealers, and Flotation Companies',
+  '6311': 'Life Insurance', '6321': 'Accident and Health Insurance',
+  '6331': 'Fire, Marine and Casualty Insurance', '6411': 'Insurance Agents, Brokers and Service',
+  '6512': 'Operators of Apartment Buildings', '6531': 'Real Estate Agents and Managers',
+  // Services (70-89)
+  '7011': 'Hotels and Motels', '7211': 'Power Laundries, Family and Commercial',
+  '7311': 'Advertising Agencies', '7322': 'Adjustment and Collection Services',
+  '7331': 'Direct Mail Advertising Services', '7349': 'Building Cleaning and Maintenance Services',
+  '7361': 'Employment Agencies', '7363': 'Help Supply Services',
+  '7371': 'Computer Services - Custom Programming Services',
+  '7372': 'Prepackaged Software', '7373': 'Computer Integrated Systems Design',
+  '7374': 'Computer Processing and Data Preparation', '7375': 'Computer Facilities Management',
+  '7378': 'Computer Maintenance Services', '7379': 'Computer Services NEC',
+  '7389': 'Services - Business Services NEC', '7812': 'Services - Motion Picture Production',
+  '7822': 'Motion Picture and Video Tape Distribution', '7832': 'Services - Motion Picture Theaters',
+  '7990': 'Services - Amusement and Recreation Services',
+  '8011': 'Offices and Clinics of Doctors of Medicine', '8062': 'General Medical and Surgical Hospitals',
+  '8082': 'Home Health Care Services', '8111': 'Legal Services',
+  '8200': 'Services - Educational Services', '8221': 'Colleges, Universities, Professional Schools',
+  '8299': 'Services - Educational Services NEC', '8351': 'Child Day Care Services',
+  '8711': 'Engineering Services', '8721': 'Accounting, Auditing, and Bookkeeping Services',
+  '8731': 'Commercial Physical and Biological Research',
+  '8741': 'Management Services', '8742': 'Management Consulting Services',
+  '8743': 'Public Relations Services', '8744': 'Facilities Support Management Services',
+  '8748': 'Business Consulting Services NEC',
+};
+
+/* ---------------- NAICS 2017 catalogue (major sectors, abbreviated) ---------------- */
+/** @type {Object<string,string>} */
+const NAICS_2017_CODES = {
+  '111110': 'Soybean Farming', '111140': 'Wheat Farming', '111150': 'Corn Farming',
+  '112111': 'Beef Cattle Ranching', '112120': 'Dairy Cattle and Milk Production',
+  '211111': 'Crude Petroleum and Natural Gas Extraction',
+  '236115': 'New Single-Family Housing Construction', '238210': 'Electrical Contractors',
+  '311611': 'Animal (except Poultry) Slaughtering', '311612': 'Meat Processed from Carcasses',
+  '311615': 'Poultry Processing', '311520': 'Ice Cream and Frozen Dessert Manufacturing',
+  '311511': 'Fluid Milk Manufacturing', '311420': 'Fruit and Vegetable Canning',
+  '311211': 'Flour Milling', '311812': 'Commercial Bakeries',
+  '311225': 'Fats and Oils Refining and Blending',
+  '312230': 'Tobacco Manufacturing', '313210': 'Broadwoven Fabric Mills',
+  '315000': 'Apparel Manufacturing',
+  '113310': 'Logging', '321113': 'Sawmills', '337122': 'Nonupholstered Wood Household Furniture',
+  '322110': 'Pulp Mills', '322121': 'Paper (except Newsprint) Mills', '511110': 'Newspaper Publishers',
+  '325180': 'Other Basic Inorganic Chemical Manufacturing',
+  '325211': 'Plastics Material and Resin Manufacturing',
+  '325411': 'Medicinal and Botanical Manufacturing',
+  '325412': 'Pharmaceutical Preparation Manufacturing',
+  '325414': 'Biological Product Manufacturing',
+  '325611': 'Soap and Other Detergent Manufacturing',
+  '325620': 'Toilet Preparation Manufacturing',
+  '325510': 'Paint and Coating Manufacturing',
+  '325199': 'All Other Basic Organic Chemical Manufacturing',
+  '325311': 'Nitrogenous Fertilizer Manufacturing',
+  '325520': 'Adhesive Manufacturing',
+  '324110': 'Petroleum Refineries', '326211': 'Tire Manufacturing',
+  '326199': 'All Other Plastics Product Manufacturing',
+  '316210': 'Footwear Manufacturing',
+  '327211': 'Flat Glass Manufacturing', '327310': 'Cement Manufacturing',
+  '331110': 'Iron and Steel Mills', '331313': 'Alumina Refining and Primary Aluminum Production',
+  '332431': 'Metal Can Manufacturing', '332312': 'Fabricated Structural Metal Manufacturing',
+  '333611': 'Turbine and Turbine Generator Set Units Manufacturing',
+  '333111': 'Farm Machinery and Equipment Manufacturing',
+  '333120': 'Construction Machinery Manufacturing',
+  '333517': 'Machine Tool Manufacturing',
+  '333249': 'Other Industrial Machinery Manufacturing',
+  '333911': 'Pump and Pumping Equipment Manufacturing',
+  '334111': 'Electronic Computer Manufacturing',
+  '334112': 'Computer Storage Device Manufacturing',
+  '334118': 'Computer Terminal and Other Computer Peripheral Equipment Manufacturing',
+  '333415': 'Air-Conditioning, Refrigeration, and Warm Air Heating Equipment',
+  '335311': 'Power, Distribution, and Specialty Transformer Manufacturing',
+  '335312': 'Motor and Generator Manufacturing',
+  '335314': 'Relay and Industrial Control Manufacturing',
+  '334310': 'Audio and Video Equipment Manufacturing',
+  '334210': 'Telephone Apparatus Manufacturing',
+  '334220': 'Radio and Television Broadcasting and Wireless Communications Equipment',
+  '334290': 'Other Communications Equipment Manufacturing',
+  '334411': 'Electron Tube Manufacturing',
+  '334413': 'Semiconductor and Related Device Manufacturing',
+  '334419': 'Other Electronic Component Manufacturing',
+  '336111': 'Automobile Manufacturing', '336112': 'Light Truck and Utility Vehicle Manufacturing',
+  '336211': 'Motor Vehicle Body Manufacturing',
+  '336390': 'Other Motor Vehicle Parts Manufacturing',
+  '336411': 'Aircraft Manufacturing', '336412': 'Aircraft Engine and Engine Parts',
+  '336413': 'Other Aircraft Parts and Auxiliary Equipment Manufacturing',
+  '336611': 'Ship Building and Repairing',
+  '334511': 'Search, Detection, Navigation, Guidance Instrument Manufacturing',
+  '334516': 'Analytical Laboratory Instrument Manufacturing',
+  '334515': 'Instrument Manufacturing for Measuring and Testing Electricity',
+  '333314': 'Optical Instrument and Lens Manufacturing',
+  '339112': 'Surgical and Medical Instrument Manufacturing',
+  '339113': 'Surgical Appliance and Supplies Manufacturing',
+  '339114': 'Dental Equipment and Supplies Manufacturing',
+  '334510': 'Electromedical and Electrotherapeutic Apparatus Manufacturing',
+  '333316': 'Photographic and Photocopying Equipment Manufacturing',
+  '339910': 'Jewelry and Silverware Manufacturing',
+  '339930': 'Doll, Toy, and Game Manufacturing',
+  '482111': 'Line-Haul Railroads',
+  '484121': 'General Freight Trucking, Long-Distance, Truckload',
+  '483111': 'Deep Sea Freight Transportation',
+  '481111': 'Scheduled Passenger Air Transportation',
+  '486110': 'Pipeline Transportation of Crude Oil',
+  '488510': 'Freight Transportation Arrangement',
+  '517210': 'Wireless Telecommunications Carriers',
+  '517110': 'Wired Telecommunications Carriers',
+  '515112': 'Radio Stations', '515120': 'Television Broadcasting',
+  '221110': 'Electric Power Generation',
+  '221210': 'Natural Gas Distribution',
+  '423120': 'Motor Vehicle Supplies and New Parts Merchant Wholesalers',
+  '423430': 'Computer and Computer Peripheral Equipment Wholesalers',
+  '423690': 'Other Electronic Parts and Equipment Merchant Wholesalers',
+  '424210': 'Drugs and Druggists Sundries Merchant Wholesalers',
+  '424410': 'General Line Grocery Merchant Wholesalers',
+  '444110': 'Home Centers',
+  '452210': 'Department Stores',
+  '445110': 'Supermarkets and Other Grocery Stores',
+  '441110': 'New Car Dealers',
+  '442110': 'Furniture Stores',
+  '443142': 'Electronics Stores',
+  '722511': 'Full-Service Restaurants',
+  '446110': 'Pharmacies and Drug Stores',
+  '522110': 'Commercial Banking',
+  '522120': 'Savings Institutions',
+  '522291': 'Consumer Lending',
+  '523120': 'Securities Brokerage',
+  '524113': 'Direct Life Insurance Carriers',
+  '524114': 'Direct Health and Medical Insurance Carriers',
+  '524126': 'Direct Property and Casualty Insurance Carriers',
+  '524210': 'Insurance Agencies and Brokerages',
+  '531110': 'Lessors of Residential Buildings and Dwellings',
+  '531210': 'Offices of Real Estate Agents and Brokers',
+  '721110': 'Hotels (except Casino Hotels) and Motels',
+  '812320': 'Drycleaning and Laundry Services',
+  '541810': 'Advertising Agencies',
+  '561440': 'Collection Agencies',
+  '541860': 'Direct Mail Advertising',
+  '561720': 'Janitorial Services',
+  '561311': 'Employment Placement Agencies',
+  '561320': 'Temporary Help Services',
+  '541511': 'Custom Computer Programming Services',
+  '511210': 'Software Publishers',
+  '541512': 'Computer Systems Design Services',
+  '518210': 'Data Processing, Hosting, and Related Services',
+  '541513': 'Computer Facilities Management Services',
+  '811212': 'Computer and Office Machine Repair',
+  '541519': 'Other Computer Related Services',
+  '561499': 'All Other Business Support Services',
+  '512110': 'Motion Picture and Video Production',
+  '512120': 'Motion Picture and Video Distribution',
+  '512131': 'Motion Picture Theaters (except Drive-Ins)',
+  '713990': 'All Other Amusement and Recreation Industries',
+  '621111': 'Offices of Physicians (except Mental Health Specialists)',
+  '622110': 'General Medical and Surgical Hospitals',
+  '621610': 'Home Health Care Services',
+  '541110': 'Offices of Lawyers',
+  '611000': 'Educational Services',
+  '611310': 'Colleges, Universities, and Professional Schools',
+  '624410': 'Child Day Care Services',
+  '541330': 'Engineering Services',
+  '541211': 'Offices of Certified Public Accountants',
+  '541711': 'Research and Development in Biotechnology',
+  '551114': 'Corporate, Subsidiary, and Regional Managing Offices',
+  '541611': 'Administrative Management and General Management Consulting Services',
+  '541820': 'Public Relations Agencies',
+  '561210': 'Facilities Support Services',
+  '541618': 'Other Management Consulting Services',
+};
+
+/* ---------------- NACE Rev 2 catalogue (sample) ---------------- */
+/** @type {Object<string,string>} */
+const NACE_REV2_CODES = {
+  'A01': 'Crop and animal production, hunting',
+  'B05': 'Mining of coal and lignite', 'B06': 'Extraction of crude petroleum and natural gas',
+  'C10': 'Manufacture of food products', 'C11': 'Manufacture of beverages',
+  'C13': 'Manufacture of textiles', 'C14': 'Manufacture of wearing apparel',
+  'C19': 'Manufacture of coke and refined petroleum products',
+  'C20': 'Manufacture of chemicals and chemical products',
+  'C21': 'Manufacture of basic pharmaceutical products',
+  'C22': 'Manufacture of rubber and plastic products',
+  'C24': 'Manufacture of basic metals', 'C25': 'Manufacture of fabricated metal products',
+  'C26': 'Manufacture of computer, electronic and optical products',
+  'C27': 'Manufacture of electrical equipment', 'C28': 'Manufacture of machinery and equipment',
+  'C29': 'Manufacture of motor vehicles, trailers and semi-trailers',
+  'C30': 'Manufacture of other transport equipment',
+  'G45': 'Wholesale and retail trade and repair of motor vehicles',
+  'G46': 'Wholesale trade, except of motor vehicles', 'G47': 'Retail trade, except of motor vehicles',
+  'J58': 'Publishing activities', 'J61': 'Telecommunications',
+  'J62': 'Computer programming, consultancy and related activities',
+  'J63': 'Information service activities',
+  'K64': 'Financial service activities, except insurance and pension',
+  'K65': 'Insurance, reinsurance and pension funding',
+  'M69': 'Legal and accounting activities',
+  'M70': 'Activities of head offices; management consultancy activities',
+  'M71': 'Architectural and engineering activities; technical testing',
+  'M72': 'Scientific research and development',
+  'M73': 'Advertising and market research',
+  'N78': 'Employment activities', 'N81': 'Services to buildings and landscape',
+  'Q86': 'Human health activities',
+};
+
+/* ---------------- SIC 1987 → NAICS 2017 concordance (many-to-many) ----------------
+ * Values are arrays so a single SIC can fan out to several NAICS codes
+ * (Census Bureau crosswalk semantics). Subset coverage; the rest is
+ * tracked as a standing TODO. */
+/** @type {Object<string, string[]>} */
+const SIC_TO_NAICS_2017 = {
+  '0111': ['111140'], '0112': ['111160'], '0115': ['111150'], '0116': ['111110'],
+  '0211': ['112111'], '0241': ['112120'],
+  '1011': ['212210'], '1311': ['211111','211112'], '1411': ['212311'],
+  '1521': ['236115'], '1731': ['238210'],
+  '2011': ['311611'], '2013': ['311612','311999'], '2015': ['311615'],
+  '2024': ['311520'], '2026': ['311511'], '2033': ['311421','311422','311423'],
+  '2041': ['311211','311212','311213'], '2050': ['311812','311813','311821'],
+  '2074': ['311224','311225'], '2080': ['312111','312112','312120','312130','312140'],
+  '2111': ['312230'], '2211': ['313210','313220'], '2300': ['315110','315190','315210'],
+  '2411': ['113310'], '2421': ['321113','321912'], '2511': ['337122','337127'],
+  '2611': ['322110'], '2621': ['322121','322122'], '2711': ['511110'],
+  '2812': ['325180'], '2821': ['325211'], '2833': ['325411'],
+  '2834': ['325412'], '2836': ['325414'], '2841': ['325611'],
+  '2844': ['325620'], '2851': ['325510'], '2869': ['325199'],
+  '2873': ['325311'], '2891': ['325520'],
+  '2911': ['324110'], '3011': ['326211'], '3089': ['326199'],
+  '3140': ['316210'], '3211': ['327211'], '3241': ['327310'],
+  '3312': ['331110','324199'], '3334': ['331313'],
+  '3411': ['332431'], '3441': ['332312'],
+  '3511': ['333611'], '3523': ['333111'], '3531': ['333120'],
+  '3541': ['333517'], '3559': ['333249','333318'], '3561': ['333911'],
+  '3571': ['334111'], '3572': ['334112'], '3577': ['334118'],
+  '3585': ['333415','333416'],
+  '3612': ['335311'], '3621': ['335312'], '3625': ['335314'],
+  '3651': ['334310'], '3661': ['334210'], '3663': ['334220'],
+  '3669': ['334290'], '3671': ['334411'], '3674': ['334413'],
+  '3679': ['334418','334419'],
+  '3711': ['336111','336112','336120','336211'], '3714': ['336211','336370','336390'],
+  '3721': ['336411'], '3724': ['336412'], '3728': ['336413'], '3731': ['336611'],
+  '3812': ['334511'], '3821': ['339113'], '3825': ['334515','334416'],
+  '3826': ['334516'], '3827': ['333314'], '3841': ['339112'],
+  '3842': ['339113','339115','334510'], '3843': ['339114'], '3845': ['334510'],
+  '3861': ['333316'],
+  '3911': ['339910'], '3942': ['339930'], '3944': ['339930','339932'],
+  '4011': ['482111'], '4213': ['484121','484122'], '4412': ['483111','483113'],
+  '4512': ['481111','481112'], '4612': ['486110'], '4731': ['488510','488991'],
+  '4812': ['517210'], '4813': ['517110'], '4832': ['515111','515112'],
+  '4833': ['515120'], '4911': ['221111','221112','221113','221114','221115','221116','221117','221118','221121','221122'],
+  '4922': ['486210'],
+  '5013': ['423120','423140'], '5045': ['423430'], '5065': ['423690'],
+  '5122': ['424210'], '5141': ['424410','424420'],
+  '5211': ['444110','444190'], '5311': ['452210','452310'],
+  '5411': ['445110','445120'], '5511': ['441110','441120'],
+  '5712': ['442110'], '5734': ['443142'], '5812': ['722511','722513','722514','722515'],
+  '5912': ['446110'],
+  '6020': ['522110'], '6021': ['522110'], '6022': ['522110'],
+  '6035': ['522120'], '6111': ['522293','522294','522298'],
+  '6141': ['522291'], '6211': ['523120','523130','523140','523210'],
+  '6311': ['524113'], '6321': ['524114'], '6331': ['524126','524127','524128'],
+  '6411': ['524210'],
+  '6512': ['531110','531311'], '6531': ['531210','531311','531312'],
+  '7011': ['721110','721120','721191','721199'], '7211': ['812320','812331','812332'],
+  '7311': ['541810'], '7322': ['561440'], '7331': ['541860'],
+  '7349': ['561720','561740','561790'], '7361': ['561311','561312'],
+  '7363': ['561320'],
+  '7371': ['541511'], '7372': ['511210'], '7373': ['541512'],
+  '7374': ['518210','541514'], '7375': ['541513','518210'],
+  '7378': ['811212'], '7379': ['541519','541612','541690'],
+  '7389': ['561499','561410','561421','561422','561431','561491','561492'],
+  '7812': ['512110','512191','711510'], '7822': ['512120'], '7832': ['512131'],
+  '7990': ['713990','713920','713930','713940','713950','711120','711130','711190','711211','711212','711219','711310','711320','711410','711510'],
+  '8011': ['621111','621112'], '8062': ['622110'],
+  '8082': ['621610'], '8111': ['541110'],
+  '8200': ['611000'], '8221': ['611310'],
+  '8299': ['611430','611513','611519','611691','611692','611699','611710'],
+  '8351': ['624410'],
+  '8711': ['541330'], '8721': ['541211','541213','541214','541219'],
+  '8731': ['541711','541712','541720'],
+  '8741': ['551114','561110'], '8742': ['541611','541612','541613','541614','541618'],
+  '8743': ['541820'], '8744': ['561210'], '8748': ['541618','541690'],
+};
+
+/* Build reverse map at load time. */
+/** @type {Object<string, string[]>} */
+const NAICS_2017_TO_SIC = (() => {
+  const out = {};
+  for (const [sic, naicsList] of Object.entries(SIC_TO_NAICS_2017)) {
+    for (const n of naicsList) {
+      (out[n] = out[n] || []).push(sic);
+    }
+  }
+  return out;
+})();
+
+/** Reference numbers based on Census Bureau 1987 SIC → 2017 NAICS crosswalk. */
+const INDUSTRY_CODE_COVERAGE = {
+  sicTotalReference: 1004,
+  naicsTotalReference: 1057,
+  sicEmbedded: Object.keys(SIC_1987_CODES).length,
+  naicsEmbedded: Object.keys(NAICS_2017_CODES).length,
+  naceEmbedded: Object.keys(NACE_REV2_CODES).length,
+  concordancePairs: Object.values(SIC_TO_NAICS_2017).reduce((s, a) => s + a.length, 0),
+  sicWithMapping: Object.keys(SIC_TO_NAICS_2017).length,
+  /** % of SIC codes that have at least one NAICS mapping in this build. */
+  sicCoveragePct: 0, // set below
+};
+INDUSTRY_CODE_COVERAGE.sicCoveragePct =
+  Math.round(100 * INDUSTRY_CODE_COVERAGE.sicWithMapping / INDUSTRY_CODE_COVERAGE.sicTotalReference);
+
+console.info(
+  '[TP Bench] Industry code coverage: SIC ' +
+  INDUSTRY_CODE_COVERAGE.sicWithMapping + '/' + INDUSTRY_CODE_COVERAGE.sicTotalReference +
+  ' (' + INDUSTRY_CODE_COVERAGE.sicCoveragePct + '%) mapped to NAICS 2017; ' +
+  INDUSTRY_CODE_COVERAGE.concordancePairs + ' concordance pairs embedded.'
+);
+</script>
+
+<!-- =====================================================================
+  PHASE 2 / BLOCK 10 : Industry code conversion API
+===================================================================== -->
+<script id="industry-api">
+const INDUSTRY_SYSTEMS = ['SIC', 'NAICS_2017', 'NAICS_2012', 'NACE_REV_2', 'NACE_REV_1_1', 'JSIC', 'ISIC'];
+
+/**
+ * Look up the human description for a code.
+ * @param {string} system
+ * @param {string} code
+ * @returns {string|null}
+ */
+function getIndustryDescription(system, code) {
+  if (!code) return null;
+  const key = String(code).trim();
+  switch (system) {
+    case 'SIC':        return SIC_1987_CODES[key] || null;
+    case 'NAICS_2017': // NAICS variants share the same lookup table for now.
+    case 'NAICS_2012':
+    case 'NAICS_2012_DERIVED':
+    case 'NAICS_1997':
+      return NAICS_2017_CODES[key] || null;
+    case 'NACE_REV_2':
+    case 'NACE_REV_2_DERIVED':
+    case 'NACE_REV_1_1':
+      return NACE_REV2_CODES[key] || null;
+    default: return null;
+  }
+}
+
+/**
+ * Many-to-many code conversion.
+ * @param {string} fromSystem
+ * @param {string} toSystem
+ * @param {string} code
+ * @returns {{code:string, description:string|null}[]}
+ */
+function convertIndustryCode(fromSystem, toSystem, code) {
+  if (!code) return [];
+  const key = String(code).trim();
+  let codes = [];
+  if (fromSystem === 'SIC' && (toSystem === 'NAICS_2017' || toSystem === 'NAICS_2012')) {
+    codes = SIC_TO_NAICS_2017[key] || [];
+  } else if ((fromSystem === 'NAICS_2017' || fromSystem === 'NAICS_2012') && toSystem === 'SIC') {
+    codes = NAICS_2017_TO_SIC[key] || [];
+  } else if (fromSystem === toSystem) {
+    codes = [key];
+  }
+  return codes.map(c => ({ code: c, description: getIndustryDescription(toSystem, c) }));
+}
+
+/**
+ * Substring search across code + description.
+ * @param {string} system
+ * @param {string} query
+ * @param {number} [limit=50]
+ * @returns {{code:string, description:string}[]}
+ */
+function searchIndustryCode(system, query, limit = 50) {
+  const dict = system === 'SIC' ? SIC_1987_CODES
+            : (system === 'NACE_REV_2' || system === 'NACE_REV_1_1') ? NACE_REV2_CODES
+            : NAICS_2017_CODES;
+  const q = String(query || '').toLowerCase().trim();
+  if (!q) return Object.entries(dict).slice(0, limit).map(([code, description]) => ({ code, description }));
+  const out = [];
+  for (const [code, description] of Object.entries(dict)) {
+    if (code.toLowerCase().includes(q) || String(description).toLowerCase().includes(q)) {
+      out.push({ code, description });
+      if (out.length >= limit) break;
+    }
+  }
+  return out;
+}
+
+/**
+ * Return parent/ancestor codes for hierarchical drill-down.
+ * SIC: 2-digit → 3-digit → 4-digit. NAICS: 2,3,4,5,6 digit ancestors.
+ * @param {string} system
+ * @param {string} code
+ * @returns {{code:string, description:string|null, level:number}[]}
+ */
+function getIndustryHierarchy(system, code) {
+  if (!code) return [];
+  const c = String(code).trim();
+  const out = [];
+  if (system === 'SIC') {
+    for (const n of [2, 3, 4]) {
+      if (c.length >= n) out.push({ code: c.slice(0, n), description: getIndustryDescription('SIC', c.slice(0, n)), level: n });
+    }
+  } else if (system.startsWith('NAICS')) {
+    for (const n of [2, 3, 4, 5, 6]) {
+      if (c.length >= n) out.push({ code: c.slice(0, n), description: getIndustryDescription(system, c.slice(0, n)), level: n });
+    }
+  } else if (system.startsWith('NACE')) {
+    if (c.length >= 1) out.push({ code: c.slice(0, 1), description: getIndustryDescription(system, c.slice(0, 1)), level: 1 });
+    if (c.length >= 3) out.push({ code: c.slice(0, 3), description: getIndustryDescription(system, c.slice(0, 3)), level: 3 });
+  }
+  return out;
+}
+
+/**
+ * Census Bureau-style CSV import: rows of {sic,naics_2017} or
+ * {SIC,NAICS}. Merges into the in-memory concordance and the
+ * `industryCodeMappings` Dexie table for persistence across reloads.
+ * @param {string} csvText
+ * @returns {Promise<{added:number, total:number}>}
+ */
+async function importIndustryConcordanceCsv(csvText) {
+  const parsed = Papa.parse(csvText, { header: true, skipEmptyLines: true });
+  let added = 0;
+  for (const row of parsed.data) {
+    const sic = String(row.SIC || row.sic || row.sic_1987 || '').trim();
+    const naics = String(row.NAICS || row.naics || row.naics_2017 || '').trim();
+    if (!sic || !naics) continue;
+    if (!SIC_TO_NAICS_2017[sic]) SIC_TO_NAICS_2017[sic] = [];
+    if (!SIC_TO_NAICS_2017[sic].includes(naics)) {
+      SIC_TO_NAICS_2017[sic].push(naics);
+      (NAICS_2017_TO_SIC[naics] = NAICS_2017_TO_SIC[naics] || []).push(sic);
+      added++;
+    }
+    await db.industryCodeMappings.put({ id: sic + '->' + naics, fromSystem: 'SIC', fromCode: sic, toSystem: 'NAICS_2017', toCode: naics });
+  }
+  INDUSTRY_CODE_COVERAGE.concordancePairs = Object.values(SIC_TO_NAICS_2017).reduce((s, a) => s + a.length, 0);
+  INDUSTRY_CODE_COVERAGE.sicWithMapping = Object.keys(SIC_TO_NAICS_2017).length;
+  INDUSTRY_CODE_COVERAGE.sicCoveragePct = Math.round(100 * INDUSTRY_CODE_COVERAGE.sicWithMapping / INDUSTRY_CODE_COVERAGE.sicTotalReference);
+  await logAudit('INDUSTRY_MAPPING_IMPORT', { added, total: INDUSTRY_CODE_COVERAGE.concordancePairs });
+  return { added, total: INDUSTRY_CODE_COVERAGE.concordancePairs };
+}
+</script>
+
+<!-- =====================================================================
+  PHASE 2 / BLOCK 11 : Standing TODO module
+  ---------------------------------------------------------------------
+  Phase 2+ features register reminders here. Each TODO survives reloads
+  and is shown via the TODO badge in the top bar.
+===================================================================== -->
+<script id="todo-module">
+const TODO_PRIORITY = ['critical', 'high', 'medium', 'low'];
+const TODO_STATUS = ['open', 'completed', 'reopened'];
+
+/**
+ * @typedef {Object} TodoItem
+ * @property {string} id
+ * @property {string} title
+ * @property {string} description
+ * @property {('critical'|'high'|'medium'|'low')} priority
+ * @property {('open'|'completed'|'reopened')} status
+ * @property {number} createdAt
+ * @property {number|null} completedAt
+ * @property {string} source - which phase / module registered it
+ * @property {Object} [metadata]
+ */
+
+const todoStore = {
+  /** Add a new TODO. Returns the persisted row. @returns {Promise<TodoItem>} */
+  async add({ title, description = '', priority = 'medium', source = 'manual', metadata = {} }) {
+    const item = {
+      id: uuid(), title, description, priority, status: 'open',
+      createdAt: Date.now(), completedAt: null, source, metadata,
+    };
+    await db.todoItems.put(item);
+    await logAudit('TODO_CREATE', { id: item.id, title, source });
+    return item;
+  },
+  /** Mark a TODO completed. */
+  async complete(id) {
+    const item = await db.todoItems.get(id);
+    if (!item) return;
+    item.status = 'completed'; item.completedAt = Date.now();
+    await db.todoItems.put(item);
+    await logAudit('TODO_COMPLETE', { id, title: item.title });
+  },
+  /** Reopen a previously completed TODO. */
+  async reopen(id) {
+    const item = await db.todoItems.get(id);
+    if (!item) return;
+    item.status = 'reopened'; item.completedAt = null;
+    await db.todoItems.put(item);
+    await logAudit('TODO_REOPEN', { id });
+  },
+  /** List TODOs, optionally filtered. */
+  async list(filter = {}) {
+    let rows = await db.todoItems.toArray();
+    if (filter.status) rows = rows.filter(r => r.status === filter.status);
+    if (filter.source) rows = rows.filter(r => r.source === filter.source);
+    if (filter.openOnly) rows = rows.filter(r => r.status !== 'completed');
+    rows.sort((a, b) => {
+      const pa = TODO_PRIORITY.indexOf(a.priority);
+      const pb = TODO_PRIORITY.indexOf(b.priority);
+      if (pa !== pb) return pa - pb;
+      return b.createdAt - a.createdAt;
+    });
+    return rows;
+  },
+  /** Export all TODOs as a JSON Blob. */
+  async exportJson() {
+    const rows = await db.todoItems.toArray();
+    const payload = { version: APP_VERSION, exportedAt: new Date().toISOString(), todos: rows };
+    return new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  },
+  /** Import TODOs from a JSON payload. */
+  async importJson(payload) {
+    if (!payload?.todos) throw new Error('invalid TODO json');
+    await db.todoItems.bulkPut(payload.todos);
+  },
+  /** Idempotent: register the standing Phase 2 reminders if absent. */
+  async ensureStandingTodos() {
+    const all = await db.todoItems.toArray();
+    const hasKey = (key) => all.some(t => t.metadata?.standingKey === key);
+    if (!hasKey('SIC_NAICS_FULL_COVERAGE')) {
+      await this.add({
+        title: 'SIC↔NAICS 全件対応の検証',
+        description:
+          `内蔵 ${INDUSTRY_CODE_COVERAGE.sicWithMapping} SIC コード（参照値 ${INDUSTRY_CODE_COVERAGE.sicTotalReference} の` +
+          ` ${INDUSTRY_CODE_COVERAGE.sicCoveragePct}%）に対応する NAICS 2017 マッピングを保持。` +
+          ` U.S. Census Bureau 公式 CSV (1987 SIC → 2017 NAICS) を取り込んで` +
+          ` 残り ${100 - INDUSTRY_CODE_COVERAGE.sicCoveragePct}% を補完してください。`,
+        priority: 'high', source: 'phase2.industry',
+        metadata: { standingKey: 'SIC_NAICS_FULL_COVERAGE', importHook: 'industryConcordanceCsv' },
+      });
+    }
+    if (!hasKey('PHASE3_SCREENING')) {
+      await this.add({ title: 'Phase 3: スクリーニングロジック本体の実装', description: 'ステージ実行エンジンと結果保存。', priority: 'medium', source: 'phase2.bootstrap', metadata: { standingKey: 'PHASE3_SCREENING' } });
+    }
+    if (!hasKey('PHASE4_PLI')) {
+      await this.add({ title: 'Phase 4: PLI / 運転資本調整の計算', description: '可変年数対応のPLI計算 + WC調整。', priority: 'medium', source: 'phase2.bootstrap', metadata: { standingKey: 'PHASE4_PLI' } });
+    }
+  },
+};
+</script>
+
+<!-- =====================================================================
+  PHASE 2 / BLOCK 12 : Financial helpers (variable-year aware)
+  ---------------------------------------------------------------------
+  These helpers operate on the year-keyed `financials` dictionary
+  introduced in Phase 2. Companies may have 1-10 years of data and
+  the helpers stay year-count agnostic.
+===================================================================== -->
+<script id="financial-helpers">
+const YEARS_ANALYSIS_HARD_MAX = 10;
+const YEARS_ANALYSIS_DEFAULT = 3;
+
+/**
+ * Weighted average of (numerator, denominator) pairs across years.
+ * Sums numerators ÷ sums denominators, skipping years missing either.
+ * @param {{numerator:number, denominator:number}[]} yearData
+ * @returns {number|null}
+ */
+function weightedAverage(yearData) {
+  const valid = (yearData || []).filter(y =>
+    y && y.numerator != null && y.denominator != null && y.denominator !== 0
+  );
+  if (!valid.length) return null;
+  const sumNum = valid.reduce((s, y) => s + Number(y.numerator), 0);
+  const sumDen = valid.reduce((s, y) => s + Number(y.denominator), 0);
+  return sumDen !== 0 ? sumNum / sumDen : null;
+}
+
+/**
+ * Simple average of a numeric array, ignoring null/NaN.
+ * @param {number[]} values
+ * @returns {number|null}
+ */
+function simpleAverage(values) {
+  const valid = (values || []).filter(v => v != null && !Number.isNaN(Number(v))).map(Number);
+  return valid.length ? valid.reduce((a, b) => a + b, 0) / valid.length : null;
+}
+
+/**
+ * Sorted (ascending) list of fiscal years held by a company.
+ * @param {Company} company
+ * @returns {number[]}
+ */
+function getYearsAvailable(company) {
+  const fin = company?.financials || {};
+  return Object.keys(fin).map(Number).filter(y => !Number.isNaN(y)).sort((a, b) => a - b);
+}
+
+/**
+ * Return the latest N years of financials as a new dict keyed by year.
+ * @param {Company} company
+ * @param {number} n
+ * @returns {Object<string, Object>}
+ */
+function getLatestN(company, n) {
+  const years = getYearsAvailable(company).slice(-n);
+  const out = {};
+  for (const y of years) out[String(y)] = company.financials[String(y)];
+  return out;
+}
+
+/**
+ * Migrate the legacy Phase 1 `financials` array form to the Phase 2
+ * year-keyed dict. Idempotent.
+ * @param {Object|Array} fin
+ * @returns {Object<string, Object>}
+ */
+function migrateFinancials(fin) {
+  if (!fin) return {};
+  if (Array.isArray(fin)) {
+    const out = {};
+    for (const row of fin) {
+      if (row && row.year != null) out[String(row.year)] = row;
+    }
+    return out;
+  }
+  return fin;
+}
+</script>
+
+<!-- =====================================================================
+  PHASE 2 / BLOCK 13 : Rules schema types + default rule pack
+===================================================================== -->
+<script id="rules-schema">
+/**
+ * @typedef {Object} RangeMethod
+ * @property {('IQR'|'PERCENTILE'|'FULL_RANGE'|'CUSTOM')} type
+ * @property {number} lowerPercentile
+ * @property {number} upperPercentile
+ * @property {('MEDIAN'|'MEAN')} centralTendency
+ */
+
+/**
+ * @typedef {Object} YearsAnalysis
+ * @property {number} default
+ * @property {number} min
+ * @property {number} max
+ * @property {('SINGLE_YEAR'|'SIMPLE_AVG'|'WEIGHTED_AVG')} averaging
+ */
+
+/**
+ * @typedef {Object} ScreeningStageDef
+ * @property {string} id
+ * @property {('QUANTITATIVE'|'BULK_REJECTION'|'INDEPENDENCE'|'FAR'|'FINANCIAL'|'QUALITATIVE_REVIEW'|'CUSTOM')} type
+ * @property {boolean} enabled
+ * @property {number} order
+ * @property {string} label
+ * @property {Object} params
+ * @property {Object} [conditionTree] - for CUSTOM stages
+ */
+
+/**
+ * @typedef {Object} JurisdictionRuleV2
+ * @property {string} jurisdictionId
+ * @property {string} name
+ * @property {string} nameLocal
+ * @property {boolean} isOfficial
+ * @property {string|null} parentId
+ * @property {string} version
+ * @property {RangeMethod} rangeMethod
+ * @property {YearsAnalysis} yearsAnalysis
+ * @property {Object} workingCapitalAdjustment
+ * @property {Object} lossMakers
+ * @property {number} minComparables
+ * @property {string[]} preferredIndustryCodes
+ * @property {string[]} preferredPLI
+ * @property {Object} referenceLaw
+ * @property {ScreeningStageDef[]} screeningStages
+ * @property {ScreeningStageDef[]} customStages
+ * @property {string[]} reportTemplates
+ * @property {string} notes
+ * @property {string} lastModified
+ * @property {string} createdBy
+ * @property {boolean} isGenericModel
+ */
+
+/** Canonical default stages — referenced by all built-in rules. */
+function makeStandardStages() {
+  return [
+    { id: 'S1', type: 'QUANTITATIVE',       enabled: true, order: 1, label: 'Database Search',
+      params: { industryMatchLevel: 4, revenueRangeRatio: [0.25, 4.0],
+                yearsCoverage: { required: YEARS_ANALYSIS_DEFAULT, mode: 'at_least' } } },
+    { id: 'S2', type: 'BULK_REJECTION',     enabled: true, order: 2, label: 'Bulk Rejection',  params: {} },
+    { id: 'S3', type: 'INDEPENDENCE',       enabled: true, order: 3, label: 'Independence',    params: { maxOwnership: 0.5 } },
+    { id: 'S4', type: 'FAR',                enabled: true, order: 4, label: 'FAR Analysis',    params: {} },
+    { id: 'S5', type: 'QUALITATIVE_REVIEW', enabled: true, order: 5, label: 'Qualitative Review', params: {} },
+  ];
+}
+
+const PHASE2_DEFAULT_RULES = [
+  {
+    jurisdictionId: 'OECD_GENERIC', name: 'OECD TPG (Generic Model)', nameLocal: 'OECD Guidelines',
+    isOfficial: true, parentId: null, version: '2022.1', isGenericModel: true,
+    rangeMethod: { type: 'IQR', lowerPercentile: 25, upperPercentile: 75, centralTendency: 'MEDIAN' },
+    yearsAnalysis: { default: 3, min: 1, max: 10, averaging: 'WEIGHTED_AVG' },
+    workingCapitalAdjustment: { requirement: 'RECOMMENDED', formula: 'STANDARD_OECD' },
+    lossMakers: { treatment: 'EXCLUDE_PERSISTENT', rule: 'LOSS_IN_N_OF_M_YEARS', ruleParams: { n: 2, m: 3 }, customCondition: null },
+    minComparables: 5, preferredIndustryCodes: ['NAICS_2017', 'SIC'],
+    preferredPLI: ['OPERATING_MARGIN', 'BERRY_RATIO', 'NET_COST_PLUS'],
+    referenceLaw: { primary: 'OECD Transfer Pricing Guidelines (2022)', url: 'https://www.oecd.org/tax/transfer-pricing/', note: 'Generic fallback used when no jurisdiction-specific rule applies.' },
+    screeningStages: makeStandardStages(), customStages: [],
+    reportTemplates: ['OECD_LOCAL_FILE'], notes: 'Used as automatic fallback.', lastModified: '2024-01-01', createdBy: 'system',
+  },
+  {
+    jurisdictionId: 'JP', name: 'Japan', nameLocal: '日本',
+    isOfficial: true, parentId: 'OECD_GENERIC', version: '2024.1', isGenericModel: false,
+    rangeMethod: { type: 'IQR', lowerPercentile: 25, upperPercentile: 75, centralTendency: 'MEDIAN' },
+    yearsAnalysis: { default: 3, min: 1, max: 10, averaging: 'WEIGHTED_AVG' },
+    workingCapitalAdjustment: { requirement: 'RECOMMENDED', formula: 'STANDARD_OECD' },
+    lossMakers: { treatment: 'EXCLUDE_PERSISTENT', rule: 'LOSS_IN_N_OF_M_YEARS', ruleParams: { n: 2, m: 3 }, customCondition: null },
+    minComparables: 5, preferredIndustryCodes: ['SIC', 'NAICS_2017'],
+    preferredPLI: ['OPERATING_MARGIN', 'NET_COST_PLUS'],
+    referenceLaw: { primary: '租税特別措置法施行規則 22-10', url: '', note: '措置法施規22の10' },
+    screeningStages: makeStandardStages(), customStages: [],
+    reportTemplates: ['BEPS_LOCAL_FILE', 'JP_LOCAL'], notes: '', lastModified: '2024-01-01', createdBy: 'system',
+  },
+  {
+    jurisdictionId: 'US', name: 'United States', nameLocal: 'United States',
+    isOfficial: true, parentId: 'OECD_GENERIC', version: '2024.1', isGenericModel: false,
+    rangeMethod: { type: 'IQR', lowerPercentile: 25, upperPercentile: 75, centralTendency: 'MEDIAN' },
+    yearsAnalysis: { default: 3, min: 1, max: 10, averaging: 'WEIGHTED_AVG' },
+    workingCapitalAdjustment: { requirement: 'RECOMMENDED', formula: 'STANDARD_OECD' },
+    lossMakers: { treatment: 'EXCLUDE_PERSISTENT', rule: 'LOSS_IN_N_OF_M_YEARS', ruleParams: { n: 2, m: 3 }, customCondition: null },
+    minComparables: 5, preferredIndustryCodes: ['NAICS_2017', 'SIC'],
+    preferredPLI: ['OPERATING_MARGIN', 'BERRY_RATIO', 'NET_COST_PLUS', 'ROA'],
+    referenceLaw: { primary: 'IRC §482', url: 'https://www.law.cornell.edu/uscode/text/26/482', note: 'Treas. Reg. §1.482-1 et seq.' },
+    screeningStages: makeStandardStages(), customStages: [],
+    reportTemplates: ['BEPS_LOCAL_FILE', 'CIQ_STYLE_3STEP'], notes: '', lastModified: '2024-01-01', createdBy: 'system',
+  },
+  {
+    jurisdictionId: 'IN', name: 'India', nameLocal: 'भारत',
+    isOfficial: true, parentId: 'OECD_GENERIC', version: '2024.1', isGenericModel: false,
+    rangeMethod: { type: 'PERCENTILE', lowerPercentile: 35, upperPercentile: 65, centralTendency: 'MEDIAN' },
+    yearsAnalysis: { default: 3, min: 1, max: 10, averaging: 'WEIGHTED_AVG' },
+    workingCapitalAdjustment: { requirement: 'OPTIONAL', formula: 'STANDARD_OECD' },
+    lossMakers: { treatment: 'EXCLUDE_PERSISTENT', rule: 'LOSS_IN_N_OF_M_YEARS', ruleParams: { n: 2, m: 3 }, customCondition: null },
+    minComparables: 6, preferredIndustryCodes: ['NAICS_2017'],
+    preferredPLI: ['OPERATING_MARGIN', 'NET_COST_PLUS'],
+    referenceLaw: { primary: 'Section 92 Income Tax Act 1961', url: '', note: 'Rule 10B/10CA' },
+    screeningStages: makeStandardStages(), customStages: [],
+    reportTemplates: ['BEPS_LOCAL_FILE'], notes: '', lastModified: '2024-01-01', createdBy: 'system',
+  },
+  {
+    jurisdictionId: 'CN', name: 'China', nameLocal: '中国',
+    isOfficial: true, parentId: 'OECD_GENERIC', version: '2024.1', isGenericModel: false,
+    rangeMethod: { type: 'IQR', lowerPercentile: 25, upperPercentile: 75, centralTendency: 'MEDIAN' },
+    yearsAnalysis: { default: 1, min: 1, max: 10, averaging: 'SINGLE_YEAR' },
+    workingCapitalAdjustment: { requirement: 'OPTIONAL', formula: 'STANDARD_OECD' },
+    lossMakers: { treatment: 'EXCLUDE_PERSISTENT', rule: 'LOSS_IN_N_OF_M_YEARS', ruleParams: { n: 1, m: 1 }, customCondition: null },
+    minComparables: 5, preferredIndustryCodes: ['NAICS_2017'],
+    preferredPLI: ['OPERATING_MARGIN', 'NET_COST_PLUS', 'BERRY_RATIO'],
+    referenceLaw: { primary: 'STA Announcement [2017] No.6', url: '', note: 'Bulletin 42 / 6' },
+    screeningStages: makeStandardStages(), customStages: [],
+    reportTemplates: ['BEPS_LOCAL_FILE'], notes: '', lastModified: '2024-01-01', createdBy: 'system',
+  },
+  {
+    jurisdictionId: 'DE', name: 'Germany', nameLocal: 'Deutschland',
+    isOfficial: true, parentId: 'OECD_GENERIC', version: '2024.1', isGenericModel: false,
+    rangeMethod: { type: 'IQR', lowerPercentile: 25, upperPercentile: 75, centralTendency: 'MEDIAN' },
+    yearsAnalysis: { default: 3, min: 1, max: 10, averaging: 'WEIGHTED_AVG' },
+    workingCapitalAdjustment: { requirement: 'OPTIONAL', formula: 'STANDARD_OECD' },
+    lossMakers: { treatment: 'EXCLUDE_PERSISTENT', rule: 'LOSS_IN_N_OF_M_YEARS', ruleParams: { n: 2, m: 3 }, customCondition: null },
+    minComparables: 5, preferredIndustryCodes: ['NACE_REV_2', 'NAICS_2017'],
+    preferredPLI: ['OPERATING_MARGIN', 'NET_COST_PLUS'],
+    referenceLaw: { primary: 'AStG §1', url: '', note: 'GAufzV / VWG VP 2023' },
+    screeningStages: makeStandardStages(), customStages: [],
+    reportTemplates: ['BEPS_LOCAL_FILE'], notes: '', lastModified: '2024-01-01', createdBy: 'system',
+  },
+  {
+    jurisdictionId: 'GB', name: 'United Kingdom', nameLocal: 'United Kingdom',
+    isOfficial: true, parentId: 'OECD_GENERIC', version: '2024.1', isGenericModel: false,
+    rangeMethod: { type: 'IQR', lowerPercentile: 25, upperPercentile: 75, centralTendency: 'MEDIAN' },
+    yearsAnalysis: { default: 3, min: 1, max: 10, averaging: 'WEIGHTED_AVG' },
+    workingCapitalAdjustment: { requirement: 'OPTIONAL', formula: 'STANDARD_OECD' },
+    lossMakers: { treatment: 'EXCLUDE_PERSISTENT', rule: 'LOSS_IN_N_OF_M_YEARS', ruleParams: { n: 2, m: 3 }, customCondition: null },
+    minComparables: 5, preferredIndustryCodes: ['NACE_REV_2', 'NAICS_2017'],
+    preferredPLI: ['OPERATING_MARGIN', 'NET_COST_PLUS'],
+    referenceLaw: { primary: 'TIOPA 2010 Part 4', url: '', note: 'HMRC INTM' },
+    screeningStages: makeStandardStages(), customStages: [],
+    reportTemplates: ['BEPS_LOCAL_FILE'], notes: '', lastModified: '2024-01-01', createdBy: 'system',
+  },
+  {
+    jurisdictionId: 'TH', name: 'Thailand', nameLocal: 'ประเทศไทย',
+    isOfficial: true, parentId: 'OECD_GENERIC', version: '2024.1', isGenericModel: false,
+    rangeMethod: { type: 'IQR', lowerPercentile: 25, upperPercentile: 75, centralTendency: 'MEDIAN' },
+    yearsAnalysis: { default: 3, min: 1, max: 10, averaging: 'WEIGHTED_AVG' },
+    workingCapitalAdjustment: { requirement: 'OPTIONAL', formula: 'STANDARD_OECD' },
+    lossMakers: { treatment: 'EXCLUDE_PERSISTENT', rule: 'LOSS_IN_N_OF_M_YEARS', ruleParams: { n: 2, m: 3 }, customCondition: null },
+    minComparables: 5, preferredIndustryCodes: ['NAICS_2017'],
+    preferredPLI: ['OPERATING_MARGIN', 'NET_COST_PLUS'],
+    referenceLaw: { primary: 'Revenue Code Section 71 bis', url: '', note: 'TH Revenue Department TP Disclosure Form' },
+    screeningStages: makeStandardStages(), customStages: [],
+    reportTemplates: ['BEPS_LOCAL_FILE'], notes: '', lastModified: '2024-01-01', createdBy: 'system',
+  },
+];
+</script>
+
+<!-- =====================================================================
+  PHASE 2 / BLOCK 14 : Rules engine (real implementation)
+  ---------------------------------------------------------------------
+  This block REPLACES the Phase 1 stub object. The new API is
+  surfaced via `rulesEngine` while the legacy `ruleEngine` symbol is
+  retained for back-compat with the data-input mapping flow.
+===================================================================== -->
+<script id="rules-engine-v2">
+const rulesEngine = {
+  /** Persist all default rules if the table is empty. Idempotent. */
+  async loadDefaults() {
+    const count = await db.jurisdictionRules.count();
+    if (count > 0) return;
+    await db.jurisdictionRules.bulkPut(PHASE2_DEFAULT_RULES.map(r => ({ ...r, id: r.jurisdictionId })));
+    await logAudit('RULE_IMPORT', { count: PHASE2_DEFAULT_RULES.length, source: 'defaults' });
+  },
+
+  /** Look up the active rule for a single jurisdiction code. */
+  async getActive(jurisdictionId) {
+    return (await db.jurisdictionRules.get(jurisdictionId)) || (await db.jurisdictionRules.get('OECD_GENERIC')) || null;
+  },
+
+  /** Get all rules referenced by a project's targetJurisdiction list. */
+  async getAllForProject(projectId) {
+    const project = await db.projects.get(projectId);
+    if (!project) return [];
+    const codes = [...(project.targetJurisdiction || [])];
+    if (!codes.length) codes.push('OECD_GENERIC');
+    const rules = await Promise.all(codes.map(c => db.jurisdictionRules.get(c)));
+    return rules.filter(Boolean);
+  },
+
+  /** Stages for a jurisdiction (rule's stages + custom stages, sorted by order). */
+  async getStages(jurisdictionId) {
+    const r = await this.getActive(jurisdictionId);
+    if (!r) return [];
+    return [...(r.screeningStages || []), ...(r.customStages || [])].sort((a, b) => a.order - b.order);
+  },
+
+  /** OECD TPG fallback model. */
+  async getOECDTPG() { return db.jurisdictionRules.get('OECD_GENERIC'); },
+
+  /** List all rules (built-in + custom). */
+  async list() { return db.jurisdictionRules.toArray(); },
+
+  /** Upsert. If the id collides with an official rule, fork into a new custom rule. */
+  async save(rule) {
+    const existing = await db.jurisdictionRules.get(rule.id || rule.jurisdictionId);
+    if (existing && existing.isOfficial && !rule._forceOverwrite) {
+      const forked = { ...rule, id: rule.jurisdictionId + '_CUSTOM_' + Date.now(), parentId: existing.jurisdictionId, isOfficial: false, lastModified: new Date().toISOString().slice(0, 10) };
+      forked.jurisdictionId = forked.id;
+      await db.jurisdictionRules.put(forked);
+      await logAudit('RULE_CREATE', { id: forked.id, forkedFrom: existing.jurisdictionId });
+      return forked;
+    }
+    rule.lastModified = new Date().toISOString().slice(0, 10);
+    await db.jurisdictionRules.put({ ...rule, id: rule.id || rule.jurisdictionId });
+    await logAudit(existing ? 'RULE_UPDATE' : 'RULE_CREATE', { id: rule.id || rule.jurisdictionId });
+    return rule;
+  },
+
+  /** Delete (forbidden for official rules). */
+  async delete(id) {
+    const r = await db.jurisdictionRules.get(id);
+    if (r?.isOfficial) throw new Error('公式ルールは削除できません');
+    await db.jurisdictionRules.delete(id);
+    await logAudit('RULE_DELETE', { id });
+  },
+
+  /**
+   * Merge multiple rules into the "strictest" effective rule. Each
+   * numeric tightens toward the stricter extreme; arrays intersect.
+   * @param {string[]} jurisdictionIds
+   * @returns {Promise<JurisdictionRuleV2>}
+   */
+  async mergeStrictest(jurisdictionIds) {
+    const rules = (await Promise.all(jurisdictionIds.map(id => db.jurisdictionRules.get(id)))).filter(Boolean);
+    if (!rules.length) return this.getOECDTPG();
+    /** @type {JurisdictionRuleV2} */
+    const merged = JSON.parse(JSON.stringify(rules[0]));
+    merged.jurisdictionId = 'MERGED_' + jurisdictionIds.join('+');
+    merged.name = 'Merged: ' + jurisdictionIds.join(' + ');
+    merged.isOfficial = false;
+    merged.isGenericModel = false;
+    merged.parentId = null;
+    for (const r of rules.slice(1)) {
+      merged.rangeMethod.lowerPercentile = Math.max(merged.rangeMethod.lowerPercentile, r.rangeMethod.lowerPercentile);
+      merged.rangeMethod.upperPercentile = Math.min(merged.rangeMethod.upperPercentile, r.rangeMethod.upperPercentile);
+      merged.yearsAnalysis.min = Math.max(merged.yearsAnalysis.min, r.yearsAnalysis.min);
+      merged.yearsAnalysis.max = Math.min(merged.yearsAnalysis.max, r.yearsAnalysis.max);
+      merged.minComparables = Math.max(merged.minComparables, r.minComparables);
+      merged.lossMakers.ruleParams.n = Math.min(merged.lossMakers.ruleParams.n, r.lossMakers.ruleParams.n);
+    }
+    return merged;
+  },
+};
+
+/* Bridge Phase 1 stub → Phase 2 engine. Keep the legacy methods so the
+ * data-input flow keeps working unchanged. */
+ruleEngine.loadFor = async function (jurisdictionCodes) {
+  if (!jurisdictionCodes || !jurisdictionCodes.length) return rulesEngine.getOECDTPG();
+  if (jurisdictionCodes.length === 1) return rulesEngine.getActive(jurisdictionCodes[0]);
+  return rulesEngine.mergeStrictest(jurisdictionCodes);
+};
+ruleEngine.applyToScreening = function (conditions, rules) {
+  if (!rules) return conditions;
+  return [...(rules.screeningStages || []), ...conditions];
+};
+ruleEngine.applyToScoring = function (cfg, rules) {
+  if (!rules || !rules.preferredPLI?.length) return cfg;
+  return { ...cfg, pli: cfg.pli || rules.preferredPLI[0] };
+};
+ruleEngine.applyToReport = function (rules) { return rules?.reportTemplates || []; };
+</script>
+
+<!-- =====================================================================
+  PHASE 2 / BLOCK 15 : Condition tree evaluator
+  ---------------------------------------------------------------------
+  Recursive evaluator + stringifier + validator for the nested
+  AND/OR/NOT trees authored in the custom-stage condition editor.
+===================================================================== -->
+<script id="condition-tree">
+const CONDITION_OPERATORS = {
+  number: ['=', '!=', '>', '>=', '<', '<=', 'between', 'is null'],
+  string: ['=', '!=', 'contains', 'starts with', 'matches regex', 'is null'],
+  array:  ['includes', 'not includes', 'size =', 'size >', 'size <'],
+  date:   ['=', '>', '<', 'between', 'within last N years'],
+};
+
+const CONDITION_MAX_DEPTH = 8;
+
+/** Catalogue of field paths offered in the UI dropdown. */
+const CONDITION_FIELD_REFS = [
+  { value: 'name', label: 'Company Name', type: 'string' },
+  { value: 'country', label: 'Country', type: 'string' },
+  { value: 'isListed', label: 'Listed?', type: 'string' },
+  { value: 'businessDescription', label: 'Business Description', type: 'string' },
+  { value: 'independenceData.largestShareholderPct', label: 'Largest Shareholder %', type: 'number' },
+  { value: 'independenceData.parentCompany', label: 'Parent Company', type: 'string' },
+  // Year-aware references (resolved by evaluator at runtime)
+  { value: 'financials.latest.netSales', label: 'Net Sales (Latest year)', type: 'number' },
+  { value: 'financials.latest.operatingIncome', label: 'Operating Income (Latest year)', type: 'number' },
+  { value: 'financials.latest.rdExpense', label: 'R&D Expense (Latest year)', type: 'number' },
+  { value: 'financials.lastMinus1.netSales', label: 'Net Sales (1 year ago)', type: 'number' },
+  { value: 'financials.lastMinus2.netSales', label: 'Net Sales (2 years ago)', type: 'number' },
+  { value: 'avg(financials[*].netSales)', label: 'Avg Net Sales (all years)', type: 'number' },
+  { value: 'avg(financials[*].operatingIncome)', label: 'Avg Operating Income (all years)', type: 'number' },
+  { value: 'weightedAvg(financials[*].operatingIncome,financials[*].netSales)', label: 'Weighted Avg Operating Margin', type: 'number' },
+  { value: 'weightedAvg(financials[*].rdExpense,financials[*].netSales)', label: 'Weighted Avg R&D / Net Sales', type: 'number' },
+  { value: 'count(years where financials[y].operatingIncome <= 0)', label: 'Count years with Operating Income ≤ 0', type: 'number' },
+  { value: 'count(years where financials[y].netSales is null)', label: 'Count years with Net Sales missing', type: 'number' },
+  { value: 'count(years where financials[y].operatingIncome is null)', label: 'Count years with Operating Income missing', type: 'number' },
+];
+
+/**
+ * Resolve a field path against a company. Handles year-aware special
+ * forms (avg, weightedAvg, count(years where ...), financials.latest.X,
+ * financials.lastMinusN.X).
+ * @param {string} path
+ * @param {Company} company
+ * @param {Object} [context]
+ * @returns {*}
+ */
+function resolveConditionField(path, company, context) {
+  if (!path) return null;
+  const fin = company?.financials || {};
+  const years = getYearsAvailable(company);
+  const latestYear = years[years.length - 1];
+  const lookup = (y, key) => (fin[String(y)] || {})[key];
+
+  let m;
+  if ((m = path.match(/^financials\.latest\.(.+)$/)))      return latestYear != null ? lookup(latestYear, m[1]) : null;
+  if ((m = path.match(/^financials\.lastMinus(\d+)\.(.+)$/))) {
+    const y = years[years.length - 1 - Number(m[1])]; return y != null ? lookup(y, m[2]) : null;
+  }
+  if ((m = path.match(/^financials\.(\d{4})\.(.+)$/)))     return lookup(m[1], m[2]);
+  if ((m = path.match(/^avg\(financials\[\*\]\.(.+?)\)$/))) {
+    return simpleAverage(years.map(y => lookup(y, m[1])));
+  }
+  if ((m = path.match(/^weightedAvg\(financials\[\*\]\.(.+?),financials\[\*\]\.(.+?)\)$/))) {
+    return weightedAverage(years.map(y => ({ numerator: lookup(y, m[1]), denominator: lookup(y, m[2]) })));
+  }
+  if ((m = path.match(/^count\(years where financials\[y\]\.(.+?) (<=|>=|<|>|=|!=|is null|is not null)\s*([\-0-9.]+)?\)$/))) {
+    const [_, key, op, raw] = m;
+    const target = raw === undefined ? null : Number(raw);
+    let count = 0;
+    for (const y of years) {
+      const v = lookup(y, key);
+      if (op === 'is null' && (v == null || v === '')) count++;
+      else if (op === 'is not null' && v != null && v !== '') count++;
+      else if (op === '<=' && Number(v) <= target) count++;
+      else if (op === '>=' && Number(v) >= target) count++;
+      else if (op === '<'  && Number(v) <  target) count++;
+      else if (op === '>'  && Number(v) >  target) count++;
+      else if (op === '='  && Number(v) === target) count++;
+      else if (op === '!=' && Number(v) !== target) count++;
+    }
+    return count;
+  }
+  // Plain dotted path.
+  return path.split('.').reduce((o, k) => (o == null ? null : o[k]), company);
+}
+
+/**
+ * Apply an operator to (lhs, rhs).
+ * @param {*} lhs
+ * @param {string} op
+ * @param {*} rhs
+ * @returns {boolean}
+ */
+function applyOperator(lhs, op, rhs) {
+  const n = (v) => (v == null || v === '' ? null : Number(v));
+  switch (op) {
+    case '=':   return String(lhs) === String(rhs);
+    case '!=':  return String(lhs) !== String(rhs);
+    case '>':   return n(lhs) >  n(rhs);
+    case '>=':  return n(lhs) >= n(rhs);
+    case '<':   return n(lhs) <  n(rhs);
+    case '<=':  return n(lhs) <= n(rhs);
+    case 'between': return Array.isArray(rhs) && n(lhs) >= n(rhs[0]) && n(lhs) <= n(rhs[1]);
+    case 'is null': return lhs == null || lhs === '';
+    case 'is not null': return !(lhs == null || lhs === '');
+    case 'contains':    return String(lhs || '').toLowerCase().includes(String(rhs || '').toLowerCase());
+    case 'starts with': return String(lhs || '').toLowerCase().startsWith(String(rhs || '').toLowerCase());
+    case 'matches regex': try { return new RegExp(String(rhs), 'i').test(String(lhs || '')); } catch { return false; }
+    case 'includes':     return Array.isArray(lhs) && lhs.includes(rhs);
+    case 'not includes': return Array.isArray(lhs) && !lhs.includes(rhs);
+    case 'size =':       return Array.isArray(lhs) && lhs.length === Number(rhs);
+    case 'size >':       return Array.isArray(lhs) && lhs.length > Number(rhs);
+    case 'size <':       return Array.isArray(lhs) && lhs.length < Number(rhs);
+    default: return false;
+  }
+}
+
+/**
+ * Recursive evaluator. Depth-limited to avoid runaway trees.
+ * @param {Object} tree
+ * @param {Company} company
+ * @param {Object} [context]
+ * @param {number} [depth=0]
+ * @returns {boolean}
+ */
+function evaluateConditionTree(tree, company, context = {}, depth = 0) {
+  if (!tree) return true;
+  if (depth > CONDITION_MAX_DEPTH) throw new Error('condition tree too deep (>' + CONDITION_MAX_DEPTH + ')');
+  if (tree.kind === 'condition') {
+    const lhs = resolveConditionField(tree.field, company, context);
+    const result = applyOperator(lhs, tree.op, tree.value);
+    return tree.not ? !result : result;
+  }
+  if (tree.kind === 'group') {
+    const children = (tree.children || []).map(c => evaluateConditionTree(c, company, context, depth + 1));
+    const combined = tree.op === 'OR' ? children.some(Boolean) : children.every(Boolean);
+    return tree.not ? !combined : combined;
+  }
+  return false;
+}
+
+/** Pretty-print a tree as parenthesised text. */
+function conditionTreeToString(tree) {
+  if (!tree) return '';
+  if (tree.kind === 'condition') {
+    const v = tree.op === 'is null' || tree.op === 'is not null' ? '' : ' ' + JSON.stringify(tree.value);
+    return (tree.not ? 'NOT ' : '') + tree.field + ' ' + tree.op + v;
+  }
+  const inner = (tree.children || []).map(conditionTreeToString).join(' ' + (tree.op || 'AND') + ' ');
+  return (tree.not ? 'NOT ' : '') + '(' + inner + ')';
+}
+
+/** Validate a tree. Returns array of error messages; empty means valid. */
+function validateConditionTree(tree, depth = 0, errors = []) {
+  if (!tree) return errors;
+  if (depth > CONDITION_MAX_DEPTH) errors.push('depth > ' + CONDITION_MAX_DEPTH);
+  if (tree.kind === 'condition') {
+    if (!tree.field) errors.push('condition missing field');
+    if (!tree.op)    errors.push('condition missing op');
+  } else if (tree.kind === 'group') {
+    if (!['AND', 'OR'].includes(tree.op)) errors.push('group op must be AND or OR');
+    if (!Array.isArray(tree.children) || !tree.children.length) errors.push('group has no children');
+    for (const c of (tree.children || [])) validateConditionTree(c, depth + 1, errors);
+  } else {
+    errors.push('unknown node kind: ' + tree.kind);
+  }
+  return errors;
+}
+
+/** Built-in presets (variable-year aware). */
+const CONDITION_PRESETS = [
+  {
+    name: 'Capital IQ 標準 Bulk Rejection',
+    tree: {
+      kind: 'group', op: 'OR', not: false, children: [
+        { kind: 'condition', field: 'weightedAvg(financials[*].operatingIncome,financials[*].netSales)', op: '<=', value: 0, not: false },
+        { kind: 'condition', field: 'count(years where financials[y].netSales is null)', op: '>=', value: 2, not: false },
+        { kind: 'condition', field: 'count(years where financials[y].operatingIncome is null)', op: '>=', value: 2, not: false },
+        { kind: 'condition', field: 'businessDescription', op: 'is null', value: null, not: false },
+      ],
+    },
+  },
+  {
+    name: 'R&D インテンシティテスト（N年加重平均）',
+    tree: { kind: 'condition', field: 'weightedAvg(financials[*].rdExpense,financials[*].netSales)', op: '>', value: 0.03, not: false },
+  },
+  {
+    name: '独立性テスト (Ownership ≤ 50%)',
+    tree: {
+      kind: 'group', op: 'AND', not: false, children: [
+        { kind: 'condition', field: 'independenceData.largestShareholderPct', op: '<=', value: 50, not: false },
+        { kind: 'condition', field: 'independenceData.parentCompany', op: 'is null', value: null, not: false },
+      ],
+    },
+  },
+  {
+    name: '持続的損失会社の除外 (3年中2年)',
+    tree: { kind: 'condition', field: 'count(years where financials[y].operatingIncome <= 0)', op: '>=', value: 2, not: false },
+  },
+];
+</script>
+
+<!-- =====================================================================
+  PHASE 2 / BLOCK 16 : Capital IQ parsers (dynamic year detection)
+===================================================================== -->
+<script id="capital-iq">
+const CAPITAL_IQ_EXCEL_MAPPING = {
+  'Company Name': 'name', 'Status': 'cIQStatus', 'Rejection Reason': 'cIQRejectionReason',
+  'Data Source': 'sourceInfo.dataSource', 'Publication Date': 'sourceInfo.publicationDate',
+  'City': 'city', 'Country': 'country',
+  'Latest Consolidated Tax Year Available': 'latestConsolidatedFYE',
+  'Latest Unconsolidated Tax Year Available': 'latestUnconsolidatedFYE',
+  'Financial Type': 'financialType', 'Currency': 'currency',
+  'Business Description': 'businessDescription', 'Website': 'website',
+  'Ownership': 'ownership', 'Subsidiaries': 'subsidiaries', 'Ticker': 'ticker',
+  'Exchange': 'exchange', 'Number Of Employees': 'numberOfEmployees',
+  'Registry Name': 'registry.name', 'Registry Number': 'registry.number',
+  'Primary US SIC': 'industryCodes.SIC.primary', 'Secondary US SIC': 'industryCodes.SIC.secondary',
+  'Primary NAICS 1997': 'industryCodes.NAICS_1997.primary', 'Secondary NAICS 1997': 'industryCodes.NAICS_1997.secondary',
+  'Primary NAICS 2012': 'industryCodes.NAICS_2012.primary', 'Secondary NAICS 2012': 'industryCodes.NAICS_2012.secondary',
+  'Primary NAICS 2012 (Derived)': 'industryCodes.NAICS_2012_DERIVED.primary',
+  'Secondary NAICS 2012 (Derived)': 'industryCodes.NAICS_2012_DERIVED.secondary',
+  'Primary NACE Rev 1.1': 'industryCodes.NACE_REV_1_1.primary',
+  'Secondary NACE Rev 1.1': 'industryCodes.NACE_REV_1_1.secondary',
+  'Primary NACE Rev 2': 'industryCodes.NACE_REV_2.primary',
+  'Secondary NACE Rev 2': 'industryCodes.NACE_REV_2.secondary',
+  'Primary NACE Rev 2 (Derived)': 'industryCodes.NACE_REV_2_DERIVED.primary',
+  'Secondary NACE Rev 2 (Derived)': 'industryCodes.NACE_REV_2_DERIVED.secondary',
+};
+
+const CAPITAL_IQ_FINANCIAL_FIELDS = {
+  'Net Sales': 'netSales', 'Cost of Goods Sold': 'cogs', 'Gross Profit': 'grossProfit',
+  'Operating Expenses': 'operatingExpenses', 'Operating Income': 'operatingIncome',
+  'Interest Expense': 'interestExpense', 'R and D Expense': 'rdExpense',
+  'Advertising Expense': 'advertisingExpense',
+  'Avg Total Assets': 'avgTotalAssets', 'Avg Operating Assets': 'avgOperatingAssets',
+  'Avg Net Payables': 'avgNetPayables', 'Avg Net Receivables': 'avgNetReceivables',
+  'Avg Net PPE': 'avgNetPPE', 'Avg Net Inventory': 'avgNetInventory',
+  'Avg Cash': 'avgCash', 'Avg Cash And Equivalent': 'avgCashEquivalents',
+  'Avg LIFO Reserve': 'avgLIFOReserve', 'Avg Invested Capital': 'avgInvestedCapital',
+};
+
+const CAPITAL_IQ_REJECTION_PATTERNS = [
+  { regex: /Average operating income.*less than or equal to 0/i, key: 'AVG_OP_LOSS' },
+  { regex: /Net Sales missing for (\d+) or more years/i, key: 'NET_SALES_MISSING' },
+  { regex: /Operating income missing for (\d+) or more years/i, key: 'OP_INCOME_MISSING' },
+  { regex: /Description missing.*N\/A/i, key: 'DESC_MISSING' },
+  { regex: /Research And Development Expense.*Total Net Sales.*less than or equal to 0\.03/i, key: 'LOW_RD_INTENSITY' },
+  { regex: /Engaged in significantly different business activities or products/i, key: 'DIFFERENT_BUSINESS' },
+  { regex: /Is a controlled entity/i, key: 'CONTROLLED_ENTITY' },
+];
+
+/**
+ * Set a value at a dotted path, creating intermediate objects.
+ * @param {Object} obj
+ * @param {string} path
+ * @param {*} value
+ */
+function setByPath(obj, path, value) {
+  const parts = path.split('.'); let cur = obj;
+  for (let i = 0; i < parts.length - 1; i++) {
+    if (cur[parts[i]] == null || typeof cur[parts[i]] !== 'object') cur[parts[i]] = {};
+    cur = cur[parts[i]];
+  }
+  cur[parts[parts.length - 1]] = value;
+}
+
+/** Split "1234 - Description" → { code, description }. */
+function splitCodeDescription(s) {
+  if (!s) return { code: '', description: '' };
+  const m = String(s).match(/^\s*([0-9A-Za-z\.]+)\s*[-:]\s*(.+)$/);
+  return m ? { code: m[1], description: m[2].trim() } : { code: String(s).trim(), description: '' };
+}
+
+/**
+ * Parse a Capital IQ Excel export with a 2-row category/year header.
+ * Detects the number of years dynamically; supports 1-N year layouts.
+ * @param {File} file
+ * @param {Object} [opts]
+ * @param {number} [opts.maxYearWarning=10] - warn when years > this
+ * @returns {Promise<{companies: Company[], detectedYears: number[], warnings: string[]}>}
+ */
+async function parseCapitalIQExcel(file, opts = {}) {
+  const buf = await readFileAsArrayBuffer(file);
+  const wb = XLSX.read(buf, { type: 'array' });
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const grid = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '', raw: false });
+  if (grid.length < 3) throw new Error('Capital IQ export needs at least 3 rows');
+
+  // Row 0 = category, Row 1 = year, rows 2+ = data.
+  const rawCategoryRow = grid[0];
+  const yearRow = grid[1].map(v => (v == null ? '' : String(v).trim()));
+
+  // Forward-fill the merged category row.
+  const categoryRow = []; let last = '';
+  for (let i = 0; i < Math.max(rawCategoryRow.length, yearRow.length); i++) {
+    const v = (rawCategoryRow[i] == null ? '' : String(rawCategoryRow[i]).trim());
+    if (v) last = v;
+    categoryRow.push(last);
+  }
+
+  // Identify the boundary between identifying columns and financial blocks.
+  // Identifying columns are those whose row-1 cell is a plain field name and
+  // whose row-2 cell is empty (i.e. no per-year fanning).
+  let financialStart = -1;
+  for (let i = 0; i < yearRow.length; i++) {
+    if (categoryRow[i] && yearRow[i] && /\d{4}/.test(yearRow[i]) && CAPITAL_IQ_FINANCIAL_FIELDS[categoryRow[i]]) {
+      financialStart = i; break;
+    }
+  }
+  if (financialStart === -1) financialStart = grid[0].length; // fall back: no financial block
+
+  // Identifying column header names come from row 1 in non-financial region.
+  const idHeaders = grid[1].slice(0, financialStart).map(v => String(v || '').trim());
+
+  // Map financial columns to (categoryField, year).
+  const finCols = [];
+  for (let i = financialStart; i < Math.max(categoryRow.length, yearRow.length); i++) {
+    const cat = categoryRow[i]; const yr = yearRow[i];
+    if (!cat || !yr) continue;
+    const field = CAPITAL_IQ_FINANCIAL_FIELDS[cat];
+    const yearMatch = String(yr).match(/(\d{4})/);
+    if (!field || !yearMatch) continue;
+    finCols.push({ col: i, field, year: yearMatch[1] });
+  }
+  const detectedYears = [...new Set(finCols.map(c => c.year))].sort((a, b) => Number(b) - Number(a));
+  const warnings = [];
+  if (detectedYears.length > (opts.maxYearWarning || YEARS_ANALYSIS_HARD_MAX)) {
+    warnings.push(`検出年度数 ${detectedYears.length} は最大値 ${YEARS_ANALYSIS_HARD_MAX} を超えています`);
+  }
+
+  // Check year alignment across categories (warn if uneven).
+  const categoriesSeen = new Map();
+  for (const fc of finCols) {
+    if (!categoriesSeen.has(fc.field)) categoriesSeen.set(fc.field, new Set());
+    categoriesSeen.get(fc.field).add(fc.year);
+  }
+  for (const [cat, ys] of categoriesSeen) {
+    if (ys.size !== detectedYears.length) warnings.push(`カテゴリ ${cat} の年度数が他と異なります (${ys.size} vs ${detectedYears.length})`);
+  }
+
+  /** @type {Company[]} */
+  const companies = [];
+  for (let r = 2; r < grid.length; r++) {
+    const row = grid[r];
+    if (!row || !row.length) continue;
+    if (!String(row[0] || '').trim()) continue;
+    const c = {
+      id: uuid(), name: '', country: '', industryCode: '', industryCodeSystem: 'SIC',
+      isListed: false, independenceData: { largestShareholderPct: 0, parentCompany: null, hasRelatedPartyTx: false },
+      financials: {}, farProfile: { functions: [], assets: [], risks: [] },
+      businessDescription: '', industryCodes: {}, sourceInfo: { kind: 'file', filename: file.name, importedAt: Date.now(), provider: 'capital_iq_excel' },
+      sector: 'other', tags: ['capital_iq'], cIQStatus: '', cIQRejectionReason: '',
+    };
+    for (let i = 0; i < idHeaders.length; i++) {
+      const h = idHeaders[i]; const val = row[i];
+      if (val == null || val === '') continue;
+      const target = CAPITAL_IQ_EXCEL_MAPPING[h];
+      if (!target) continue;
+      // Code-description splitting for the industry code columns.
+      if (target.startsWith('industryCodes.')) {
+        const split = splitCodeDescription(val);
+        setByPath(c, target, split.code);
+        setByPath(c, target.replace(/\.(primary|secondary)$/, '.' + (target.endsWith('.primary') ? 'primaryDescription' : 'secondaryDescription')), split.description);
+        // Mirror SIC primary into the legacy single-code field.
+        if (target === 'industryCodes.SIC.primary') { c.industryCode = split.code; c.industryCodeSystem = 'SIC'; }
+      } else {
+        setByPath(c, target, val);
+      }
+    }
+    // Map ownership → independenceData.largestShareholderPct when numeric.
+    if (c.ownership != null) {
+      const ownNum = Number(String(c.ownership).replace(/[^0-9.]/g, ''));
+      if (!Number.isNaN(ownNum)) c.independenceData.largestShareholderPct = ownNum;
+    }
+    // Fan out financial columns into the year-keyed dict.
+    for (const fc of finCols) {
+      const v = row[fc.col]; if (v === '' || v == null) continue;
+      const n = typeof v === 'number' ? v : Number(String(v).replace(/,/g, ''));
+      if (!c.financials[fc.year]) c.financials[fc.year] = { year: Number(fc.year) };
+      c.financials[fc.year][fc.field] = Number.isNaN(n) ? v : n;
+    }
+    if (c.name) companies.push(c);
+  }
+  await logAudit('CAPITAL_IQ_IMPORT', { companies: companies.length, detectedYears, file: file.name });
+  return { companies, detectedYears, warnings };
+}
+
+/**
+ * Extract analytical history from a Capital IQ Word report.
+ * Matches the three-step structure ("Step One/Two/Three") and the
+ * canonical bulk-rejection categories. Falls back gracefully for
+ * reports with unexpected layouts.
+ * @param {File} file
+ * @returns {Promise<{steps: Object[], rejections: Object[], rawText: string}>}
+ */
+async function parseCapitalIQWord(file) {
+  const buf = await readFileAsArrayBuffer(file);
+  const { value: text } = await mammoth.extractRawText({ arrayBuffer: buf });
+  const steps = [];
+  for (const m of text.matchAll(/Step\s+(One|Two|Three)[\s\S]{0,2000}?(?=Step\s+(?:One|Two|Three)|\n\s*Appendix|$)/g)) {
+    steps.push({ step: m[1], excerpt: m[0].slice(0, 1500) });
+  }
+  const rejections = [];
+  for (const p of CAPITAL_IQ_REJECTION_PATTERNS) {
+    const m = text.match(p.regex);
+    if (m) rejections.push({ key: p.key, match: m[0], capturedN: m[1] ? Number(m[1]) : null });
+  }
+  await logAudit('CAPITAL_IQ_IMPORT', { kind: 'word', steps: steps.length, rejections: rejections.length, file: file.name });
+  return { steps, rejections, rawText: text };
+}
+
+/** Merge a Word-derived analysis into matching companies (by name). */
+async function mergeCapitalIQWordIntoCompanies(wordResult) {
+  // Placeholder for the lookup-by-name flow; Phase 3 will consume the
+  // steps/rejections during screening. We record them on the project
+  // notes here so the data is not lost.
+  return wordResult;
+}
+</script>
+
+<!-- =====================================================================
+  PHASE 2 / BLOCK 17 : TPApp global accessor facade
+===================================================================== -->
+<script id="tp-app-global">
+const TPApp = {
+  version: APP_VERSION,
+  rules: {
+    getActive:        (id)    => rulesEngine.getActive(id),
+    getAllForProject: (pid)   => rulesEngine.getAllForProject(pid),
+    getStages:        (id)    => rulesEngine.getStages(id),
+    mergeStrictest:   (ids)   => rulesEngine.mergeStrictest(ids),
+    getOECDTPG:       ()      => rulesEngine.getOECDTPG(),
+    list:             ()      => rulesEngine.list(),
+    save:             (r)     => rulesEngine.save(r),
+    delete:           (id)    => rulesEngine.delete(id),
+  },
+  industry: {
+    convert:     convertIndustryCode,
+    search:      searchIndustryCode,
+    getHierarchy: getIndustryHierarchy,
+    getDescription: getIndustryDescription,
+    getCoverage:  () => ({ ...INDUSTRY_CODE_COVERAGE }),
+    importCsv:    importIndustryConcordanceCsv,
+  },
+  conditionEval: {
+    evaluate: evaluateConditionTree,
+    toString: conditionTreeToString,
+    validate: validateConditionTree,
+    fieldRefs: CONDITION_FIELD_REFS,
+    operators: CONDITION_OPERATORS,
+    presets:   CONDITION_PRESETS,
+  },
+  financials: {
+    getYearsAvailable, weightedAverage, simpleAverage, getLatestN, migrate: migrateFinancials,
+  },
+  todo: {
+    add:      (opts) => todoStore.add(opts),
+    complete: (id)   => todoStore.complete(id),
+    reopen:   (id)   => todoStore.reopen(id),
+    list:     (f)    => todoStore.list(f),
+    exportJson: () => todoStore.exportJson(),
+    importJson: (p)  => todoStore.importJson(p),
+  },
+  capitalIQ: { parseExcel: parseCapitalIQExcel, parseWord: parseCapitalIQWord },
+};
+window.TPApp = TPApp;
 </script>
 
 
@@ -1372,6 +3374,65 @@ async function runSelfTest() {
             </table>
           </div>
         </template>
+      </div>
+    </aside>
+  </div>
+
+  <!-- ============== Phase 2 TODO drawer ============== -->
+  <div x-show="showTodoPanel" class="fixed inset-0 z-30 flex" @keydown.escape.window="showTodoPanel = false">
+    <div class="flex-1 bg-black/30" @click="showTodoPanel = false"></div>
+    <aside class="w-[520px] bg-white shadow-2xl flex flex-col">
+      <div class="px-5 py-3 border-b flex items-center justify-between">
+        <h3 class="font-semibold">TODO リスト</h3>
+        <div class="flex gap-2 items-center">
+          <button class="text-xs px-2 py-1 border rounded" @click="exportTodos()">JSONエクスポート</button>
+          <button class="text-slate-500 hover:text-slate-800" @click="showTodoPanel = false">&times;</button>
+        </div>
+      </div>
+      <div class="px-5 py-3 border-b">
+        <div class="grid grid-cols-5 gap-2 text-xs">
+          <input class="col-span-2 px-2 py-1 border rounded" placeholder="タイトル" x-model="todoDraft.title">
+          <select class="px-2 py-1 border rounded" x-model="todoDraft.priority">
+            <option value="critical">critical</option><option value="high">high</option>
+            <option value="medium">medium</option><option value="low">low</option>
+          </select>
+          <input class="col-span-1 px-2 py-1 border rounded" placeholder="メモ" x-model="todoDraft.description">
+          <button class="px-2 py-1 bg-blue-600 text-white rounded" @click="addTodo()">追加</button>
+        </div>
+      </div>
+      <div class="flex-1 overflow-auto p-5 space-y-2 text-sm">
+        <template x-for="t in todos" :key="t.id">
+          <div class="border rounded p-3" :class="t.status === 'completed' ? 'bg-slate-100 opacity-70' : 'bg-white'">
+            <div class="flex items-start justify-between gap-3">
+              <div class="flex-1">
+                <div class="flex items-center gap-2 mb-1">
+                  <span class="text-[10px] px-1.5 py-0.5 rounded"
+                        :class="{critical:'bg-rose-200 text-rose-900', high:'bg-amber-200 text-amber-900', medium:'bg-slate-200 text-slate-900', low:'bg-slate-100 text-slate-700'}[t.priority]"
+                        x-text="t.priority"></span>
+                  <span class="font-medium" x-text="t.title"></span>
+                </div>
+                <div class="text-xs text-slate-500 whitespace-pre-wrap" x-text="t.description"></div>
+                <div class="text-[10px] text-slate-400 mt-1">source: <span class="font-mono" x-text="t.source"></span> · <span x-text="new Date(t.createdAt).toLocaleString()"></span></div>
+                <!-- Inline CSV import for the standing concordance TODO. -->
+                <template x-if="t.metadata?.importHook === 'industryConcordanceCsv' && t.status !== 'completed'">
+                  <label class="mt-2 inline-block px-2 py-1 text-xs bg-amber-100 border border-amber-300 rounded cursor-pointer">
+                    Import full concordance CSV
+                    <input type="file" accept=".csv" class="hidden" @change="onConcordanceCsvPick($event)">
+                  </label>
+                </template>
+              </div>
+              <div class="flex flex-col gap-1">
+                <template x-if="t.status !== 'completed'">
+                  <button class="text-xs px-2 py-0.5 border rounded text-emerald-700" @click="completeTodo(t.id)">完了</button>
+                </template>
+                <template x-if="t.status === 'completed'">
+                  <button class="text-xs px-2 py-0.5 border rounded" @click="reopenTodo(t.id)">再開</button>
+                </template>
+              </div>
+            </div>
+          </div>
+        </template>
+        <template x-if="!todos.length"><div class="text-center text-slate-400 py-6">TODO はまだありません</div></template>
       </div>
     </aside>
   </div>
@@ -1489,7 +3550,7 @@ async function runSelfTest() {
           <div class="text-xs text-slate-500">現在のプロジェクト</div>
           <div class="font-semibold" x-text="currentProject?.name || '(未選択)'"></div>
         </div>
-        <div class="flex items-center gap-2 text-sm">
+        <div class="flex items-center gap-3 text-sm">
           <template x-if="currentProject">
             <div class="flex items-center gap-2">
               <span class="text-slate-500">管轄:</span>
@@ -1500,6 +3561,13 @@ async function runSelfTest() {
               <button class="px-3 py-1 border rounded" @click="exportCurrent()">エクスポート</button>
             </div>
           </template>
+          <!-- Phase 2: standing TODO badge. Persisted across reloads. -->
+          <button class="relative px-3 py-1 border rounded flex items-center gap-2" @click="showTodoPanel = true">
+            <span>TODO</span>
+            <span x-show="todoBadgeCount() > 0"
+                  class="bg-rose-600 text-white text-xs rounded-full px-1.5 py-0.5 min-w-[1.25rem] text-center"
+                  x-text="todoBadgeCount()"></span>
+          </button>
         </div>
       </header>
 
@@ -1588,6 +3656,119 @@ async function runSelfTest() {
               <div class="mt-2 text-xs">対応形式: .xlsx, .xls, .csv, .tsv, .json, .docx</div>
             </div>
           </div>
+
+          <!-- Phase 2: data-source-specific presets -->
+          <div class="bg-white rounded-lg shadow p-5">
+            <h3 class="font-semibold mb-3">データソース別プリセット</h3>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+              <label class="border rounded p-4 cursor-pointer hover:border-blue-500">
+                <div class="font-medium mb-1">S&amp;P Capital IQ - Excel</div>
+                <div class="text-xs text-slate-500 mb-2">2行ヘッダー (カテゴリ×年度) を動的解析。年数1〜10に対応。</div>
+                <input type="file" accept=".xlsx,.xls" class="hidden" @change="onCIQExcelPick($event)">
+                <span class="inline-block px-2 py-1 text-xs bg-blue-600 text-white rounded">Excelを選択</span>
+              </label>
+              <label class="border rounded p-4 cursor-pointer hover:border-blue-500">
+                <div class="font-medium mb-1">S&amp;P Capital IQ - Word Report</div>
+                <div class="text-xs text-slate-500 mb-2">3段階処理履歴 (Step One/Two/Three) と Appendix B を抽出。</div>
+                <input type="file" accept=".docx" class="hidden" @change="onCIQWordPick($event)">
+                <span class="inline-block px-2 py-1 text-xs bg-blue-600 text-white rounded">Wordを選択</span>
+              </label>
+              <div class="border rounded p-4 opacity-60">
+                <div class="font-medium mb-1">Orbis</div>
+                <div class="text-xs text-slate-500">スケルトンのみ (将来対応)</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Capital IQ Excel preview -->
+          <template x-if="cIQResult">
+            <div class="bg-white rounded-lg shadow p-5">
+              <h3 class="font-semibold mb-3">Capital IQ Excel - インポート結果</h3>
+              <div class="grid grid-cols-3 gap-3 text-sm mb-3">
+                <div class="bg-slate-50 p-3 rounded"><div class="text-xs text-slate-500">企業数</div><div class="font-mono text-lg" x-text="cIQResult.companies.length"></div></div>
+                <div class="bg-slate-50 p-3 rounded"><div class="text-xs text-slate-500">検出年度数</div><div class="font-mono text-lg" x-text="cIQResult.detectedYears.length + '年'"></div></div>
+                <div class="bg-slate-50 p-3 rounded"><div class="text-xs text-slate-500">検出年度</div><div class="font-mono text-xs" x-text="cIQResult.detectedYears.join(', ')"></div></div>
+              </div>
+              <template x-if="cIQResult.warnings.length">
+                <div class="text-xs text-amber-700 bg-amber-50 p-2 rounded mb-3">
+                  <template x-for="w in cIQResult.warnings" :key="w"><div x-text="'⚠ ' + w"></div></template>
+                </div>
+              </template>
+              <div class="grid grid-cols-2 gap-3 mb-3 text-sm">
+                <div>
+                  <label class="block text-xs text-slate-500 mb-1">インポート対象年度</label>
+                  <div class="flex flex-wrap gap-2 p-2 border rounded bg-slate-50">
+                    <template x-for="y in cIQResult.detectedYears" :key="y">
+                      <label class="text-xs flex items-center gap-1 px-2 py-0.5 bg-white border rounded">
+                        <input type="checkbox" :value="y" x-model="cIQYearsSelected"><span x-text="y"></span>
+                      </label>
+                    </template>
+                  </div>
+                </div>
+                <div>
+                  <label class="block text-xs text-slate-500 mb-1">Status/Rejection Reasonの取扱い</label>
+                  <select class="w-full px-2 py-1 border rounded text-sm" x-model="cIQStatusMode">
+                    <option value="overlay">採用＋再分析で上書き可 (デフォルト)</option>
+                    <option value="preserve">CIQ判定を初期状態として採用</option>
+                    <option value="ignore">Statusを無視して再分析</option>
+                  </select>
+                </div>
+              </div>
+              <div class="overflow-auto max-h-64 border rounded">
+                <table class="w-full text-xs">
+                  <thead class="bg-slate-100 text-left">
+                    <tr><th class="px-2 py-1">企業名</th><th>国</th><th>SIC</th><th>NAICS 2017</th><th>CIQ Status</th><th>年度保有</th></tr>
+                  </thead>
+                  <tbody>
+                    <template x-for="c in cIQResult.companies.slice(0,50)" :key="c.id">
+                      <tr class="border-t">
+                        <td class="px-2 py-1" x-text="c.name"></td>
+                        <td x-text="c.country"></td>
+                        <td class="font-mono" x-text="c.industryCodes?.SIC?.primary || ''"></td>
+                        <td class="font-mono" x-text="c.industryCodes?.NAICS_2012?.primary || c.industryCodes?.NAICS_2012_DERIVED?.primary || ''"></td>
+                        <td x-text="c.cIQStatus || ''"></td>
+                        <td class="font-mono" x-text="Object.keys(c.financials || {}).sort().join(', ')"></td>
+                      </tr>
+                    </template>
+                  </tbody>
+                </table>
+              </div>
+              <div class="mt-3 flex justify-end gap-2">
+                <button class="px-3 py-1.5 text-sm border rounded" @click="cIQResult = null">キャンセル</button>
+                <button class="px-3 py-1.5 text-sm bg-blue-600 text-white rounded" @click="commitCIQImport()">プロジェクトに取込</button>
+              </div>
+            </div>
+          </template>
+
+          <!-- Capital IQ Word preview -->
+          <template x-if="cIQWordResult">
+            <div class="bg-white rounded-lg shadow p-5">
+              <h3 class="font-semibold mb-3">Capital IQ Word - 解析結果</h3>
+              <div class="grid grid-cols-2 gap-3 text-sm">
+                <div>
+                  <h4 class="text-xs font-semibold text-slate-500 mb-1">3段階処理履歴</h4>
+                  <template x-if="!cIQWordResult.steps.length"><div class="text-xs text-slate-400">検出されず</div></template>
+                  <template x-for="s in cIQWordResult.steps" :key="s.step">
+                    <div class="border rounded p-2 mb-1 text-xs">
+                      <div class="font-semibold">Step <span x-text="s.step"></span></div>
+                      <div class="text-slate-600 line-clamp-3" x-text="s.excerpt.slice(0, 250) + '...'"></div>
+                    </div>
+                  </template>
+                </div>
+                <div>
+                  <h4 class="text-xs font-semibold text-slate-500 mb-1">棄却理由カテゴリ</h4>
+                  <template x-for="r in cIQWordResult.rejections" :key="r.key">
+                    <div class="text-xs border-l-4 border-rose-400 pl-2 py-1 mb-1 bg-rose-50">
+                      <span class="font-mono" x-text="r.key"></span>
+                      <template x-if="r.capturedN != null"><span class="ml-2 text-slate-600">N=<span x-text="r.capturedN"></span></span></template>
+                    </div>
+                  </template>
+                </div>
+              </div>
+              <div class="mt-2 text-xs text-slate-500">Excel と併用すると企業名でマッチングしてauditLogに統合履歴を記録 (矛盾はExcel優先)。</div>
+              <div class="mt-2 flex justify-end"><button class="px-3 py-1.5 text-sm border rounded" @click="cIQWordResult = null">閉じる</button></div>
+            </div>
+          </template>
 
           <!-- Column mapping -->
           <div x-show="fileImport.headers.length" class="bg-white rounded-lg shadow p-5">
@@ -1751,30 +3932,366 @@ Foo Corp,JP,334413,2024,1000000,80000,..."></textarea>
         </div>
       </section>
 
-      <!-- ============== Jurisdiction rules (placeholder) ============== -->
-      <section x-show="currentView === 'rules'" class="p-6">
-        <div class="bg-white rounded-lg shadow p-6">
-          <h2 class="font-semibold text-lg mb-3">法域・ルール設定 <span class="text-xs text-amber-600 font-normal">(Phase 2 で実装)</span></h2>
-          <p class="text-sm text-slate-600 mb-4">
-            Phase 2 では各税務管轄のスクリーニング基準、推奨PLI、レポート必須セクションを定義したルールパックを読み込み、各画面に自動反映します。
-            このセクションはルール選択UIの枠組みです。
-          </p>
-          <div class="border rounded p-4 bg-slate-50">
-            <h3 class="text-sm font-semibold mb-2">適用予定ルール</h3>
-            <template x-if="currentProject">
-              <div class="text-sm">
-                <template x-for="j in currentProject.targetJurisdiction" :key="j">
-                  <div class="flex items-center justify-between py-1 border-b last:border-b-0">
-                    <div><span class="font-mono" x-text="j"></span> - <span x-text="jurisdictionLabel(j)"></span></div>
-                    <select class="px-2 py-1 border rounded text-sm bg-white" disabled>
-                      <option>(Phase 2 でルール選択)</option>
-                    </select>
-                  </div>
-                </template>
+      <!-- ============== Jurisdiction rules (Phase 2) ============== -->
+      <section x-show="currentView === 'rules'" class="p-6 space-y-6">
+        <!-- Rule list view -->
+        <div x-show="showRuleList">
+          <div class="flex items-center justify-between mb-4">
+            <h2 class="font-semibold text-lg">法域・ルール設定</h2>
+            <div class="flex gap-2">
+              <button class="px-3 py-1.5 text-sm bg-blue-600 text-white rounded" @click="newRuleFromTemplate()">新規作成</button>
+              <label class="px-3 py-1.5 text-sm border rounded cursor-pointer">JSONインポート<input type="file" accept="application/json" class="hidden" @change="importRulesJson($event)"></label>
+              <button class="px-3 py-1.5 text-sm border rounded" @click="exportAllRules()">全エクスポート</button>
+            </div>
+          </div>
+          <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            <template x-for="r in allRules" :key="r.jurisdictionId">
+              <div class="border-l-4 rounded-lg shadow p-4 bg-white cursor-pointer hover:shadow-md transition"
+                   :class="ruleColorClass(r)"
+                   @click="openRuleEditor(r.jurisdictionId)">
+                <div class="flex items-center justify-between mb-1">
+                  <h3 class="font-semibold text-sm" x-text="r.name"></h3>
+                  <span class="text-[10px] px-1.5 py-0.5 rounded"
+                        :class="r.isGenericModel ? 'bg-purple-200 text-purple-800' : r.isOfficial ? 'bg-blue-200 text-blue-800' : 'bg-emerald-200 text-emerald-800'"
+                        x-text="r.isGenericModel ? 'GENERIC' : r.isOfficial ? 'OFFICIAL' : 'CUSTOM'"></span>
+                </div>
+                <div class="text-xs text-slate-600 space-y-0.5">
+                  <div><span class="font-mono" x-text="r.jurisdictionId"></span> / v<span x-text="r.version"></span></div>
+                  <div>レンジ: <span x-text="r.rangeMethod.type + ' ' + r.rangeMethod.lowerPercentile + '-' + r.rangeMethod.upperPercentile"></span></div>
+                  <div>分析年数: 規定<span x-text="r.yearsAnalysis.default"></span>年 / <span x-text="r.yearsAnalysis.averaging"></span></div>
+                  <div>最小社数: <span x-text="r.minComparables"></span></div>
+                </div>
               </div>
             </template>
           </div>
+
+          <!-- Project binding panel -->
+          <template x-if="currentProject">
+            <div class="bg-white rounded-lg shadow p-5 mt-6">
+              <h3 class="font-semibold mb-3">プロジェクトへの適用</h3>
+              <div class="grid grid-cols-2 gap-4 text-sm">
+                <div>
+                  <label class="block text-xs text-slate-500 mb-1">バインド済みルール</label>
+                  <div class="flex flex-wrap gap-2 p-2 border rounded bg-slate-50 min-h-[2.5rem]">
+                    <template x-for="j in currentProject.targetJurisdiction" :key="j">
+                      <span class="px-2 py-0.5 bg-blue-100 text-blue-800 rounded text-xs font-mono" x-text="j"></span>
+                    </template>
+                    <template x-if="!currentProject.targetJurisdiction?.length">
+                      <span class="text-xs text-slate-400">未バインド → OECD TPG が自動適用</span>
+                    </template>
+                  </div>
+                </div>
+                <div>
+                  <label class="block text-xs text-slate-500 mb-1">複数法域の扱い</label>
+                  <select class="px-2 py-1 border rounded text-sm w-full" x-model="projectMergeMode">
+                    <option value="parallel">並列 (タブで切替表示)</option>
+                    <option value="strictest">最厳格マージ</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="block text-xs text-slate-500 mb-1">分析対象年度範囲 (任意上書き)</label>
+                  <div class="flex gap-2 items-center">
+                    <input type="number" class="w-24 px-2 py-1 border rounded text-sm" :value="currentProject.analysisYearRange?.from || ''" @change="setProjectYearRange($event.target.value, currentProject.analysisYearRange?.to || $event.target.value)">
+                    <span>〜</span>
+                    <input type="number" class="w-24 px-2 py-1 border rounded text-sm" :value="currentProject.analysisYearRange?.to || ''" @change="setProjectYearRange(currentProject.analysisYearRange?.from || $event.target.value, $event.target.value)">
+                  </div>
+                  <div class="text-[10px] text-slate-400 mt-1">空欄時はルールのデフォルト年数を使用</div>
+                </div>
+              </div>
+            </div>
+          </template>
+
+          <!-- Industry code search panel -->
+          <div class="bg-white rounded-lg shadow p-5 mt-6">
+            <div class="flex items-center justify-between mb-2">
+              <h3 class="font-semibold">業種コード検索</h3>
+              <div class="text-xs text-slate-500">
+                SIC内蔵 <span class="font-mono" x-text="industryCodeCoverage.sicEmbedded"></span> / 概念マップ
+                <span class="font-mono" x-text="industryCodeCoverage.sicWithMapping"></span>SIC →
+                <span class="font-mono" x-text="industryCodeCoverage.concordancePairs"></span> ペア
+                (<span x-text="industryCodeCoverage.sicCoveragePct"></span>%カバー)
+              </div>
+            </div>
+            <div class="flex gap-2 mb-3 text-sm">
+              <select class="px-2 py-1 border rounded" x-model="industrySearchSystem">
+                <option value="SIC">SIC 1987</option>
+                <option value="NAICS_2017">NAICS 2017</option>
+                <option value="NACE_REV_2">NACE Rev 2</option>
+              </select>
+              <input class="flex-1 px-2 py-1 border rounded" placeholder="コード番号 or 説明文" x-model="industrySearchQuery" @input.debounce.300ms="runIndustrySearch()">
+              <button class="px-3 py-1 border rounded" @click="runIndustrySearch()">検索</button>
+              <label class="px-3 py-1 border rounded text-sm cursor-pointer bg-amber-50">Census CSV取込<input type="file" accept=".csv" class="hidden" @change="onConcordanceCsvPick($event)"></label>
+            </div>
+            <div class="overflow-auto max-h-64 border rounded">
+              <table class="w-full text-xs">
+                <thead class="bg-slate-100 text-left"><tr><th class="px-2 py-1">コード</th><th>説明</th><th>変換</th></tr></thead>
+                <tbody>
+                  <template x-for="r in industrySearchResults" :key="r.code">
+                    <tr class="border-t hover:bg-slate-50">
+                      <td class="px-2 py-1 font-mono" x-text="r.code"></td>
+                      <td x-text="r.description"></td>
+                      <td><template x-if="industrySearchSystem === 'SIC'"><button class="text-xs px-2 py-0.5 border rounded" @click.stop="showConversionCandidates(r.code)">→ NAICS</button></template></td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+          </div>
         </div>
+
+        <!-- Rule editor view -->
+        <template x-if="editingRule && !showRuleList">
+          <div class="bg-white rounded-lg shadow">
+            <div class="flex items-center justify-between px-5 py-3 border-b">
+              <div>
+                <button class="text-sm text-slate-500 hover:text-slate-800" @click="cancelEditingRule()">← 戻る</button>
+                <h2 class="font-semibold text-lg" x-text="editingRule.name"></h2>
+                <div class="text-xs text-slate-500">
+                  <span class="font-mono" x-text="editingRule.jurisdictionId"></span>
+                  <span x-show="editingRule.isOfficial" class="text-blue-700"> · 公式</span>
+                  <span x-show="editingRule.isGenericModel" class="text-purple-700"> · 汎用モデル</span>
+                  <span x-show="editingRule.parentId"> · parent=<span x-text="editingRule.parentId" class="font-mono"></span></span>
+                </div>
+              </div>
+              <div class="flex gap-2">
+                <template x-if="!editingRule.isOfficial"><button class="px-3 py-1 text-sm border rounded text-rose-600" @click="deleteEditingRule()">削除</button></template>
+                <button class="px-3 py-1 text-sm bg-blue-600 text-white rounded" @click="saveEditingRule()">保存</button>
+              </div>
+            </div>
+
+            <div class="flex border-b px-5">
+              <template x-for="tab in [{id:'basic',label:'基本情報'},{id:'range',label:'レンジ算定'},{id:'years',label:'分析年数・損失会社'},{id:'wc',label:'WC調整'},{id:'stages',label:'スクリーニング段階'},{id:'pli',label:'PLI・レポート'}]" :key="tab.id">
+                <button class="px-3 py-2 text-sm border-b-2 -mb-px"
+                        :class="ruleEditTab === tab.id ? 'border-blue-600 text-blue-700 font-semibold' : 'border-transparent text-slate-500'"
+                        @click="ruleEditTab = tab.id" x-text="tab.label"></button>
+              </template>
+            </div>
+
+            <div class="p-5 text-sm space-y-4">
+              <!-- TAB: basic -->
+              <div x-show="ruleEditTab === 'basic'" class="grid grid-cols-2 gap-3">
+                <div><label class="block text-xs text-slate-500">ID</label><input class="w-full px-2 py-1 border rounded font-mono" x-model="editingRule.jurisdictionId" :disabled="editingRule.isOfficial"></div>
+                <div><label class="block text-xs text-slate-500">バージョン</label><input class="w-full px-2 py-1 border rounded" x-model="editingRule.version"></div>
+                <div><label class="block text-xs text-slate-500">名称 (English)</label><input class="w-full px-2 py-1 border rounded" x-model="editingRule.name"></div>
+                <div><label class="block text-xs text-slate-500">名称 (現地)</label><input class="w-full px-2 py-1 border rounded" x-model="editingRule.nameLocal"></div>
+                <div class="col-span-2"><label class="block text-xs text-slate-500">参照法 / 通達名 <span class="text-slate-400" title="主要な法令上の根拠を入力">[?]</span></label><input class="w-full px-2 py-1 border rounded" x-model="editingRule.referenceLaw.primary"></div>
+                <div class="col-span-2"><label class="block text-xs text-slate-500">参照URL</label><input class="w-full px-2 py-1 border rounded" x-model="editingRule.referenceLaw.url"></div>
+                <div class="col-span-2"><label class="block text-xs text-slate-500">メモ</label><textarea rows="3" class="w-full px-2 py-1 border rounded" x-model="editingRule.notes"></textarea></div>
+                <div class="col-span-2"><label class="text-xs flex items-center gap-2"><input type="checkbox" x-model="editingRule.isGenericModel"> 汎用モデルとして扱う (OECD TPG等)</label></div>
+              </div>
+
+              <!-- TAB: range -->
+              <div x-show="ruleEditTab === 'range'" class="grid grid-cols-2 gap-3">
+                <div><label class="block text-xs text-slate-500">方式</label>
+                  <select class="w-full px-2 py-1 border rounded" x-model="editingRule.rangeMethod.type">
+                    <option value="IQR">IQR (四分位)</option><option value="PERCENTILE">任意パーセンタイル</option>
+                    <option value="FULL_RANGE">フルレンジ</option><option value="CUSTOM">カスタム</option>
+                  </select>
+                </div>
+                <div><label class="block text-xs text-slate-500">中心傾向</label>
+                  <select class="w-full px-2 py-1 border rounded" x-model="editingRule.rangeMethod.centralTendency">
+                    <option value="MEDIAN">MEDIAN (中央値)</option><option value="MEAN">MEAN (平均)</option>
+                  </select>
+                </div>
+                <div><label class="block text-xs text-slate-500">下限パーセンタイル <span title="日本/米国はIQRの25%。インドは35%">[?]</span></label><input type="number" min="0" max="100" class="w-full px-2 py-1 border rounded" x-model.number="editingRule.rangeMethod.lowerPercentile"></div>
+                <div><label class="block text-xs text-slate-500">上限パーセンタイル</label><input type="number" min="0" max="100" class="w-full px-2 py-1 border rounded" x-model.number="editingRule.rangeMethod.upperPercentile"></div>
+              </div>
+
+              <!-- TAB: years -->
+              <div x-show="ruleEditTab === 'years'" class="grid grid-cols-2 gap-3">
+                <div><label class="block text-xs text-slate-500">デフォルト年数 (1-10)</label><input type="number" min="1" :max="YEARS_ANALYSIS_HARD_MAX" class="w-full px-2 py-1 border rounded" x-model.number="editingRule.yearsAnalysis.default"></div>
+                <div><label class="block text-xs text-slate-500">平均化方式</label>
+                  <select class="w-full px-2 py-1 border rounded" x-model="editingRule.yearsAnalysis.averaging">
+                    <option value="SINGLE_YEAR">単年</option><option value="SIMPLE_AVG">単純平均</option><option value="WEIGHTED_AVG">加重平均</option>
+                  </select>
+                </div>
+                <div><label class="block text-xs text-slate-500">最小年数</label><input type="number" min="1" class="w-full px-2 py-1 border rounded" x-model.number="editingRule.yearsAnalysis.min"></div>
+                <div><label class="block text-xs text-slate-500">最大年数 (≤10)</label><input type="number" min="1" :max="YEARS_ANALYSIS_HARD_MAX" class="w-full px-2 py-1 border rounded" x-model.number="editingRule.yearsAnalysis.max"></div>
+                <div class="col-span-2 border-t pt-3 mt-2"><h4 class="font-semibold mb-2">損失会社の扱い (M年中N年が損失で除外)</h4></div>
+                <div><label class="block text-xs text-slate-500">処理</label>
+                  <select class="w-full px-2 py-1 border rounded" x-model="editingRule.lossMakers.treatment">
+                    <option value="EXCLUDE_PERSISTENT">持続的損失会社を除外</option>
+                    <option value="EXCLUDE_ALL">全損失会社を除外</option>
+                    <option value="KEEP">残す</option>
+                  </select>
+                </div>
+                <div><label class="block text-xs text-slate-500">ルール式</label><div class="px-2 py-1 border rounded bg-slate-50 font-mono">LOSS_IN_N_OF_M_YEARS</div></div>
+                <div><label class="block text-xs text-slate-500">N (損失年数)</label><input type="number" min="1" class="w-full px-2 py-1 border rounded" x-model.number="editingRule.lossMakers.ruleParams.n"></div>
+                <div><label class="block text-xs text-slate-500">M (検査対象年数)</label><input type="number" min="1" class="w-full px-2 py-1 border rounded" x-model.number="editingRule.lossMakers.ruleParams.m"></div>
+              </div>
+
+              <!-- TAB: wc -->
+              <div x-show="ruleEditTab === 'wc'" class="grid grid-cols-2 gap-3">
+                <div><label class="block text-xs text-slate-500">必須レベル</label>
+                  <select class="w-full px-2 py-1 border rounded" x-model="editingRule.workingCapitalAdjustment.requirement">
+                    <option value="REQUIRED">必須</option><option value="RECOMMENDED">推奨</option><option value="OPTIONAL">任意</option><option value="NOT_USED">不使用</option>
+                  </select>
+                </div>
+                <div><label class="block text-xs text-slate-500">計算式</label>
+                  <select class="w-full px-2 py-1 border rounded" x-model="editingRule.workingCapitalAdjustment.formula">
+                    <option value="STANDARD_OECD">OECD標準</option><option value="CUSTOM">カスタム</option>
+                  </select>
+                </div>
+              </div>
+
+              <!-- TAB: stages -->
+              <div x-show="ruleEditTab === 'stages'">
+                <div class="flex items-center justify-between mb-3">
+                  <h4 class="font-semibold">スクリーニング段階 (ドラッグで並び替え)</h4>
+                  <div class="flex gap-2">
+                    <select class="px-2 py-1 border rounded text-xs" x-model="$data.newStageType">
+                      <option value="CUSTOM">CUSTOM</option><option value="QUANTITATIVE">QUANTITATIVE</option>
+                      <option value="BULK_REJECTION">BULK_REJECTION</option><option value="INDEPENDENCE">INDEPENDENCE</option>
+                      <option value="FAR">FAR</option><option value="FINANCIAL">FINANCIAL</option><option value="QUALITATIVE_REVIEW">QUALITATIVE_REVIEW</option>
+                    </select>
+                    <button class="px-3 py-1 text-xs bg-blue-600 text-white rounded" @click="addStage(editingRule.screeningStages, $data.newStageType || 'CUSTOM')">+ 段階を追加</button>
+                  </div>
+                </div>
+                <div class="space-y-2">
+                  <template x-for="(stage, idx) in editingRule.screeningStages" :key="stage.id">
+                    <div class="border rounded p-3 bg-white" draggable="true"
+                         @dragstart="onStageDragStart(idx)" @dragover.prevent @drop.prevent="onStageDrop(editingRule.screeningStages, idx)">
+                      <div class="flex items-center gap-3">
+                        <span class="cursor-grab text-slate-400">⋮⋮</span>
+                        <span class="font-mono text-xs text-slate-500 w-8" x-text="'#' + stage.order"></span>
+                        <input class="flex-1 px-2 py-1 border rounded text-sm" x-model="stage.label">
+                        <span class="text-[10px] px-2 py-0.5 bg-slate-100 rounded font-mono" x-text="stage.type"></span>
+                        <label class="text-xs flex items-center gap-1"><input type="checkbox" x-model="stage.enabled"> 有効</label>
+                        <template x-if="stage.type === 'CUSTOM'">
+                          <button class="text-xs px-2 py-0.5 border rounded" @click="openConditionEditor(idx)">条件編集</button>
+                        </template>
+                        <button class="text-xs px-2 py-0.5 border rounded" @click="moveStage(editingRule.screeningStages, idx, idx-1)">↑</button>
+                        <button class="text-xs px-2 py-0.5 border rounded" @click="moveStage(editingRule.screeningStages, idx, idx+1)">↓</button>
+                        <button class="text-xs px-2 py-0.5 border rounded text-rose-600" @click="removeStage(editingRule.screeningStages, idx)">削除</button>
+                      </div>
+                      <template x-if="stage.conditionTree">
+                        <div class="mt-2 text-[11px] font-mono text-slate-600 bg-slate-50 px-2 py-1 rounded" x-text="conditionTreeToString(stage.conditionTree)"></div>
+                      </template>
+                    </div>
+                  </template>
+                </div>
+
+                <!-- Condition tree inline editor -->
+                <template x-if="editingStageIdx >= 0 && editingRule.screeningStages[editingStageIdx]?.conditionTree">
+                  <div class="mt-4 border rounded p-4 bg-slate-50">
+                    <div class="flex items-center justify-between mb-2">
+                      <h5 class="font-semibold text-sm">条件式エディタ - <span x-text="editingRule.screeningStages[editingStageIdx].label"></span></h5>
+                      <div class="flex gap-2 items-center">
+                        <span class="text-xs text-slate-500" x-show="livePreviewCount != null">マッチ: <span class="font-mono" x-text="livePreviewCount"></span>社</span>
+                        <select class="px-2 py-1 border rounded text-xs" @change="applyConditionPreset($event.target.value)">
+                          <option value="">プリセット適用...</option>
+                          <template x-for="(p, i) in conditionPresets" :key="i"><option :value="i" x-text="p.name"></option></template>
+                        </select>
+                        <button class="text-xs px-2 py-0.5 border rounded" @click="closeConditionEditor()">閉じる</button>
+                      </div>
+                    </div>
+                    <div class="bg-white p-3 rounded border">
+                      <!-- The editor renders the root group and one level of subgroups
+                           inline. Deeper nesting is allowed in the data model (and the
+                           evaluator handles it) but is shown as a textual reminder. -->
+                      <div>
+                        <template x-if="editingRule.screeningStages[editingStageIdx].conditionTree">
+                          <ul class="space-y-1">
+                            <li>
+                              <div x-data="{ node: editingRule.screeningStages[editingStageIdx].conditionTree, parent: null, idx: -1 }">
+                                <template x-if="node.kind === 'group'">
+                                  <div class="border rounded p-2"
+                                       :class="(node.op === 'OR') ? 'border-amber-400 bg-amber-50' : 'border-slate-300 bg-white'">
+                                    <div class="flex items-center gap-2 mb-2 text-xs">
+                                      <label class="flex items-center gap-1"><input type="checkbox" x-model="node.not"> NOT</label>
+                                      <select class="px-2 py-0.5 border rounded text-xs" x-model="node.op">
+                                        <option value="AND">AND</option><option value="OR">OR</option>
+                                      </select>
+                                      <button class="text-xs px-2 py-0.5 border rounded" @click="addConditionTo(node)">+ 条件</button>
+                                      <button class="text-xs px-2 py-0.5 border rounded" @click="addGroupTo(node)">+ グループ</button>
+                                    </div>
+                                    <div class="pl-3 space-y-2">
+                                      <template x-for="(child, ci) in node.children" :key="ci">
+                                        <div>
+                                          <!-- LEAF -->
+                                          <template x-if="child.kind === 'condition'">
+                                            <div class="flex items-center gap-2 text-xs">
+                                              <label class="flex items-center gap-1"><input type="checkbox" x-model="child.not"> NOT</label>
+                                              <select class="px-2 py-1 border rounded text-xs" x-model="child.field" @change="recomputeLivePreview()">
+                                                <template x-for="f in conditionFieldRefs" :key="f.value"><option :value="f.value" x-text="f.label"></option></template>
+                                              </select>
+                                              <select class="px-2 py-1 border rounded text-xs" x-model="child.op" @change="recomputeLivePreview()">
+                                                <template x-for="o in [...conditionOperators.number, ...conditionOperators.string]" :key="o"><option :value="o" x-text="o"></option></template>
+                                              </select>
+                                              <input class="px-2 py-1 border rounded text-xs flex-1" x-model="child.value" @input.debounce.300ms="recomputeLivePreview()" placeholder="値">
+                                              <button class="text-xs px-2 py-0.5 border rounded text-rose-600" @click="removeFromParent(node, ci)">×</button>
+                                            </div>
+                                          </template>
+                                          <!-- SUBGROUP (one extra level rendered inline; deeper levels still evaluate correctly) -->
+                                          <template x-if="child.kind === 'group'">
+                                            <div class="border rounded p-2"
+                                                 :class="child.op === 'OR' ? 'border-amber-400 bg-amber-50' : 'border-slate-300 bg-slate-50'">
+                                              <div class="flex items-center gap-2 mb-2 text-xs">
+                                                <label class="flex items-center gap-1"><input type="checkbox" x-model="child.not"> NOT</label>
+                                                <select class="px-2 py-0.5 border rounded text-xs" x-model="child.op">
+                                                  <option value="AND">AND</option><option value="OR">OR</option>
+                                                </select>
+                                                <button class="text-xs px-2 py-0.5 border rounded" @click="addConditionTo(child)">+ 条件</button>
+                                                <button class="text-xs px-2 py-0.5 border rounded" @click="addGroupTo(child)">+ グループ</button>
+                                                <button class="text-xs px-2 py-0.5 border rounded text-rose-600" @click="removeFromParent(node, ci)">グループ削除</button>
+                                              </div>
+                                              <template x-for="(g, gi) in child.children" :key="gi">
+                                                <div class="flex items-center gap-2 text-xs mb-1 pl-3">
+                                                  <template x-if="g.kind === 'condition'">
+                                                    <div class="flex items-center gap-2 flex-1">
+                                                      <label class="flex items-center gap-1"><input type="checkbox" x-model="g.not"> NOT</label>
+                                                      <select class="px-2 py-1 border rounded text-xs" x-model="g.field" @change="recomputeLivePreview()">
+                                                        <template x-for="f in conditionFieldRefs" :key="f.value"><option :value="f.value" x-text="f.label"></option></template>
+                                                      </select>
+                                                      <select class="px-2 py-1 border rounded text-xs" x-model="g.op" @change="recomputeLivePreview()">
+                                                        <template x-for="o in [...conditionOperators.number, ...conditionOperators.string]" :key="o"><option :value="o" x-text="o"></option></template>
+                                                      </select>
+                                                      <input class="px-2 py-1 border rounded text-xs flex-1" x-model="g.value" @input.debounce.300ms="recomputeLivePreview()">
+                                                      <button class="text-xs px-2 py-0.5 border rounded text-rose-600" @click="removeFromParent(child, gi)">×</button>
+                                                    </div>
+                                                  </template>
+                                                  <template x-if="g.kind === 'group'">
+                                                    <div class="text-[10px] text-amber-700">⤵ ネスト3層以上は条件式テキストで確認してください</div>
+                                                  </template>
+                                                </div>
+                                              </template>
+                                            </div>
+                                          </template>
+                                        </div>
+                                      </template>
+                                    </div>
+                                  </div>
+                                </template>
+                              </div>
+                            </li>
+                          </ul>
+                        </template>
+                      </div>
+                    </div>
+                    <div class="mt-2 text-[11px] font-mono text-slate-600 bg-white px-2 py-1 rounded border" x-text="conditionTreeText"></div>
+                  </div>
+                </template>
+              </div>
+
+              <!-- TAB: pli -->
+              <div x-show="ruleEditTab === 'pli'" class="grid grid-cols-2 gap-3">
+                <div class="col-span-2"><label class="block text-xs text-slate-500">推奨PLI (カンマ区切り)</label>
+                  <input class="w-full px-2 py-1 border rounded font-mono text-sm" :value="(editingRule.preferredPLI||[]).join(',')"
+                         @change="editingRule.preferredPLI = $event.target.value.split(',').map(s=>s.trim()).filter(Boolean)">
+                </div>
+                <div class="col-span-2"><label class="block text-xs text-slate-500">優先業種コード体系</label>
+                  <input class="w-full px-2 py-1 border rounded font-mono text-sm" :value="(editingRule.preferredIndustryCodes||[]).join(',')"
+                         @change="editingRule.preferredIndustryCodes = $event.target.value.split(',').map(s=>s.trim()).filter(Boolean)">
+                </div>
+                <div class="col-span-2"><label class="block text-xs text-slate-500">対応レポートテンプレート</label>
+                  <input class="w-full px-2 py-1 border rounded font-mono text-sm" :value="(editingRule.reportTemplates||[]).join(',')"
+                         @change="editingRule.reportTemplates = $event.target.value.split(',').map(s=>s.trim()).filter(Boolean)">
+                </div>
+                <div><label class="block text-xs text-slate-500">最小比較対象企業数</label><input type="number" class="w-full px-2 py-1 border rounded" x-model.number="editingRule.minComparables"></div>
+              </div>
+            </div>
+          </div>
+        </template>
       </section>
 
       <!-- ============== Screening placeholder ============== -->
