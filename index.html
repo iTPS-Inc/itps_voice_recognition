@@ -857,6 +857,12 @@ function tpApp() {
       logAudit('nav.change', { view: id }, this.currentProject?.id);
       // Phase 3: lazily hydrate screening UI state.
       if (id === 'screening') this.loadScreeningContext();
+      // Phase 4: hydrate analysis state when entering the scoring view.
+      if (id === 'scoring') {
+        if (!this._screeningJurisdictions?.length) this.screeningJurisdictionsRefresh?.();
+        if (!this.activeScreeningJurisdiction && this._screeningJurisdictions?.length) this.activeScreeningJurisdiction = this._screeningJurisdictions[0];
+        this.loadAnalysis();
+      }
     },
     labelOf(item) { return this.lang === 'en' ? item.labelEn : item.labelJa; },
 
@@ -1721,6 +1727,194 @@ function tpApp() {
       return paths;
     },
 
+    /* ====================================================================
+       PHASE 4 STATE & METHODS — PLI, range, WCA, similarity, live IQR
+       ==================================================================== */
+    /** Expose constants to templates. */
+    PLI_DEFS, SIMILARITY_DIMS,
+    analysisCfg: {
+      pliType: 'NET_COST_PLUS', method: 'WEIGHTED_AVG', quartileMethod: 'IRS', years: null,
+      wcaEnabled: false, wcaInterestRate: 0.03,
+      wcaComponents: { includeReceivables: true, includePayables: true, includeInventory: true },
+      similarityWeights: { ...SIMILARITY_DEFAULT_WEIGHTS },
+    },
+    analysisRunning: false,
+    currentAnalysis: null,
+    pliTableRows: [],
+    /** Hydrate the analysis cfg from the active rule when entering this view. */
+    async loadAnalysis() {
+      if (!this.currentProject || !this.activeScreeningJurisdiction) return;
+      const r = await rulesEngine.getActive(this.activeScreeningJurisdiction);
+      if (r) {
+        if (r.preferredPLI?.length) this.analysisCfg.pliType = r.preferredPLI[0] === 'OPERATING_MARGIN' ? 'OPERATING_MARGIN' : (PLI_DEFS[r.preferredPLI[0]] ? r.preferredPLI[0] : 'NET_COST_PLUS');
+        if (r.yearsAnalysis?.averaging) this.analysisCfg.method = r.yearsAnalysis.averaging;
+        if (r.quartileMethod) this.analysisCfg.quartileMethod = r.quartileMethod;
+      }
+      this.currentAnalysis = this.currentProject.analysisResults?.[this.activeScreeningJurisdiction] || null;
+      await this.buildPliTable();
+    },
+    /** Compute everything and persist. */
+    async executeAnalysis() {
+      if (!this.currentProject || !this.activeScreeningJurisdiction) return;
+      this.analysisRunning = true;
+      try {
+        const result = await runPhase4Analysis(this.currentProject.id, this.activeScreeningJurisdiction, this.analysisCfg);
+        const rule = await rulesEngine.getActive(this.activeScreeningJurisdiction);
+        result.minComparables = rule?.minComparables;
+        this.currentProject = await db.projects.get(this.currentProject.id);
+        this.currentAnalysis = result;
+        await this.buildPliTable();
+        this.toast('PLI / レンジを算定しました', 'success');
+      } catch (e) { console.error(e); this.toast(e.message, 'error'); }
+      finally { this.analysisRunning = false; }
+    },
+    /** Rebuild the row table joining PLI + WCA + similarity for display. */
+    async buildPliTable() {
+      const a = this.currentAnalysis; if (!a) { this.pliTableRows = []; return; }
+      const ids = a.pliRows.map(r => r.companyId);
+      const companies = (await db.companies.bulkGet(ids)).filter(Boolean);
+      const byId = Object.fromEntries(companies.map(c => [c.id, c]));
+      const wcaById = a.wca ? Object.fromEntries(a.wca.perCompany.map(w => [w.companyId, w])) : {};
+      const simById = Object.fromEntries((a.similarity || []).map(s => [s.companyId, s]));
+      this.pliTableRows = a.pliRows.map(r => {
+        const c = byId[r.companyId] || {};
+        const byYear = {};
+        for (const b of r.breakdown || []) byYear[b.year] = b.ratio;
+        return {
+          companyId: r.companyId, name: r.name, value: r.value, byYear,
+          businessDescription: c.businessDescription || '',
+          adjusted: wcaById[r.companyId]?.adjusted ?? null,
+          similarity: simById[r.companyId]?.total ?? null,
+        };
+      });
+      // Sort by similarity desc by default (display order only).
+      this.pliTableRows.sort((x, y) => (y.similarity || 0) - (x.similarity || 0));
+    },
+    /** All years present in any PLI breakdown row (sorted desc to mimic CIQ). */
+    pliBreakdownYears() {
+      const ys = new Set();
+      for (const r of (this.currentAnalysis?.pliRows || [])) for (const b of r.breakdown || []) ys.add(b.year);
+      return [...ys].sort((a, b) => b - a);
+    },
+    /** Recompute similarity only (no re-PLI). Used by the weight slider. */
+    async reapplySimilarity() {
+      const a = this.currentAnalysis; if (!a) return;
+      const ids = a.pliRows.map(r => r.companyId);
+      const companies = (await db.companies.bulkGet(ids)).filter(Boolean);
+      const tp = this.currentProject?.testedPartyId ? await db.companies.get(this.currentProject.testedPartyId) : null;
+      if (!tp) return;
+      a.similarity = computeSimilarityAll(companies, tp, this.analysisCfg.similarityWeights);
+      a.similarityWeights = { ...this.analysisCfg.similarityWeights };
+      this.currentProject.analysisResults[this.activeScreeningJurisdiction] = a;
+      await this.saveProject();
+      await this.buildPliTable();
+    },
+    /** Convert a ratio (e.g. 0.0395) into the CIQ-style percentage string. */
+    fmtPct(v) { return (v == null || !Number.isFinite(v)) ? '—' : (v * 100).toFixed(2) + '%'; },
+
+    /** Build SVG elements for the mini box-plot used in the live IQR ribbon. */
+    liveMiniBoxElements() {
+      const lp = this.livePreview; if (!lp?.range) return [];
+      const r = lp.range; const vals = lp.values;
+      if (!vals.length) return [];
+      const w = 400, pad = 20;
+      const tpPli = this.currentAnalysis?.testedPartyPli;
+      const min = Math.min(...vals, tpPli ?? r.min);
+      const max = Math.max(...vals, tpPli ?? r.max);
+      const span = max - min || 1;
+      const x = (v) => pad + (w - 2 * pad) * ((v - min) / span);
+      const els = [
+        { key: 'wl', kind: 'whisker', x1: x(r.min), x2: x(r.lower) },
+        { key: 'wr', kind: 'whisker', x1: x(r.upper), x2: x(r.max) },
+        { key: 'b',  kind: 'box', x: x(r.lower), w: x(r.upper) - x(r.lower) },
+        { key: 'm',  kind: 'median', x: x(r.median) },
+      ];
+      if (tpPli != null) els.push({ key: 'tp', kind: 'tp', x: x(tpPli) });
+      return els;
+    },
+
+    /** Build SVG elements for the box-and-whisker range plot. */
+    rangePlotElements() {
+      const a = this.currentAnalysis; if (!a?.range) return [];
+      const r = a.range; const vals = a.pliRows.map(p => p.value).filter(v => v != null && Number.isFinite(v));
+      if (!vals.length) return [];
+      const padX = 40, w = 800 - 2 * padX;
+      const min = Math.min(...vals, a.testedPartyPli ?? r.min), max = Math.max(...vals, a.testedPartyPli ?? r.max);
+      const span = max - min || 1;
+      const x = (v) => padX + w * ((v - min) / span);
+      const els = [];
+      els.push({ key: 'axis', kind: 'axis', x1: padX, x2: padX + w, y: 60 });
+      els.push({ key: 'wl', kind: 'whisker', x1: x(r.min), x2: x(r.lower), y: 40 });
+      els.push({ key: 'wr', kind: 'whisker', x1: x(r.upper), x2: x(r.max), y: 40 });
+      els.push({ key: 'box', kind: 'box', x: x(r.lower), w: x(r.upper) - x(r.lower) });
+      els.push({ key: 'med', kind: 'median', x: x(r.median) });
+      for (const v of vals) els.push({ key: 'p' + v, kind: 'point', x: x(v), color: '#1e293b' });
+      if (a.testedPartyPli != null) els.push({ key: 'tp', kind: 'tp', x: x(a.testedPartyPli) });
+      // Ticks at min, lower, median, upper, max
+      for (const [label, v] of [['Min', r.min], ['LQ', r.lower], ['M', r.median], ['UQ', r.upper], ['Max', r.max]]) {
+        els.push({ key: 'tk' + label, kind: 'tick', x: x(v), label: label + ' ' + (v * 100).toFixed(1) + '%' });
+      }
+      return els;
+    },
+
+    /* ---- Phase 3 ⇄ Phase 4 bridge: Live IQR preview in qualitative review ---- */
+    /** Companies the reviewer has live-selected for inclusion. */
+    livePreviewSelected: new Set(),
+    /** Debounce timer for live IQR recompute. */
+    _livePreviewTimer: null,
+    /** Current live-preview result. */
+    livePreview: { ready: false, pliRows: [], values: [], range: null, requiredMin: LIVE_IQR_MIN_COUNT },
+    livePreviewCacheByCompany: {},     // companyId -> {value, breakdown}
+    /** Toggle a company into / out of the live-selected set. */
+    toggleLivePreviewCompany(companyId) {
+      if (this.livePreviewSelected.has(companyId)) this.livePreviewSelected.delete(companyId);
+      else this.livePreviewSelected.add(companyId);
+      this.scheduleLivePreviewRecompute();
+    },
+    isLivePreviewSelected(companyId) { return this.livePreviewSelected.has(companyId); },
+    /** Debounce recompute by ~150ms. */
+    scheduleLivePreviewRecompute() {
+      clearTimeout(this._livePreviewTimer);
+      this._livePreviewTimer = setTimeout(() => this.recomputeLivePreview(), 150);
+    },
+    /** Compute PLI for any candidate that hasn't been cached yet, then the range. */
+    async recomputeLivePreview() {
+      const ids = [...this.livePreviewSelected];
+      const missing = ids.filter(id => !this.livePreviewCacheByCompany[id]);
+      if (missing.length) {
+        const cs = (await db.companies.bulkGet(missing)).filter(Boolean);
+        for (const c of cs) {
+          const r = computePLI({ ...c, financials: migrateFinancials(c.financials) },
+                               this.analysisCfg.pliType, null, this.analysisCfg.method);
+          this.livePreviewCacheByCompany[c.id] = { value: r.value, name: c.name };
+        }
+      }
+      const pliRows = ids.map(id => ({ companyId: id, name: this.livePreviewCacheByCompany[id]?.name, value: this.livePreviewCacheByCompany[id]?.value, breakdown: [] }));
+      const values = pliRows.map(r => r.value).filter(v => v != null && Number.isFinite(v));
+      const rule = await rulesEngine.getActive(this.activeScreeningJurisdiction);
+      if (values.length < LIVE_IQR_MIN_COUNT) {
+        this.livePreview = { ready: false, pliRows, values, range: null, requiredMin: LIVE_IQR_MIN_COUNT };
+      } else {
+        this.livePreview = { ready: true, pliRows, values, range: calculateRange(values, rule?.rangeMethod, this.analysisCfg.quartileMethod), requiredMin: LIVE_IQR_MIN_COUNT, minComparables: rule?.minComparables };
+      }
+    },
+    /** Persist the live selection as the final accepted set. */
+    async confirmLiveSelection() {
+      if (!this.livePreviewSelected.size) { this.toast('企業を1社以上選択してください', 'warning'); return; }
+      const r = this.currentScreeningResult; if (!r) return;
+      r.acceptedCompanies = [...this.livePreviewSelected];
+      r.pendingReview = r.pendingReview.filter(id => !this.livePreviewSelected.has(id));
+      for (const id of r.acceptedCompanies) {
+        r.decisions[id] = r.decisions[id] || { companyId: id, stageHistory: [] };
+        r.decisions[id].finalStatus = 'ACCEPTED';
+      }
+      await saveScreeningResult(this.currentProject.id, this.activeScreeningJurisdiction, r);
+      await logAudit('MANUAL_ACCEPT', { projectId: this.currentProject.id, jurisdictionId: this.activeScreeningJurisdiction, count: r.acceptedCompanies.length, batch: true }, this.currentProject.id);
+      this.currentProject = await db.projects.get(this.currentProject.id);
+      await this.loadActiveResult();
+      this.toast(`${r.acceptedCompanies.length} 社を採用確定`, 'success');
+    },
+
     /* ---- Industry code lookup UI ---- */
     /** Import a Census Bureau concordance CSV file. */
     async onConcordanceCsvPick(ev) {
@@ -2274,6 +2468,172 @@ async function runSelfTest() {
     const recent = await db.auditLog.orderBy('ts').reverse().limit(50).toArray();
     if (!recent.some(e => e.action === 'SCREENING_RUN')) throw new Error('SCREENING_RUN missing');
     if (!recent.some(e => e.action === 'SCREENING_STAGE_COMPLETE')) throw new Error('SCREENING_STAGE_COMPLETE missing');
+  });
+
+  /* ================== Phase 4 acceptance checks ================== */
+
+  await check('Phase 4 - PLI definitions complete (8 PLIs)', async () => {
+    const required = ['OPERATING_MARGIN','NET_COST_PLUS','BERRY_RATIO','ROA','RETURN_ON_OP_ASSETS','ROCE','GROSS_MARGIN','MARKUP_TOTAL_COSTS'];
+    for (const k of required) if (!PLI_DEFS[k]) throw new Error('missing PLI: ' + k);
+  });
+
+  await check('Phase 4 - Net Cost Plus weighted average hand check', async () => {
+    // 2 years: y1 OI=10 / total cost = 100, y2 OI=20 / total cost = 300
+    // Weighted = (10+20)/(100+300) = 30/400 = 0.075
+    const c = { financials: {
+      '2023': { netSales: 110, operatingIncome: 10, cogs: 70, operatingExpenses: 30 },
+      '2024': { netSales: 320, operatingIncome: 20, cogs: 210, operatingExpenses: 90 },
+    }};
+    const r = computePLI(c, 'NET_COST_PLUS', null, 'WEIGHTED_AVG');
+    if (Math.abs(r.value - 0.075) > 1e-9) throw new Error('expected 0.075, got ' + r.value);
+  });
+
+  await check('Phase 4 - missing-denominator year is excluded', async () => {
+    const c = { financials: {
+      '2022': { netSales: 100, operatingIncome: 5,  cogs: 70, operatingExpenses: 25 },
+      '2023': { netSales: 0,   operatingIncome: 0,  cogs: 0,  operatingExpenses: 0 },     // skipped (denominator 0)
+      '2024': { netSales: 200, operatingIncome: 10, cogs: 140, operatingExpenses: 50 },
+    }};
+    const r = computePLI(c, 'NET_COST_PLUS', null, 'WEIGHTED_AVG');
+    // Σ OI / Σ totalCost = (5+10)/(95+190) = 15/285
+    if (Math.abs(r.value - 15/285) > 1e-9) throw new Error('mismatch: ' + r.value);
+  });
+
+  await check('Phase 4 - IRS percentile: n=8 boundary cases', async () => {
+    const x = [10, 20, 30, 40, 50, 60, 70, 80];   // 1-indexed: x[1]=10..x[8]=80
+    // n=8, p=0.25, k=2 integer → (x[2]+x[3])/2 = 25
+    if (percentileIRS(x, 0.25) !== 25) throw new Error('LQ n=8 expected 25');
+    // n=8, p=0.75, k=6 integer → (x[6]+x[7])/2 = 65
+    if (percentileIRS(x, 0.75) !== 65) throw new Error('UQ n=8 expected 65');
+  });
+
+  await check('Phase 4 - IRS percentile: n=12 / n=13', async () => {
+    const x12 = Array.from({length: 12}, (_, i) => i + 1);    // 1..12
+    // n=12, k=3 → (x[3]+x[4])/2 = 3.5
+    if (percentileIRS(x12, 0.25) !== 3.5) throw new Error('LQ n=12');
+    if (percentileIRS(x12, 0.75) !== 9.5) throw new Error('UQ n=12');
+    const x13 = Array.from({length: 13}, (_, i) => i + 1);    // 1..13
+    // n=13, k=3.25 → ceil=4 → x[4]=4
+    if (percentileIRS(x13, 0.25) !== 4) throw new Error('LQ n=13 expected 4');
+    if (percentileIRS(x13, 0.75) !== 10) throw new Error('UQ n=13 expected 10');
+  });
+
+  await check('Phase 4 - IRS vs INCLUSIVE vs EXCLUSIVE diverge for n=20', async () => {
+    const x = Array.from({length: 20}, (_, i) => i + 1);
+    const irsLQ  = percentileIRS(x,        0.25);
+    const incLQ  = percentileInclusive(x,  0.25);
+    const excLQ  = percentileExclusive(x,  0.25);
+    if (irsLQ === incLQ || incLQ === excLQ || irsLQ === excLQ) {
+      throw new Error('LQ collision: IRS=' + irsLQ + ' INC=' + incLQ + ' EXC=' + excLQ);
+    }
+    // Sanity: IRS = (x[5]+x[6])/2 = 5.5
+    if (irsLQ !== 5.5) throw new Error('IRS LQ expected 5.5, got ' + irsLQ);
+  });
+
+  await check('Phase 4 - GOLDEN MASTER: Ashimori 20-company NCP range (IRS)', async () => {
+    // Net Cost Plus 3-year weighted averages reported in the Word Appendix.
+    // Map from spec confirms 20 surviving comparables. The Average column
+    // is the weighted average (Word: "Average Type: Weighted Average").
+    const ashimoriNcpAverages = [
+      0.0229, 0.1413, 0.0396, 0.0363, 0.0230, 0.1795, 0.0330, 0.0915,
+      0.1380, 0.0338, 0.0576, 0.0139, 0.0373, 0.5398, 0.0126, 0.0309,
+      0.0348, 0.0362, 0.0036, 0.1698,
+    ];
+    const range = calculateRange(ashimoriNcpAverages, { type: 'IQR', lowerPercentile: 25, upperPercentile: 75, centralTendency: 'MEDIAN' }, 'IRS');
+    // Word: LQ=2.70% Median=3.62% UQ=11.48% (rounded). Allow ±0.05% tolerance.
+    const close = (a, b, tol=0.0005) => Math.abs(a - b) <= tol;
+    if (!close(range.lower,  0.0270)) throw new Error('LQ:  expected ~2.70%, got ' + (range.lower * 100).toFixed(3) + '%');
+    if (!close(range.median, 0.0362, 0.0010)) throw new Error('Med: expected ~3.62%, got ' + (range.median * 100).toFixed(3) + '%');
+    if (!close(range.upper,  0.1148)) throw new Error('UQ:  expected ~11.48%, got ' + (range.upper * 100).toFixed(3) + '%');
+    if (range.min  !== 0.0036) throw new Error('Min unexpected');
+    if (range.max  !== 0.5398) throw new Error('Max unexpected');
+    if (range.count !== 20) throw new Error('count != 20');
+
+    // Confirm the same data produces materially different LQ/UQ under
+    // Excel's inclusive and exclusive methods (sanity of IRS choice).
+    const incl = calculateRange(ashimoriNcpAverages, { type: 'IQR', lowerPercentile: 25, upperPercentile: 75, centralTendency: 'MEDIAN' }, 'INCLUSIVE');
+    const excl = calculateRange(ashimoriNcpAverages, { type: 'IQR', lowerPercentile: 25, upperPercentile: 75, centralTendency: 'MEDIAN' }, 'EXCLUSIVE');
+    if (Math.abs(incl.lower - range.lower) < 1e-6) throw new Error('INCLUSIVE LQ should differ from IRS');
+    if (Math.abs(excl.lower - range.lower) < 1e-6) throw new Error('EXCLUSIVE LQ should differ from IRS');
+  });
+
+  await check('Phase 4 - tested party classification (within / below / above)', async () => {
+    const range = { lower: 0.03, median: 0.05, upper: 0.08 };
+    if (classifyTestedParty(0.05, range).position !== 'WITHIN') throw new Error('within');
+    if (classifyTestedParty(0.02, range).position !== 'BELOW')  throw new Error('below');
+    if (classifyTestedParty(0.10, range).position !== 'ABOVE')  throw new Error('above');
+  });
+
+  await check('Phase 4 - 35-65 percentile range (Indian rule)', async () => {
+    const x = Array.from({length: 100}, (_, i) => (i + 1) / 100);
+    const r = calculateRange(x, { type: 'PERCENTILE', lowerPercentile: 35, upperPercentile: 65, centralTendency: 'MEDIAN' }, 'INCLUSIVE');
+    if (Math.abs(r.lower - 0.36) > 0.02) throw new Error('35th wrong');
+    if (Math.abs(r.upper - 0.66) > 0.02) throw new Error('65th wrong');
+  });
+
+  await check('Phase 4 - WCA: OECD formula hand check', async () => {
+    const tp = { financials: { '2024': { netSales: 1000, avgNetReceivables: 80,  avgNetPayables: 60,  avgNetInventory: 100 } } };
+    const c  = { financials: { '2024': { netSales: 1000, avgNetReceivables: 150, avgNetPayables: 50,  avgNetInventory: 80 } } };
+    // r=0.10; AR_adj = 0.10*((150-80)/1000) = 0.007;
+    // AP_adj = 0.10*((50-60)/1000) = -0.001; subtract → adds 0.001
+    // Inv_adj = 0.10*((80-100)/1000) = -0.002
+    // Net = 0.007 - (-0.001) + (-0.002) = 0.006
+    const w = computeWCA(c, tp, 0.10, WCA_DEFAULT_COMPONENTS, 'WEIGHTED_AVG');
+    if (Math.abs(w.netAdjustment - 0.006) > 1e-9) throw new Error('expected 0.006, got ' + w.netAdjustment);
+  });
+
+  await check('Phase 4 - similarity: industry digit-match scoring', async () => {
+    const tp   = { industryCodes: { SIC: { primary: '3714' } } };
+    const same = { industryCodes: { SIC: { primary: '3714' } } };
+    const d3   = { industryCodes: { SIC: { primary: '3711' } } };
+    const d2   = { industryCodes: { SIC: { primary: '3812' } } };
+    const none = { industryCodes: { SIC: { primary: '5812' } } };
+    if (_scoreIndustry(same, tp) !== 100) throw new Error('4-digit');
+    if (_scoreIndustry(d3,   tp) !== 75)  throw new Error('3-digit');
+    if (_scoreIndustry(d2,   tp) !== 50)  throw new Error('2-digit');
+    if (_scoreIndustry(none, tp) !== 0)   throw new Error('none');
+  });
+
+  await check('Phase 4 - similarity weights normalise', async () => {
+    const w = normaliseWeights({ industry: 60, size: 60, far: 60, geo: 60, profile: 60 });
+    const sum = Object.values(w).reduce((s, v) => s + v, 0);
+    if (Math.abs(sum - 100) > 1e-9) throw new Error('expected 100, got ' + sum);
+  });
+
+  await check('Phase 4 - similarity does NOT affect the range', async () => {
+    const vals = [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08];
+    const r1 = calculateRange(vals, { type: 'IQR', lowerPercentile: 25, upperPercentile: 75, centralTendency: 'MEDIAN' }, 'IRS');
+    // Mutate weights to verify range is independent.
+    const w1 = normaliseWeights({ industry: 100, size: 0, far: 0, geo: 0, profile: 0 });
+    const w2 = normaliseWeights({ industry: 0, size: 0, far: 0, geo: 0, profile: 100 });
+    if (JSON.stringify(w1) === JSON.stringify(w2)) throw new Error('weights identical');
+    const r2 = calculateRange(vals, { type: 'IQR', lowerPercentile: 25, upperPercentile: 75, centralTendency: 'MEDIAN' }, 'IRS');
+    if (JSON.stringify(r1) !== JSON.stringify(r2)) throw new Error('range changed with weights');
+    // Also verify the public API surface excludes any "top-N by similarity" range function.
+    if (TPApp.similarity.topNRange || TPApp.range.byTopSimilarity) throw new Error('forbidden similarity-weighted range API present');
+  });
+
+  await check('Phase 4 - live IQR preview min count = 4', async () => {
+    const three = [{ id: 'a', financials: { '2024': { netSales: 100, operatingIncome: 5, cogs: 70, operatingExpenses: 25 } } },
+                   { id: 'b', financials: { '2024': { netSales: 100, operatingIncome: 6, cogs: 70, operatingExpenses: 25 } } },
+                   { id: 'c', financials: { '2024': { netSales: 100, operatingIncome: 7, cogs: 70, operatingExpenses: 25 } } }];
+    const r3 = previewLiveRange(three, 'NET_COST_PLUS', null, 'WEIGHTED_AVG', 'IRS', { type: 'IQR', lowerPercentile: 25, upperPercentile: 75, centralTendency: 'MEDIAN' });
+    if (r3.ready) throw new Error('3 should not be ready');
+    if (r3.requiredMin !== 4) throw new Error('min count should be 4');
+    const four = [...three, { id: 'd', financials: { '2024': { netSales: 100, operatingIncome: 8, cogs: 70, operatingExpenses: 25 } } }];
+    const r4 = previewLiveRange(four, 'NET_COST_PLUS', null, 'WEIGHTED_AVG', 'IRS', { type: 'IQR', lowerPercentile: 25, upperPercentile: 75, centralTendency: 'MEDIAN' });
+    if (!r4.ready) throw new Error('4 should be ready');
+    if (!Number.isFinite(r4.range.lower)) throw new Error('range computed');
+  });
+
+  await check('Phase 4 - live preview engine matches official range', async () => {
+    const cs = Array.from({length: 6}, (_, i) => ({ id: 'c' + i, financials: { '2024': { netSales: 100, operatingIncome: i * 2 + 1, cogs: 70, operatingExpenses: 25 } } }));
+    const r = previewLiveRange(cs, 'NET_COST_PLUS', null, 'WEIGHTED_AVG', 'IRS', { type: 'IQR', lowerPercentile: 25, upperPercentile: 75, centralTendency: 'MEDIAN' });
+    // The same companies through the official run should yield the same range.
+    const officialVals = computePLIForSet(cs, 'NET_COST_PLUS', null, 'WEIGHTED_AVG').map(p => p.value);
+    const official = calculateRange(officialVals, { type: 'IQR', lowerPercentile: 25, upperPercentile: 75, centralTendency: 'MEDIAN' }, 'IRS');
+    if (Math.abs(r.range.lower - official.lower) > 1e-12) throw new Error('live ≠ official');
+    if (Math.abs(r.range.upper - official.upper) > 1e-12) throw new Error('live ≠ official');
   });
 
   await check('Phase 2 - >10 years warning', async () => {
@@ -4471,6 +4831,607 @@ TPApp.screening = {
 
 
 <!-- =====================================================================
+  PHASE 4 / BLOCK 22 : PLI definitions + computation engine
+===================================================================== -->
+<script id="pli-engine">
+/**
+ * @typedef {Object} PliDef
+ * @property {string} label
+ * @property {(row:Object)=>number|null} numerator
+ * @property {(row:Object)=>number|null} denominator
+ * @property {string} [docNote]
+ */
+
+/** Canonical numeric pulled from a year row, falling back across the
+ *  Phase 1 / Phase 2 / Capital IQ field-name variants. */
+function _num(row, ...keys) {
+  if (!row) return null;
+  for (const k of keys) { if (row[k] != null && row[k] !== '') return Number(row[k]); }
+  return null;
+}
+function _grossProfit(row) {
+  const gp = _num(row, 'grossProfit');
+  if (gp != null) return gp;
+  const ns = _num(row, 'netSales', 'revenue'); const c = _num(row, 'cogs');
+  if (ns != null && c != null) return ns - c;
+  return null;
+}
+function _opEx(row) {
+  const oe = _num(row, 'operatingExpenses');
+  if (oe != null) return oe;
+  // Derive: OpEx = GrossProfit - OperatingIncome  (Capital IQ Income Statement identity)
+  const gp = _grossProfit(row); const oi = _num(row, 'operatingIncome', 'operatingProfit');
+  if (gp != null && oi != null) return gp - oi;
+  // Or: Net Sales - COGS - OI
+  const ns = _num(row, 'netSales', 'revenue'); const c = _num(row, 'cogs');
+  if (ns != null && c != null && oi != null) return ns - c - oi;
+  return null;
+}
+function _totalCosts(row) {
+  const c = _num(row, 'cogs'); const oe = _opEx(row);
+  if (c != null && oe != null) return c + oe;
+  return null;
+}
+
+/** @type {Object<string, PliDef>} */
+const PLI_DEFS = {
+  OPERATING_MARGIN:     { label: 'Operating Margin',           numerator: r => _num(r, 'operatingIncome', 'operatingProfit'), denominator: r => _num(r, 'netSales', 'revenue') },
+  NET_COST_PLUS:        { label: 'Net Cost Plus',              numerator: r => _num(r, 'operatingIncome', 'operatingProfit'), denominator: r => _totalCosts(r),
+                          docNote: 'OI / (COGS + Operating Expenses). PLI used in the Ashimori (CIQ) report.' },
+  BERRY_RATIO:          { label: 'Berry Ratio',                numerator: r => _grossProfit(r),                                denominator: r => _opEx(r) },
+  ROA:                  { label: 'Return on Assets',           numerator: r => _num(r, 'operatingIncome', 'operatingProfit'), denominator: r => _num(r, 'avgTotalAssets', 'totalAssets') },
+  RETURN_ON_OP_ASSETS:  { label: 'Return on Operating Assets', numerator: r => _num(r, 'operatingIncome', 'operatingProfit'), denominator: r => _num(r, 'avgOperatingAssets') },
+  ROCE:                 { label: 'Return on Capital Employed', numerator: r => _num(r, 'operatingIncome', 'operatingProfit'), denominator: r => _num(r, 'avgInvestedCapital') },
+  GROSS_MARGIN:         { label: 'Gross Margin',               numerator: r => _grossProfit(r),                                denominator: r => _num(r, 'netSales', 'revenue') },
+  MARKUP_TOTAL_COSTS:   { label: 'Markup on Total Costs',      numerator: r => { const ns = _num(r, 'netSales', 'revenue'); const tc = _totalCosts(r); return ns != null && tc != null ? ns - tc : null; }, denominator: r => _totalCosts(r) },
+};
+
+/** PLI aggregation methods. */
+const PLI_AGG_METHODS = ['SINGLE_YEAR', 'SIMPLE_AVG', 'WEIGHTED_AVG'];
+
+/**
+ * Compute a PLI for a single company.
+ * @param {Company} company
+ * @param {string} pliType
+ * @param {number[]|null} years - explicit year filter; null = all available
+ * @param {('SINGLE_YEAR'|'SIMPLE_AVG'|'WEIGHTED_AVG')} method
+ * @param {number} [singleYear] - required when method === SINGLE_YEAR
+ * @returns {{value:number|null, breakdown:Object[], note?:string}}
+ */
+function computePLI(company, pliType, years, method, singleYear) {
+  const def = PLI_DEFS[pliType];
+  if (!def) throw new Error('Unknown PLI: ' + pliType);
+  const avail = getYearsAvailable(company);
+  const target = (years && years.length ? years : avail).filter(y => avail.includes(y));
+  const rows = target.map(y => ({ year: y, row: company.financials[String(y)] || {} }));
+  const breakdown = rows.map(({ year, row }) => ({
+    year,
+    numerator:   def.numerator(row),
+    denominator: def.denominator(row),
+    ratio: (() => { const n = def.numerator(row), d = def.denominator(row); return (n != null && d != null && d !== 0) ? n / d : null; })(),
+  }));
+
+  if (method === 'SINGLE_YEAR') {
+    const yr = singleYear ?? (target.length ? target[target.length - 1] : null);
+    const item = breakdown.find(b => b.year === yr);
+    return { value: item?.ratio ?? null, breakdown, note: 'single year ' + yr };
+  }
+  if (method === 'SIMPLE_AVG') {
+    const values = breakdown.map(b => b.ratio).filter(v => v != null);
+    return { value: simpleAverage(values), breakdown, note: values.length + '-year simple average' };
+  }
+  // WEIGHTED_AVG: sum numerators / sum denominators across the selected years,
+  // skipping rows where either side is missing.
+  const valid = breakdown.filter(b => b.numerator != null && b.denominator != null && b.denominator !== 0);
+  const sumN = valid.reduce((s, b) => s + b.numerator,   0);
+  const sumD = valid.reduce((s, b) => s + b.denominator, 0);
+  return { value: sumD !== 0 ? sumN / sumD : null, breakdown, note: valid.length + '-year weighted average' };
+}
+
+/**
+ * Compute the PLI for an entire set of companies.
+ * @param {Company[]} companies
+ * @param {string} pliType
+ * @param {number[]|null} years
+ * @param {string} method
+ * @returns {{companyId:string, name:string, value:number|null, breakdown:Object[]}[]}
+ */
+function computePLIForSet(companies, pliType, years, method) {
+  return companies.map(c => {
+    const r = computePLI({ ...c, financials: migrateFinancials(c.financials) }, pliType, years, method);
+    return { companyId: c.id, name: c.name, value: r.value, breakdown: r.breakdown };
+  });
+}
+</script>
+
+<!-- =====================================================================
+  PHASE 4 / BLOCK 23 : Quartile / range engine (IRS + Excel methods)
+===================================================================== -->
+<script id="range-engine">
+const QUARTILE_METHODS = ['IRS', 'INCLUSIVE', 'EXCLUSIVE', 'NEAREST_RANK'];
+
+/**
+ * U.S. Treas. Reg. §1.482-1(e)(2)(iii)(C) percentile.
+ *
+ * Algorithm (1-indexed sortedAsc):
+ *   k = p * n
+ *   if k is integer:  result = (x[k] + x[k+1]) / 2  (boundary cases clamp)
+ *   else:             result = x[ceil(k)]
+ *
+ * "P25 = the smallest value such that ≥25% of results are ≤ that value;
+ *  exception: when exactly 25% are ≤, average it with the next-higher value."
+ * @param {number[]} sortedAsc
+ * @param {number}   p - in [0,1]
+ * @returns {number}
+ */
+function percentileIRS(sortedAsc, p) {
+  const n = sortedAsc.length;
+  if (!n) return NaN;
+  if (n === 1) return sortedAsc[0];
+  const k = p * n;
+  if (Math.abs(k - Math.round(k)) < 1e-9) {
+    const ki = Math.round(k);
+    if (ki <= 0) return sortedAsc[0];
+    if (ki >= n) return sortedAsc[n - 1];
+    return (sortedAsc[ki - 1] + sortedAsc[ki]) / 2;
+  }
+  const idx = Math.ceil(k) - 1;
+  return sortedAsc[Math.max(0, Math.min(n - 1, idx))];
+}
+
+/**
+ * Excel QUARTILE.INC equivalent. Position h = (n-1)*p (0-indexed), linear
+ * interpolation between adjacent points.
+ */
+function percentileInclusive(sortedAsc, p) {
+  const n = sortedAsc.length;
+  if (!n) return NaN;
+  if (n === 1) return sortedAsc[0];
+  const h = (n - 1) * p;
+  const lo = Math.floor(h), hi = Math.ceil(h);
+  if (lo === hi) return sortedAsc[lo];
+  return sortedAsc[lo] + (h - lo) * (sortedAsc[hi] - sortedAsc[lo]);
+}
+
+/**
+ * Excel QUARTILE.EXC equivalent. Position h = (n+1)*p (1-indexed). Returns
+ * the edge value when h falls outside the valid 1..n range (Excel returns
+ * #NUM! in that case, but we soft-clamp for usability).
+ */
+function percentileExclusive(sortedAsc, p) {
+  const n = sortedAsc.length;
+  if (!n) return NaN;
+  if (n === 1) return sortedAsc[0];
+  const h = (n + 1) * p;
+  if (h < 1) return sortedAsc[0];
+  if (h > n) return sortedAsc[n - 1];
+  const lo = Math.floor(h), hi = Math.ceil(h);
+  if (lo === hi) return sortedAsc[lo - 1];
+  return sortedAsc[lo - 1] + (h - lo) * (sortedAsc[hi - 1] - sortedAsc[lo - 1]);
+}
+
+/** Nearest-rank: P_k = sorted[ceil(p * n) - 1]. */
+function percentileNearestRank(sortedAsc, p) {
+  const n = sortedAsc.length;
+  if (!n) return NaN;
+  const idx = Math.max(0, Math.min(n - 1, Math.ceil(p * n) - 1));
+  return sortedAsc[idx];
+}
+
+/**
+ * Dispatch on quartile method.
+ * @param {number[]} sortedAsc
+ * @param {number} p
+ * @param {string} method
+ */
+function percentile(sortedAsc, p, method) {
+  switch (method) {
+    case 'IRS':          return percentileIRS(sortedAsc, p);
+    case 'INCLUSIVE':    return percentileInclusive(sortedAsc, p);
+    case 'EXCLUSIVE':    return percentileExclusive(sortedAsc, p);
+    case 'NEAREST_RANK': return percentileNearestRank(sortedAsc, p);
+    default:             return percentileIRS(sortedAsc, p);
+  }
+}
+
+/**
+ * Compute a full arm's-length range over a set of PLI values.
+ * @param {number[]} pliValues
+ * @param {Object}   rangeMethod - Phase 2 rule.rangeMethod
+ * @param {string}   quartileMethod - 'IRS' | 'INCLUSIVE' | 'EXCLUSIVE' | 'NEAREST_RANK'
+ * @returns {{count:number, min:number, lower:number, median:number, upper:number, max:number, lowerP:number, upperP:number, centralTendency:string, quartileMethod:string}}
+ */
+function calculateRange(pliValues, rangeMethod, quartileMethod = 'IRS') {
+  const sorted = pliValues.filter(v => v != null && Number.isFinite(v)).slice().sort((a, b) => a - b);
+  if (!sorted.length) return { count: 0, min: NaN, lower: NaN, median: NaN, upper: NaN, max: NaN, lowerP: 25, upperP: 75, centralTendency: 'MEDIAN', quartileMethod };
+  let lowerP = 25, upperP = 75, centralTendency = 'MEDIAN';
+  if (rangeMethod) {
+    if (rangeMethod.type === 'PERCENTILE' || rangeMethod.type === 'IQR' || rangeMethod.type === 'CUSTOM') {
+      lowerP = rangeMethod.lowerPercentile ?? lowerP;
+      upperP = rangeMethod.upperPercentile ?? upperP;
+    }
+    centralTendency = rangeMethod.centralTendency || centralTendency;
+  }
+  if (rangeMethod?.type === 'FULL_RANGE') {
+    lowerP = 0; upperP = 100;
+  }
+  const lower = percentile(sorted, lowerP / 100, quartileMethod);
+  const upper = percentile(sorted, upperP / 100, quartileMethod);
+  const median = centralTendency === 'MEAN'
+    ? simpleAverage(sorted)
+    : percentile(sorted, 0.5, quartileMethod);
+  return {
+    count: sorted.length,
+    min: sorted[0], lower, median, upper, max: sorted[sorted.length - 1],
+    lowerP, upperP, centralTendency, quartileMethod,
+  };
+}
+
+/**
+ * Classify the tested party's PLI against a range.
+ * @param {number} tpValue
+ * @param {Object} range
+ * @returns {{position:('WITHIN'|'BELOW'|'ABOVE'), distanceToLower:number, distanceToMedian:number, distanceToUpper:number}}
+ */
+function classifyTestedParty(tpValue, range) {
+  if (tpValue == null || !Number.isFinite(tpValue)) return { position: 'WITHIN', distanceToLower: NaN, distanceToMedian: NaN, distanceToUpper: NaN };
+  let position = 'WITHIN';
+  if (tpValue < range.lower) position = 'BELOW';
+  else if (tpValue > range.upper) position = 'ABOVE';
+  return {
+    position,
+    distanceToLower:  tpValue - range.lower,
+    distanceToMedian: tpValue - range.median,
+    distanceToUpper:  tpValue - range.upper,
+  };
+}
+</script>
+
+<!-- =====================================================================
+  PHASE 4 / BLOCK 24 : Working Capital Adjustment (OECD Annex Ch III)
+===================================================================== -->
+<script id="wca-engine">
+/**
+ * Default WCA components flag — AR/AP/Inventory all on.
+ */
+const WCA_DEFAULT_COMPONENTS = { includeReceivables: true, includePayables: true, includeInventory: true };
+
+/**
+ * Compute the OECD-style working-capital adjustment for a single comparable
+ * relative to the tested party, then return its adjusted PLI value.
+ *
+ * Formula (per OECD Annex to Chapter III):
+ *   AR_adj  = i × [(AR_comp/S_comp) − (AR_tp/S_tp)]
+ *   AP_adj  = i × [(AP_comp/S_comp) − (AP_tp/S_tp)]
+ *   Inv_adj = i × [(Inv_comp/S_comp) − (Inv_tp/S_tp)]
+ *   Net_WC_adj = AR_adj − AP_adj + Inv_adj
+ *   PLI_adjusted = PLI_unadjusted − Net_WC_adj
+ *
+ * The interest rate can be a single number (applied to all years) or a
+ * dict keyed by year. Each year is computed independently, then aggregated
+ * using the requested method ('WEIGHTED_AVG' or 'SIMPLE_AVG') to match the
+ * project's PLI aggregation choice.
+ *
+ * @param {Company} comparable
+ * @param {Company} testedParty
+ * @param {number|Object<string,number>} interestRate - decimal (e.g. 0.03)
+ * @param {Object} [components=WCA_DEFAULT_COMPONENTS]
+ * @param {('SIMPLE_AVG'|'WEIGHTED_AVG')} [aggregation='WEIGHTED_AVG']
+ * @returns {{netAdjustment:number|null, perYear:Object[], components:Object}}
+ */
+function computeWCA(comparable, testedParty, interestRate, components = WCA_DEFAULT_COMPONENTS, aggregation = 'WEIGHTED_AVG') {
+  if (!testedParty) return { netAdjustment: null, perYear: [], components };
+  const compYears = getYearsAvailable(comparable);
+  const tpYears   = getYearsAvailable(testedParty);
+  const perYear = [];
+  for (const y of compYears) {
+    const ck = String(y);
+    const tpRow = testedParty.financials[String(y)] || testedParty.financials[String(tpYears[tpYears.length - 1])] || {};
+    const cRow  = comparable.financials[ck] || {};
+    const cSales = _num(cRow, 'netSales', 'revenue');
+    const tSales = _num(tpRow, 'netSales', 'revenue');
+    if (!cSales || !tSales) { perYear.push({ year: y, adjustment: null, note: 'missing sales' }); continue; }
+    const r = (typeof interestRate === 'object' ? interestRate[ck] : interestRate) || 0;
+    let adj = 0;
+    if (components.includeReceivables) {
+      const c = _num(cRow, 'avgNetReceivables', 'receivables') ?? 0;
+      const t = _num(tpRow, 'avgNetReceivables', 'receivables') ?? 0;
+      adj += r * ((c / cSales) - (t / tSales));
+    }
+    if (components.includePayables) {
+      const c = _num(cRow, 'avgNetPayables', 'payables') ?? 0;
+      const t = _num(tpRow, 'avgNetPayables', 'payables') ?? 0;
+      adj -= r * ((c / cSales) - (t / tSales));
+    }
+    if (components.includeInventory) {
+      const c = _num(cRow, 'avgNetInventory', 'inventory') ?? 0;
+      const t = _num(tpRow, 'avgNetInventory', 'inventory') ?? 0;
+      adj += r * ((c / cSales) - (t / tSales));
+    }
+    perYear.push({ year: y, sales: cSales, adjustment: adj });
+  }
+  const valid = perYear.filter(p => p.adjustment != null);
+  if (!valid.length) return { netAdjustment: null, perYear, components };
+  let net;
+  if (aggregation === 'WEIGHTED_AVG') {
+    // Weight by sales: Σ(adj × sales) / Σ(sales)
+    const sumNum = valid.reduce((s, p) => s + p.adjustment * p.sales, 0);
+    const sumDen = valid.reduce((s, p) => s + p.sales, 0);
+    net = sumDen !== 0 ? sumNum / sumDen : null;
+  } else {
+    net = simpleAverage(valid.map(p => p.adjustment));
+  }
+  return { netAdjustment: net, perYear, components };
+}
+
+/**
+ * Apply a precomputed WCA to a comparable's PLI value.
+ *   adjusted = unadjusted - netAdjustment
+ * @param {number} unadjustedPli
+ * @param {number} netAdjustment
+ * @returns {number}
+ */
+function applyWCA(unadjustedPli, netAdjustment) {
+  if (unadjustedPli == null || netAdjustment == null) return null;
+  return unadjustedPli - netAdjustment;
+}
+</script>
+
+<!-- =====================================================================
+  PHASE 4 / BLOCK 25 : Similarity scoring (DISPLAY-ONLY)
+  ---------------------------------------------------------------------
+  Scores are *never* used to weight the arm's-length range or to filter
+  the comparable set. They surface alongside the company business
+  description so reviewers can make a qualitative judgement.
+===================================================================== -->
+<script id="similarity-engine">
+const SIMILARITY_DIMS = [
+  { key: 'industry', label: '業種コード類似度' },
+  { key: 'size',     label: '規模類似度' },
+  { key: 'far',      label: 'FAR類似度' },
+  { key: 'geo',      label: '地理的近接性' },
+  { key: 'profile',  label: '収益性プロファイル類似度' },
+];
+const SIMILARITY_DEFAULT_WEIGHTS = { industry: 30, size: 20, far: 20, geo: 15, profile: 15 };
+
+/** Region grouping for the geo dimension (rough). */
+const GEO_REGIONS = {
+  ASIA: ['JP','CN','KR','HK','TW','SG','TH','MY','ID','PH','VN','IN','BD','PK'],
+  NA:   ['US','CA','MX'],
+  EU:   ['GB','DE','FR','NL','IT','ES','BE','SE','NO','FI','DK','CH','AT','IE','PL','PT'],
+  OCEANIA: ['AU','NZ'],
+  LATAM: ['BR','AR','CL','CO','PE'],
+};
+function _regionOf(country) {
+  for (const [r, codes] of Object.entries(GEO_REGIONS)) if (codes.includes(country)) return r;
+  return null;
+}
+
+/** Normalise a weight dictionary so all configured dims sum to 100. */
+function normaliseWeights(weights) {
+  const w = { ...SIMILARITY_DEFAULT_WEIGHTS, ...(weights || {}) };
+  const sum = Object.values(w).reduce((s, v) => s + (Number(v) || 0), 0);
+  if (!sum) return SIMILARITY_DEFAULT_WEIGHTS;
+  const out = {};
+  for (const k of Object.keys(w)) out[k] = (Number(w[k]) || 0) * 100 / sum;
+  return out;
+}
+
+/** Pick a 4-digit code from any of the supported industry systems. */
+function _firstIndustryCode(c) {
+  const codes = c.industryCodes || {};
+  for (const sys of ['SIC', 'NAICS_2017', 'NAICS_2012']) {
+    if (codes[sys]?.primary) return String(codes[sys].primary);
+  }
+  return c.industryCode ? String(c.industryCode) : null;
+}
+
+/** Industry similarity: digit-prefix match. */
+function _scoreIndustry(comp, tp) {
+  const a = _firstIndustryCode(comp); const b = _firstIndustryCode(tp);
+  if (!a || !b) return 0;
+  if (a.slice(0, 4) === b.slice(0, 4)) return 100;
+  if (a.slice(0, 3) === b.slice(0, 3)) return 75;
+  if (a.slice(0, 2) === b.slice(0, 2)) return 50;
+  return 0;
+}
+
+/** Size similarity: revenue log-distance, capped at 100. */
+function _scoreSize(comp, tp) {
+  const cy = getYearsAvailable(comp); const ty = getYearsAvailable(tp);
+  if (!cy.length || !ty.length) return 0;
+  const cRev = _num(comp.financials[String(cy[cy.length-1])], 'netSales', 'revenue');
+  const tRev = _num(tp.financials[String(ty[ty.length-1])], 'netSales', 'revenue');
+  if (!cRev || !tRev || cRev <= 0 || tRev <= 0) return 0;
+  const d = Math.abs(Math.log10(cRev / tRev));   // 0 = identical, 1 = 10x diff
+  return Math.max(0, Math.min(100, 100 * (1 - d)));
+}
+
+/** FAR similarity: Jaccard overlap of function tags. */
+function _scoreFar(comp, tp) {
+  const cF = new Set((comp.farProfile?.functions || []).map(s => String(s).toLowerCase()));
+  const tF = new Set((tp.farProfile?.functions || []).map(s => String(s).toLowerCase()));
+  if (!cF.size || !tF.size) return 0;
+  const inter = [...cF].filter(x => tF.has(x)).length;
+  const union = new Set([...cF, ...tF]).size;
+  return union ? 100 * inter / union : 0;
+}
+
+/** Geographic proximity. */
+function _scoreGeo(comp, tp) {
+  if (!comp.country || !tp.country) return 0;
+  if (comp.country === tp.country) return 100;
+  const rA = _regionOf(comp.country); const rB = _regionOf(tp.country);
+  if (rA && rB && rA === rB) return 70;
+  return 40;
+}
+
+/** Profitability proximity using Operating Margin weighted average. */
+function _scoreProfile(comp, tp) {
+  const cp = computePLI(comp, 'OPERATING_MARGIN', null, 'WEIGHTED_AVG').value;
+  const tpv = computePLI(tp,  'OPERATING_MARGIN', null, 'WEIGHTED_AVG').value;
+  if (cp == null || tpv == null) return 0;
+  const d = Math.abs(cp - tpv);    // diff in margin pts
+  return Math.max(0, Math.min(100, 100 * Math.max(0, 1 - d / 0.20)));   // 20pp diff → 0
+}
+
+/**
+ * Compute the similarity score (0-100) for one comparable.
+ * @param {Company} comparable
+ * @param {Company} testedParty
+ * @param {Object<string, number>} [weights] - keyed by SIMILARITY_DIMS.key
+ * @returns {{total:number, breakdown:Object<string,number>, weights:Object<string,number>}}
+ */
+function computeSimilarity(comparable, testedParty, weights) {
+  if (!testedParty) return { total: 0, breakdown: {}, weights: weights || SIMILARITY_DEFAULT_WEIGHTS };
+  const c = { ...comparable, financials: migrateFinancials(comparable.financials) };
+  const tp = { ...testedParty, financials: migrateFinancials(testedParty.financials) };
+  const breakdown = {
+    industry: _scoreIndustry(c, tp), size: _scoreSize(c, tp), far: _scoreFar(c, tp),
+    geo: _scoreGeo(c, tp), profile: _scoreProfile(c, tp),
+  };
+  const w = normaliseWeights(weights);
+  const total = SIMILARITY_DIMS.reduce((s, d) => s + (breakdown[d.key] || 0) * (w[d.key] || 0) / 100, 0);
+  return { total, breakdown, weights: w };
+}
+
+/** Score an entire candidate set. */
+function computeSimilarityAll(candidates, testedParty, weights) {
+  return candidates.map(c => ({ companyId: c.id, name: c.name, ...computeSimilarity(c, testedParty, weights) }));
+}
+</script>
+
+<!-- =====================================================================
+  PHASE 4 / BLOCK 26 : Phase-4 facade + analysisResults pipeline
+===================================================================== -->
+<script id="tp-app-phase4">
+const LIVE_IQR_MIN_COUNT = 4;
+
+/**
+ * Live preview: PLI values + range for a user-curated subset of companies.
+ * Pure: no DB writes, no audit log entries. Caller persists when the user
+ * confirms.
+ * @param {Company[]} selectedCompanies
+ * @param {string} pliType
+ * @param {number[]|null} years
+ * @param {string} method
+ * @param {string} quartileMethod
+ * @param {Object} [rangeMethod]
+ * @returns {{ready:boolean, pliRows:Object[], values:number[], range:Object|null, requiredMin:number}}
+ */
+function previewLiveRange(selectedCompanies, pliType, years, method, quartileMethod, rangeMethod) {
+  const pliRows = computePLIForSet(selectedCompanies, pliType, years, method);
+  const values = pliRows.map(r => r.value).filter(v => v != null && Number.isFinite(v));
+  if (values.length < LIVE_IQR_MIN_COUNT) {
+    return { ready: false, pliRows, values, range: null, requiredMin: LIVE_IQR_MIN_COUNT };
+  }
+  return { ready: true, pliRows, values, range: calculateRange(values, rangeMethod, quartileMethod), requiredMin: LIVE_IQR_MIN_COUNT };
+}
+
+/**
+ * Run the full Phase 4 analysis (PLI + range + WCA + similarity) for a
+ * project / jurisdiction using the Phase 3 accepted set as input.
+ * @param {string} projectId
+ * @param {string} jurisdictionId
+ * @param {Object} [opts]
+ * @returns {Promise<Object>} the persisted analysisResults entry
+ */
+async function runPhase4Analysis(projectId, jurisdictionId, opts = {}) {
+  const project = await db.projects.get(projectId);
+  if (!project) throw new Error('Project not found');
+  const rule = await rulesEngine.getActive(jurisdictionId);
+  const screening = project.screeningResults?.[jurisdictionId];
+  if (!screening) throw new Error('Run screening first');
+  const acceptedIds = screening.acceptedCompanies || [];
+  const companies = (await db.companies.bulkGet(acceptedIds)).filter(Boolean)
+    .map(c => ({ ...c, financials: migrateFinancials(c.financials) }));
+  const tp = project.testedPartyId ? await db.companies.get(project.testedPartyId) : null;
+  const testedParty = tp ? { ...tp, financials: migrateFinancials(tp.financials) } : null;
+
+  const pliType        = opts.pliType        || (rule?.preferredPLI?.[0]) || 'OPERATING_MARGIN';
+  const method         = opts.method         || rule?.yearsAnalysis?.averaging || 'WEIGHTED_AVG';
+  const quartileMethod = opts.quartileMethod || rule?.quartileMethod || 'IRS';
+  const years          = opts.years || null;
+
+  const pliRows = computePLIForSet(companies, pliType, years, method);
+  const values  = pliRows.map(r => r.value).filter(v => v != null && Number.isFinite(v));
+  const range   = calculateRange(values, rule?.rangeMethod, quartileMethod);
+  const tpPli   = testedParty ? computePLI(testedParty, pliType, years, method).value : null;
+  const classification = tpPli != null ? classifyTestedParty(tpPli, range) : null;
+
+  // Optional WCA
+  let wca = null;
+  if (opts.wcaEnabled && testedParty) {
+    const components = opts.wcaComponents || WCA_DEFAULT_COMPONENTS;
+    const rate = opts.wcaInterestRate ?? 0.03;
+    const perCompany = companies.map(c => {
+      const w = computeWCA(c, testedParty, rate, components, method);
+      const row = pliRows.find(r => r.companyId === c.id);
+      const adjusted = row?.value != null && w.netAdjustment != null ? applyWCA(row.value, w.netAdjustment) : null;
+      return { companyId: c.id, name: c.name, unadjusted: row?.value ?? null, netAdjustment: w.netAdjustment, adjusted };
+    });
+    const adjValues = perCompany.map(p => p.adjusted).filter(v => v != null && Number.isFinite(v));
+    const adjRange = calculateRange(adjValues, rule?.rangeMethod, quartileMethod);
+    wca = { interestRate: rate, components, perCompany, adjRange };
+    await logAudit('WCA_APPLY', { projectId, jurisdictionId, interestRate: rate, components, n: perCompany.length }, projectId);
+  }
+
+  // Similarity (display-only)
+  const similarityWeights = opts.similarityWeights || SIMILARITY_DEFAULT_WEIGHTS;
+  const similarity = testedParty ? computeSimilarityAll(companies, testedParty, similarityWeights) : [];
+
+  const result = {
+    executedAt: new Date().toISOString(),
+    pliType, method, quartileMethod, years,
+    pliRows, range, testedPartyPli: tpPli, classification,
+    wca, similarity, similarityWeights,
+    note: 'similarity is display-only; it does NOT affect the arm\'s-length range',
+  };
+  project.analysisResults = project.analysisResults || {};
+  project.analysisResults[jurisdictionId] = result;
+  project.updatedAt = Date.now();
+  await db.projects.put(project);
+  await logAudit('PLI_COMPUTE',        { projectId, jurisdictionId, pliType, method, n: pliRows.length }, projectId);
+  await logAudit('RANGE_CALCULATE',    { projectId, jurisdictionId, quartileMethod, range }, projectId);
+  if (classification) await logAudit('TESTED_PARTY_CLASSIFY', { projectId, jurisdictionId, position: classification.position }, projectId);
+  await logAudit('SIMILARITY_SCORE',   { projectId, jurisdictionId, weights: similarityWeights }, projectId);
+  return result;
+}
+
+TPApp.pli = {
+  compute: computePLI,
+  computeForSet: computePLIForSet,
+  defs: PLI_DEFS,
+  aggMethods: PLI_AGG_METHODS,
+};
+TPApp.range = {
+  calculate: calculateRange,
+  classifyTestedParty,
+  percentile,
+  methods: QUARTILE_METHODS,
+  previewLive: previewLiveRange,
+};
+TPApp.wca = {
+  compute: computeWCA,
+  apply: applyWCA,
+  defaultComponents: WCA_DEFAULT_COMPONENTS,
+};
+TPApp.similarity = {
+  score: computeSimilarity,
+  scoreAll: computeSimilarityAll,
+  defaultWeights: SIMILARITY_DEFAULT_WEIGHTS,
+  dimensions: SIMILARITY_DIMS,
+  /** @deprecated Range filtering by similarity is intentionally absent;
+   *   similarity is display-only and never weights the range. */
+};
+TPApp.phase4 = {
+  run: runPhase4Analysis,
+  liveIqrMinCount: LIVE_IQR_MIN_COUNT,
+};
+</script>
+
+
+<!-- =====================================================================
   ROOT TEMPLATE
 ===================================================================== -->
 <div x-data="tpApp()" x-init="init()" x-cloak class="h-screen flex flex-col">
@@ -5643,13 +6604,63 @@ Foo Corp,JP,334413,2024,1000000,80000,..."></textarea>
                       レビュー進捗:
                       <span class="font-mono" x-text="reviewedCount + ' / ' + currentScreeningResult.pendingReview.length"></span>
                     </div>
+
+                    <!-- Phase 4: live IQR preview ribbon. Updates on every checkbox toggle. -->
+                    <div class="border rounded p-3 bg-slate-50 mb-3 text-xs sticky top-0 z-10">
+                      <div class="flex items-center gap-3 mb-2">
+                        <span class="font-semibold">ライブIQRプレビュー</span>
+                        <span>選択中: <span class="font-mono" x-text="livePreviewSelected.size"></span> 社</span>
+                        <div class="flex-1"></div>
+                        <button class="px-2 py-0.5 border rounded bg-white" @click="livePreviewSelected = new Set(); recomputeLivePreview()">クリア</button>
+                        <button class="px-2 py-0.5 border rounded bg-emerald-600 text-white" :disabled="!livePreviewSelected.size" @click="confirmLiveSelection()">選択を採用確定</button>
+                      </div>
+                      <template x-if="!livePreview.ready">
+                        <div class="text-slate-500">
+                          四分位レンジの算定には <span class="font-mono" x-text="livePreview.requiredMin"></span> 社以上の選択が必要です
+                          （現在 <span class="font-mono" x-text="livePreview.values.length"></span> 社）。
+                        </div>
+                      </template>
+                      <template x-if="livePreview.ready">
+                        <div>
+                          <div class="grid grid-cols-5 gap-2 mb-2">
+                            <div class="bg-white p-2 rounded text-center"><div class="text-[10px] text-slate-500">最小</div><div class="font-mono" x-text="fmtPct(livePreview.range.min)"></div></div>
+                            <div class="bg-white p-2 rounded text-center"><div class="text-[10px] text-slate-500" x-text="livePreview.range.lowerP + '%'"></div><div class="font-mono text-blue-700" x-text="fmtPct(livePreview.range.lower)"></div></div>
+                            <div class="bg-white p-2 rounded text-center"><div class="text-[10px] text-slate-500">中央値</div><div class="font-mono text-emerald-700" x-text="fmtPct(livePreview.range.median)"></div></div>
+                            <div class="bg-white p-2 rounded text-center"><div class="text-[10px] text-slate-500" x-text="livePreview.range.upperP + '%'"></div><div class="font-mono text-blue-700" x-text="fmtPct(livePreview.range.upper)"></div></div>
+                            <div class="bg-white p-2 rounded text-center"><div class="text-[10px] text-slate-500">最大</div><div class="font-mono" x-text="fmtPct(livePreview.range.max)"></div></div>
+                          </div>
+                          <template x-if="livePreview.minComparables && livePreview.values.length < livePreview.minComparables">
+                            <div class="text-amber-700">この法域は最低 <span class="font-mono" x-text="livePreview.minComparables"></span> 社を推奨します</div>
+                          </template>
+                          <!-- Mini box plot -->
+                          <svg viewBox="0 0 400 30" width="100%" height="30" class="mt-1">
+                            <template x-for="el in liveMiniBoxElements()" :key="el.key">
+                              <g>
+                                <template x-if="el.kind === 'box'"><rect :x="el.x" y="5" :width="el.w" height="20" fill="#bfdbfe" stroke="#2563eb"></rect></template>
+                                <template x-if="el.kind === 'median'"><line :x1="el.x" y1="5" :x2="el.x" y2="25" stroke="#059669" stroke-width="2"></line></template>
+                                <template x-if="el.kind === 'whisker'"><line :x1="el.x1" y1="15" :x2="el.x2" y2="15" stroke="#1e293b"></line></template>
+                                <template x-if="el.kind === 'tp'"><circle :cx="el.x" cy="15" r="5" fill="#dc2626"></circle></template>
+                              </g>
+                            </template>
+                          </svg>
+                          <div class="text-[10px] text-slate-500 mt-1">
+                            類似性スコアは表示専用です。レンジは選択企業セット全体に等しく算定されます (スコアによる重み付けは一切行いません)。
+                          </div>
+                        </div>
+                      </template>
+                    </div>
                     <div class="border rounded max-h-72 overflow-auto">
                       <table class="w-full text-xs">
                         <thead class="bg-slate-100"><tr><th class="px-2 py-1 text-left">企業</th><th>国</th><th>業種</th><th>事業内容</th><th>CIQ理由</th><th class="w-64">判定</th></tr></thead>
                         <tbody>
                           <template x-for="row in reviewRows" :key="row.id">
                             <tr class="border-t align-top">
-                              <td class="px-2 py-1" x-text="row.name"></td>
+                              <td class="px-2 py-1">
+                                <label class="flex items-center gap-2">
+                                  <input type="checkbox" :checked="isLivePreviewSelected(row.id)" @change="toggleLivePreviewCompany(row.id)">
+                                  <span x-text="row.name"></span>
+                                </label>
+                              </td>
                               <td x-text="row.country"></td>
                               <td class="font-mono" x-text="row.industry"></td>
                               <td class="text-slate-600 max-w-xs truncate" :title="row.businessDescription" x-text="row.businessDescription || ''"></td>
@@ -5723,12 +6734,188 @@ Foo Corp,JP,334413,2024,1000000,80000,..."></textarea>
         </div>
       </section>
 
-      <!-- ============== Scoring placeholder ============== -->
-      <section x-show="currentView === 'scoring'" class="p-6">
-        <div class="bg-white rounded-lg shadow p-6">
-          <h2 class="font-semibold text-lg mb-3">スコア & PLI <span class="text-xs text-amber-600 font-normal">(Phase 5 で実装)</span></h2>
-          <p class="text-sm text-slate-600">PLI 算定（OM, BPL, ROA, Berry Ratio 等）、四分位レンジ、外れ値処理を実装予定です。</p>
-        </div>
+      <!-- ============== Scoring & PLI (Phase 4) ============== -->
+      <section x-show="currentView === 'scoring'" class="p-6 space-y-6">
+        <template x-if="!currentProject"><div class="bg-white rounded-lg shadow p-6 text-sm text-slate-500">プロジェクトを選択してください。</div></template>
+        <template x-if="currentProject">
+          <div class="space-y-6">
+            <!-- Configuration panel -->
+            <div class="bg-white rounded-lg shadow p-5">
+              <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+                <div><label class="block text-xs text-slate-500">法域</label>
+                  <select class="w-full px-2 py-1 border rounded" x-model="activeScreeningJurisdiction" @change="loadAnalysis()">
+                    <template x-for="j in screeningJurisdictions" :key="j"><option :value="j" x-text="j"></option></template>
+                  </select>
+                </div>
+                <div><label class="block text-xs text-slate-500">PLI</label>
+                  <select class="w-full px-2 py-1 border rounded" x-model="analysisCfg.pliType">
+                    <template x-for="(def, k) in PLI_DEFS" :key="k"><option :value="k" x-text="def.label"></option></template>
+                  </select>
+                </div>
+                <div><label class="block text-xs text-slate-500">集計方法</label>
+                  <select class="w-full px-2 py-1 border rounded" x-model="analysisCfg.method">
+                    <option value="WEIGHTED_AVG">N年加重平均 (標準)</option>
+                    <option value="SIMPLE_AVG">N年単純平均</option>
+                    <option value="SINGLE_YEAR">単年度</option>
+                  </select>
+                </div>
+                <div><label class="block text-xs text-slate-500">四分位法</label>
+                  <select class="w-full px-2 py-1 border rounded" x-model="analysisCfg.quartileMethod">
+                    <option value="IRS">IRS方式 (米国財務省規則・推奨)</option>
+                    <option value="INCLUSIVE">Excel QUARTILE.INC</option>
+                    <option value="EXCLUSIVE">Excel QUARTILE.EXC</option>
+                    <option value="NEAREST_RANK">最近接順位法</option>
+                  </select>
+                </div>
+              </div>
+              <div class="mt-3 flex flex-wrap gap-2 items-center">
+                <label class="text-xs flex items-center gap-1"><input type="checkbox" x-model="analysisCfg.wcaEnabled"> 運転資本調整</label>
+                <template x-if="analysisCfg.wcaEnabled">
+                  <div class="flex gap-2 items-center text-xs">
+                    <span>金利</span>
+                    <input type="number" step="0.0001" class="w-20 px-2 py-1 border rounded" x-model.number="analysisCfg.wcaInterestRate">
+                    <label class="flex items-center gap-1"><input type="checkbox" x-model="analysisCfg.wcaComponents.includeReceivables"> AR</label>
+                    <label class="flex items-center gap-1"><input type="checkbox" x-model="analysisCfg.wcaComponents.includePayables"> AP</label>
+                    <label class="flex items-center gap-1"><input type="checkbox" x-model="analysisCfg.wcaComponents.includeInventory"> Inv</label>
+                  </div>
+                </template>
+                <div class="flex-1"></div>
+                <button class="px-3 py-1.5 bg-blue-600 text-white text-sm rounded" :disabled="analysisRunning" @click="executeAnalysis()">
+                  <span x-show="!analysisRunning">PLI / レンジを算定</span>
+                  <span x-show="analysisRunning">計算中...</span>
+                </button>
+              </div>
+            </div>
+
+            <template x-if="currentAnalysis">
+              <div class="space-y-6">
+                <!-- Range summary -->
+                <div class="bg-white rounded-lg shadow p-5">
+                  <h3 class="font-semibold mb-3">アームスレングス・レンジ
+                    <span class="text-xs text-slate-500 font-normal"
+                          x-text="'(' + (PLI_DEFS[currentAnalysis.pliType]?.label) + ' / ' + currentAnalysis.method + ' / ' + currentAnalysis.quartileMethod + '方式)'"></span>
+                  </h3>
+                  <div class="grid grid-cols-5 gap-3 text-sm">
+                    <div class="bg-slate-50 p-3 rounded text-center"><div class="text-xs text-slate-500">最小</div><div class="font-mono" x-text="fmtPct(currentAnalysis.range.min)"></div></div>
+                    <div class="bg-slate-50 p-3 rounded text-center"><div class="text-xs text-slate-500" x-text="currentAnalysis.range.lowerP + 'パーセンタイル'"></div><div class="font-mono text-blue-700" x-text="fmtPct(currentAnalysis.range.lower)"></div></div>
+                    <div class="bg-slate-50 p-3 rounded text-center"><div class="text-xs text-slate-500">中央値</div><div class="font-mono text-emerald-700" x-text="fmtPct(currentAnalysis.range.median)"></div></div>
+                    <div class="bg-slate-50 p-3 rounded text-center"><div class="text-xs text-slate-500" x-text="currentAnalysis.range.upperP + 'パーセンタイル'"></div><div class="font-mono text-blue-700" x-text="fmtPct(currentAnalysis.range.upper)"></div></div>
+                    <div class="bg-slate-50 p-3 rounded text-center"><div class="text-xs text-slate-500">最大</div><div class="font-mono" x-text="fmtPct(currentAnalysis.range.max)"></div></div>
+                  </div>
+                  <div class="text-xs text-slate-500 mt-2">採用企業数: <span class="font-mono" x-text="currentAnalysis.range.count"></span>
+                    <template x-if="currentAnalysis.range.count < (currentAnalysis.minComparables ?? 5)">
+                      <span class="ml-2 text-amber-700">(最低 <span x-text="currentAnalysis.minComparables ?? 5"></span> 社未満)</span>
+                    </template>
+                  </div>
+
+                  <!-- Tested-party classification -->
+                  <template x-if="currentAnalysis.testedPartyPli != null">
+                    <div class="mt-4 p-3 rounded border" :class="{'WITHIN':'border-emerald-400 bg-emerald-50','BELOW':'border-amber-400 bg-amber-50','ABOVE':'border-amber-400 bg-amber-50'}[currentAnalysis.classification?.position]">
+                      <div class="text-sm">
+                        検証対象企業 PLI: <span class="font-mono font-semibold" x-text="fmtPct(currentAnalysis.testedPartyPli)"></span>
+                        → <span class="font-semibold" x-text="{'WITHIN':'レンジ内','BELOW':'レンジ下限未満','ABOVE':'レンジ上限超'}[currentAnalysis.classification?.position]"></span>
+                      </div>
+                      <template x-if="currentAnalysis.classification?.position !== 'WITHIN'">
+                        <div class="text-xs mt-1 text-slate-700">
+                          中央値まで: <span class="font-mono" x-text="fmtPct(-currentAnalysis.classification.distanceToMedian)"></span> /
+                          直近四分位まで:
+                          <span class="font-mono" x-text="fmtPct(currentAnalysis.classification.position === 'BELOW' ? (currentAnalysis.range.lower - currentAnalysis.testedPartyPli) : (currentAnalysis.testedPartyPli - currentAnalysis.range.upper))"></span>
+                        </div>
+                      </template>
+                    </div>
+                  </template>
+                </div>
+
+                <!-- Range plot (box + tested party marker) -->
+                <div class="bg-white rounded-lg shadow p-5">
+                  <h3 class="font-semibold mb-3 text-sm">レンジ・プロット</h3>
+                  <svg viewBox="0 0 800 100" width="100%" height="100">
+                    <template x-for="el in rangePlotElements()" :key="el.key">
+                      <g>
+                        <template x-if="el.kind === 'axis'"><line :x1="el.x1" :y1="el.y" :x2="el.x2" :y2="el.y" stroke="#94a3b8"></line></template>
+                        <template x-if="el.kind === 'whisker'"><line :x1="el.x1" :y1="el.y" :x2="el.x2" :y2="el.y" stroke="#1e293b" stroke-width="2"></line></template>
+                        <template x-if="el.kind === 'box'"><rect :x="el.x" y="20" :width="el.w" height="40" fill="#bfdbfe" stroke="#2563eb"></rect></template>
+                        <template x-if="el.kind === 'median'"><line :x1="el.x" y1="20" :x2="el.x" y2="60" stroke="#059669" stroke-width="3"></line></template>
+                        <template x-if="el.kind === 'point'"><circle :cx="el.x" cy="40" r="3" :fill="el.color"></circle></template>
+                        <template x-if="el.kind === 'tp'"><g><circle :cx="el.x" cy="40" r="7" fill="#dc2626"></circle><text :x="el.x" y="80" text-anchor="middle" font-size="10" fill="#dc2626">TP</text></g></template>
+                        <template x-if="el.kind === 'tick'"><g><line :x1="el.x" y1="62" :x2="el.x" y2="66" stroke="#475569"></line><text :x="el.x" y="78" text-anchor="middle" font-size="10" fill="#475569" x-text="el.label"></text></g></template>
+                      </g>
+                    </template>
+                  </svg>
+                </div>
+
+                <!-- PLI table -->
+                <div class="bg-white rounded-lg shadow p-5">
+                  <h3 class="font-semibold mb-3 text-sm">企業別 PLI</h3>
+                  <div class="overflow-auto max-h-96 border rounded">
+                    <table class="w-full text-xs">
+                      <thead class="bg-slate-100 sticky top-0">
+                        <tr><th class="px-2 py-1 text-left">企業</th>
+                          <template x-for="y in pliBreakdownYears()" :key="y"><th class="px-2 py-1 text-right" x-text="y"></th></template>
+                          <th class="px-2 py-1 text-right">加重平均</th>
+                          <template x-if="currentAnalysis.wca"><th class="px-2 py-1 text-right">WCA調整後</th></template>
+                          <th class="px-2 py-1 text-right">類似性</th>
+                          <th class="px-2 py-1 text-left">事業内容</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <template x-for="row in pliTableRows" :key="row.companyId">
+                          <tr class="border-t">
+                            <td class="px-2 py-1" x-text="row.name"></td>
+                            <template x-for="y in pliBreakdownYears()" :key="y">
+                              <td class="px-2 py-1 text-right font-mono" x-text="fmtPct(row.byYear[y])"></td>
+                            </template>
+                            <td class="px-2 py-1 text-right font-mono font-semibold" x-text="fmtPct(row.value)"></td>
+                            <template x-if="currentAnalysis.wca">
+                              <td class="px-2 py-1 text-right font-mono text-amber-700" x-text="fmtPct(row.adjusted)"></td>
+                            </template>
+                            <td class="px-2 py-1 text-right font-mono" x-text="row.similarity != null ? row.similarity.toFixed(1) : ''"></td>
+                            <td class="px-2 py-1 text-slate-600 max-w-md truncate" :title="row.businessDescription" x-text="row.businessDescription || ''"></td>
+                          </tr>
+                        </template>
+                      </tbody>
+                    </table>
+                  </div>
+                  <div class="mt-2 text-[11px] text-amber-700 bg-amber-50 p-2 rounded">
+                    ⓘ 類似性スコアは表示専用の参照情報であり、アームスレングス・レンジの算定には<strong>一切影響しません</strong>。採用企業の選別は定性レビュー（人間の判断）で行います。
+                  </div>
+                </div>
+
+                <!-- WCA before/after if enabled -->
+                <template x-if="currentAnalysis.wca">
+                  <div class="bg-white rounded-lg shadow p-5">
+                    <h3 class="font-semibold mb-3 text-sm">運転資本調整 - 調整前後比較</h3>
+                    <div class="grid grid-cols-2 gap-4">
+                      <div class="border rounded p-3 bg-slate-50">
+                        <div class="text-xs text-slate-500 mb-1">調整前レンジ</div>
+                        <div class="text-sm">下限 <span class="font-mono" x-text="fmtPct(currentAnalysis.range.lower)"></span> / 中央 <span class="font-mono" x-text="fmtPct(currentAnalysis.range.median)"></span> / 上限 <span class="font-mono" x-text="fmtPct(currentAnalysis.range.upper)"></span></div>
+                      </div>
+                      <div class="border rounded p-3 bg-emerald-50">
+                        <div class="text-xs text-slate-500 mb-1">WCA調整後レンジ</div>
+                        <div class="text-sm">下限 <span class="font-mono" x-text="fmtPct(currentAnalysis.wca.adjRange.lower)"></span> / 中央 <span class="font-mono" x-text="fmtPct(currentAnalysis.wca.adjRange.median)"></span> / 上限 <span class="font-mono" x-text="fmtPct(currentAnalysis.wca.adjRange.upper)"></span></div>
+                      </div>
+                    </div>
+                  </div>
+                </template>
+
+                <!-- Similarity weights + radar -->
+                <div class="bg-white rounded-lg shadow p-5">
+                  <h3 class="font-semibold mb-3 text-sm">類似性スコア (重み調整)</h3>
+                  <div class="grid grid-cols-5 gap-3 text-xs">
+                    <template x-for="d in SIMILARITY_DIMS" :key="d.key">
+                      <div>
+                        <label class="block mb-1" x-text="d.label"></label>
+                        <input type="range" min="0" max="100" class="w-full" x-model.number="analysisCfg.similarityWeights[d.key]" @change="reapplySimilarity()">
+                        <div class="text-center font-mono" x-text="analysisCfg.similarityWeights[d.key] + '%'"></div>
+                      </div>
+                    </template>
+                  </div>
+                  <div class="text-[11px] text-slate-500 mt-1">合計を100%に自動正規化します。</div>
+                </div>
+              </div>
+            </template>
+          </div>
+        </template>
       </section>
 
       <!-- ============== Results placeholder ============== -->
