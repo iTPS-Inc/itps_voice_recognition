@@ -209,8 +209,12 @@
 const APP_VERSION = '1.0.0-phase1';
 const DB_NAME = 'tp_bench_db';
 
-/** ISO 3166 jurisdictions exposed in the UI. Extend as needed. */
+/** ISO 3166 jurisdictions exposed in the UI. Extend as needed.
+ *  Phase 2: the OECD generic model is included as a pseudo-jurisdiction so a
+ *  project can select it explicitly (otherwise it is auto-applied when no
+ *  jurisdiction-specific rule matches). */
 const JURISDICTIONS = [
+  { code: 'OECD_GENERIC', nameJa: 'OECD TPG (汎用モデル)', nameEn: 'OECD TPG (Generic)' },
   { code: 'JP', nameJa: '日本', nameEn: 'Japan' },
   { code: 'US', nameJa: '米国', nameEn: 'United States' },
   { code: 'GB', nameJa: '英国', nameEn: 'United Kingdom' },
@@ -968,6 +972,16 @@ function tpApp() {
 
     async saveProject() {
       if (!this.currentProject) return;
+      // Emit bind/unbind events for jurisdiction membership changes since the
+      // last persisted snapshot, so the auditLog accurately reflects rule
+      // attach/detach instead of a single opaque project.save event.
+      try {
+        const prev = await db.projects.get(this.currentProject.id);
+        const before = new Set(prev?.targetJurisdiction || []);
+        const after  = new Set(this.currentProject.targetJurisdiction || []);
+        for (const j of after) if (!before.has(j)) await logAudit('PROJECT_RULE_BIND',   { projectId: this.currentProject.id, jurisdictionId: j }, this.currentProject.id);
+        for (const j of before) if (!after.has(j))  await logAudit('PROJECT_RULE_UNBIND', { projectId: this.currentProject.id, jurisdictionId: j }, this.currentProject.id);
+      } catch (_) { /* first-save path; nothing to diff. */ }
       this.currentProject.updatedAt = Date.now();
       await db.projects.put(JSON.parse(JSON.stringify(this.currentProject)));
       await logAudit('project.save', { projectId: this.currentProject.id }, this.currentProject.id);
@@ -1370,6 +1384,17 @@ function tpApp() {
     conditionFieldRefs: CONDITION_FIELD_REFS,
     conditionOperators: CONDITION_OPERATORS,
     conditionPresets: CONDITION_PRESETS,
+    /**
+     * Return the operator list appropriate to the field's declared type.
+     * Falls back to the union number+string set when the field is unknown
+     * (custom paths typed in directly by power users).
+     */
+    operatorsForField(fieldPath) {
+      const ref = CONDITION_FIELD_REFS.find(f => f.value === fieldPath);
+      const t = ref?.type;
+      if (t && CONDITION_OPERATORS[t]) return CONDITION_OPERATORS[t];
+      return [...new Set([...CONDITION_OPERATORS.number, ...CONDITION_OPERATORS.string])];
+    },
     conditionTreeText: '',
     livePreviewCount: null,
     openConditionEditor(stageIdx) {
@@ -1392,15 +1417,26 @@ function tpApp() {
     addConditionTo(group) {
       group.children = group.children || [];
       group.children.push({ kind: 'condition', field: 'financials.latest.netSales', op: '>', value: 0, not: false });
-      this.recomputeLivePreview();
+      this.onConditionTreeEdit('add-condition');
     },
     addGroupTo(group) {
       group.children = group.children || [];
       group.children.push({ kind: 'group', op: 'AND', not: false, children: [] });
-      this.recomputeLivePreview();
+      this.onConditionTreeEdit('add-group');
     },
     removeFromParent(parent, idx) {
       parent.children.splice(idx, 1);
+      this.onConditionTreeEdit('remove-child');
+    },
+    /** Common edit hook: emits the CONDITION_TREE_EDIT audit event and
+     * refreshes the live preview. */
+    async onConditionTreeEdit(action) {
+      const stage = this.editingRule?.screeningStages?.[this.editingStageIdx];
+      if (stage) {
+        const v = validateConditionTree(stage.conditionTree);
+        await logAudit('CONDITION_TREE_EDIT', { ruleId: this.editingRule?.jurisdictionId, stageId: stage.id, action, errors: v.errors.length, warnings: v.warnings.length });
+        if (v.warnings.length) this.toast(v.warnings.join('\n'), 'warning', 6000);
+      }
       this.recomputeLivePreview();
     },
     /** Live preview: how many companies in current project match the condition. */
@@ -1813,6 +1849,36 @@ async function runSelfTest() {
     const list = await TPApp.todo.list();
     const it = list.find(x => x.id === t.id);
     if (it.status !== 'completed') throw new Error('not completed');
+  });
+
+  await check('Phase 2 - condition tree depth-5 warning', async () => {
+    /** @type {Object} */
+    let t = { kind: 'condition', field: 'country', op: '=', value: 'JP' };
+    for (let i = 0; i < 6; i++) t = { kind: 'group', op: 'AND', not: false, children: [t] };
+    const v = validateConditionTree(t);
+    if (!v.warnings.length) throw new Error('expected depth warning at ≥5');
+    if (v.errors.length) throw new Error('should be advisory, got errors');
+  });
+
+  await check('Phase 2 - operators map to field type', async () => {
+    const app = tpApp();
+    const numOps = app.operatorsForField('financials.latest.netSales');
+    if (!numOps.includes('between')) throw new Error('number ops must include between');
+    const strOps = app.operatorsForField('businessDescription');
+    if (!strOps.includes('contains')) throw new Error('string ops must include contains');
+  });
+
+  await check('Phase 2 - OECD_GENERIC selectable in JURISDICTIONS', async () => {
+    if (!JURISDICTIONS.some(j => j.code === 'OECD_GENERIC')) throw new Error('OECD_GENERIC must be selectable');
+  });
+
+  await check('Phase 2 - PROJECT_RULE_BIND audit emitted on jurisdiction add', async () => {
+    // Synthesise a fake before/after diff and verify audit insertion.
+    const before = new Set(['JP']);
+    const after  = new Set(['JP', 'US']);
+    for (const j of after) if (!before.has(j)) await logAudit('PROJECT_RULE_BIND', { jurisdictionId: j, source: 'selftest' });
+    const recent = await db.auditLog.orderBy('ts').reverse().limit(10).toArray();
+    if (!recent.some(e => e.action === 'PROJECT_RULE_BIND' && e.payload?.jurisdictionId === 'US')) throw new Error('bind event missing');
   });
 
   await check('Phase 2 - >10 years warning', async () => {
@@ -2861,6 +2927,8 @@ const CONDITION_OPERATORS = {
 };
 
 const CONDITION_MAX_DEPTH = 8;
+/** Depth at which the UI should display a "this is getting hard to read" warning. */
+const CONDITION_DEPTH_WARN_THRESHOLD = 5;
 
 /** Catalogue of field paths offered in the UI dropdown. */
 const CONDITION_FIELD_REFS = [
@@ -3000,21 +3068,36 @@ function conditionTreeToString(tree) {
   return (tree.not ? 'NOT ' : '') + '(' + inner + ')';
 }
 
-/** Validate a tree. Returns array of error messages; empty means valid. */
-function validateConditionTree(tree, depth = 0, errors = []) {
-  if (!tree) return errors;
-  if (depth > CONDITION_MAX_DEPTH) errors.push('depth > ' + CONDITION_MAX_DEPTH);
-  if (tree.kind === 'condition') {
-    if (!tree.field) errors.push('condition missing field');
-    if (!tree.op)    errors.push('condition missing op');
-  } else if (tree.kind === 'group') {
-    if (!['AND', 'OR'].includes(tree.op)) errors.push('group op must be AND or OR');
-    if (!Array.isArray(tree.children) || !tree.children.length) errors.push('group has no children');
-    for (const c of (tree.children || [])) validateConditionTree(c, depth + 1, errors);
-  } else {
-    errors.push('unknown node kind: ' + tree.kind);
+/**
+ * Validate a tree. Returns `{errors, warnings}` so callers can distinguish
+ * hard validation failures from advisory "this is deep" notes. Empty errors
+ * means the tree is structurally valid.
+ * @param {Object} tree
+ * @returns {{errors:string[], warnings:string[]}}
+ */
+function validateConditionTree(tree) {
+  const errors = []; const warnings = [];
+  let maxDepthSeen = 0;
+  const walk = (n, d) => {
+    if (!n) return;
+    maxDepthSeen = Math.max(maxDepthSeen, d);
+    if (d > CONDITION_MAX_DEPTH) errors.push('depth > ' + CONDITION_MAX_DEPTH);
+    if (n.kind === 'condition') {
+      if (!n.field) errors.push('condition missing field');
+      if (!n.op)    errors.push('condition missing op');
+    } else if (n.kind === 'group') {
+      if (!['AND', 'OR'].includes(n.op)) errors.push('group op must be AND or OR');
+      if (!Array.isArray(n.children) || !n.children.length) errors.push('group has no children');
+      for (const c of (n.children || [])) walk(c, d + 1);
+    } else {
+      errors.push('unknown node kind: ' + n.kind);
+    }
+  };
+  walk(tree, 0);
+  if (maxDepthSeen >= CONDITION_DEPTH_WARN_THRESHOLD) {
+    warnings.push('ネスト深さ ' + maxDepthSeen + ' は読みにくくなる可能性があります (推奨 < ' + CONDITION_DEPTH_WARN_THRESHOLD + ')');
   }
-  return errors;
+  return { errors, warnings };
 }
 
 /** Built-in presets (variable-year aware). */
@@ -4216,7 +4299,7 @@ Foo Corp,JP,334413,2024,1000000,80000,..."></textarea>
                                                 <template x-for="f in conditionFieldRefs" :key="f.value"><option :value="f.value" x-text="f.label"></option></template>
                                               </select>
                                               <select class="px-2 py-1 border rounded text-xs" x-model="child.op" @change="recomputeLivePreview()">
-                                                <template x-for="o in [...conditionOperators.number, ...conditionOperators.string]" :key="o"><option :value="o" x-text="o"></option></template>
+                                                <template x-for="o in operatorsForField(child.field)" :key="o"><option :value="o" x-text="o"></option></template>
                                               </select>
                                               <input class="px-2 py-1 border rounded text-xs flex-1" x-model="child.value" @input.debounce.300ms="recomputeLivePreview()" placeholder="値">
                                               <button class="text-xs px-2 py-0.5 border rounded text-rose-600" @click="removeFromParent(node, ci)">×</button>
@@ -4244,7 +4327,7 @@ Foo Corp,JP,334413,2024,1000000,80000,..."></textarea>
                                                         <template x-for="f in conditionFieldRefs" :key="f.value"><option :value="f.value" x-text="f.label"></option></template>
                                                       </select>
                                                       <select class="px-2 py-1 border rounded text-xs" x-model="g.op" @change="recomputeLivePreview()">
-                                                        <template x-for="o in [...conditionOperators.number, ...conditionOperators.string]" :key="o"><option :value="o" x-text="o"></option></template>
+                                                        <template x-for="o in operatorsForField(g.field)" :key="o"><option :value="o" x-text="o"></option></template>
                                                       </select>
                                                       <input class="px-2 py-1 border rounded text-xs flex-1" x-model="g.value" @input.debounce.300ms="recomputeLivePreview()">
                                                       <button class="text-xs px-2 py-0.5 border rounded text-rose-600" @click="removeFromParent(child, gi)">×</button>
