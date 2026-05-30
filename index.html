@@ -312,6 +312,14 @@ db.version(3).stores({
   assets: 'id, kind, name, addedAt',
 });
 
+// Phase 7: FX rate schema upgrade.
+// Each rate row is uniquely identified by (base, quote, date, basis) so
+// TTM / TTS / TTB on the same date co-exist. `source` records the bank /
+// data provider that supplied the rate (mandatory for disclosure).
+db.version(4).stores({
+  fxRates: '[base+quote+date+basis], base, quote, date, basis, source, kind',
+});
+
 /**
  * Persist a single audit entry. All user-visible mutations should call
  * this so the future Phase 7 report appendix can render a tamper-evident
@@ -847,6 +855,7 @@ function tpApp() {
         this.allRules = await rulesEngine.list();
         await this.refreshTodos();
         await this.refreshFontStatus();
+        await this.refreshFxRows();
         await this.refreshProjects();
         this.booted = true;
         await logAudit('app.boot', { version: APP_VERSION });
@@ -2216,6 +2225,142 @@ function tpApp() {
       finally { this.reportGenerating = false; this.reportProgressMsg = ''; }
     },
 
+    /* ====================================================================
+       PHASE 7 STATE & METHODS — AI summarise / translate, FX management
+       ==================================================================== */
+    aiEncryptPassphrase: '', aiEncryptStatus: '',
+    aiDrafting: false, aiDraftOutput: null,
+    /** Glossary editable in settings — initialised lazily from DEFAULT_GLOSSARY. */
+    aiGlossary: null,
+
+    /** Resolve the provider configuration to use for a given AI feature. */
+    _aiProviderForFeature(feature) {
+      const kind = this.featureProviderAssignment?.[feature] || AI_FEATURE_DEFAULTS[feature] || 'openai';
+      const cfg = this.aiProviders.find(p => p.kind === kind);
+      if (!cfg) throw new Error(`AI プロバイダ ${kind} が未設定です`);
+      return { kind, cfg };
+    },
+
+    /** Encrypt the API keys in `aiProviders` with the user's passphrase. */
+    async encryptAiKeys() {
+      if (!this.aiEncryptPassphrase) { this.toast('パスフレーズを入力してください', 'warning'); return; }
+      try {
+        const encrypted = await Promise.all(this.aiProviders.map(async p => ({
+          ...p, apiKey: p.apiKey ? await encryptString(p.apiKey, this.aiEncryptPassphrase) : null,
+        })));
+        await putSetting('aiProvidersEncrypted', encrypted);
+        await logAudit('AI_KEY_ENCRYPT', { providers: encrypted.map(p => p.kind) });
+        this.aiEncryptStatus = '✓ 暗号化保存しました';
+        this.toast('APIキーを暗号化保存しました', 'success');
+      } catch (e) { this.toast('暗号化失敗: ' + e.message, 'error'); }
+    },
+
+    /** Decrypt the stored envelope back into `aiProviders`. */
+    async decryptAiKeys() {
+      if (!this.aiEncryptPassphrase) { this.toast('パスフレーズを入力してください', 'warning'); return; }
+      try {
+        const encrypted = await getSetting('aiProvidersEncrypted', null);
+        if (!encrypted) { this.toast('暗号化保存なし', 'warning'); return; }
+        const decrypted = await Promise.all(encrypted.map(async p => ({
+          ...p, apiKey: p.apiKey ? await decryptString(p.apiKey, this.aiEncryptPassphrase) : '',
+        })));
+        this.aiProviders = decrypted;
+        this.aiEncryptStatus = '✓ 復号読込しました';
+        this.toast('APIキーを復号読込しました', 'success');
+      } catch (e) { this.toast('復号失敗 (パスフレーズを確認): ' + e.message, 'error'); }
+    },
+
+    /** Build the source text + call AI summarise for the executive section. */
+    async aiDraftExecutive() {
+      if (!this.reportModel) { this.toast('レポートプレビューを先に読み込んでください', 'warning'); return; }
+      this.aiDrafting = true;
+      try {
+        const sources = [];
+        if (this.reportModel.exec) sources.push(this.reportModel.exec.conclusion);
+        if (this.reportModel.range) {
+          const r = this.reportModel.range.range;
+          sources.push(`PLI: ${this.reportModel.range.pliLabel} (${this.reportModel.range.method})。` +
+            `四分位法: ${this.reportModel.range.quartileMeta.label}。` +
+            `レンジ: ${(r.lower*100).toFixed(2)}% 〜 ${(r.upper*100).toFixed(2)}%、中央値 ${(r.median*100).toFixed(2)}%、採用 ${r.count} 社。`);
+        }
+        if (this.reportModel.conclusion) sources.push(this.reportModel.conclusion.sentence);
+        const text = sources.join('\n');
+        const { kind, cfg } = this._aiProviderForFeature('summarise');
+        const r = await aiSummarize(text, { section: 'exec', lang: this.reportCfg.lang, preservedNames: [this.reportModel.range?.quartileMeta?.label, this.reportModel.meta.testedPartyName].filter(Boolean) },
+          { provider: kind, providerCfg: cfg });
+        this.aiDraftOutput = { ...r, kind: 'summary', source: text };
+        if (!r.verify.ok) this.toast('⚠ 数値保全チェック NG: ' + r.verify.missing.slice(0, 3).join(', '), 'warning', 8000);
+      } catch (e) { this.toast(e.message, 'error'); }
+      finally { this.aiDrafting = false; }
+    },
+
+    /** Translate the conclusion sentence Japanese → English. */
+    async aiTranslateConclusion() {
+      if (!this.reportModel?.conclusion) { this.toast('結論セクションが空です', 'warning'); return; }
+      this.aiDrafting = true;
+      try {
+        const source = this.reportModel.conclusion.sentence;
+        const { kind, cfg } = this._aiProviderForFeature('translate');
+        const r = await aiTranslate(source, 'ja', 'en', this.aiGlossary || DEFAULT_GLOSSARY,
+          { provider: kind, providerCfg: cfg, preservedNames: [this.reportModel.range?.quartileMeta?.label, this.reportModel.meta.testedPartyName].filter(Boolean) });
+        this.aiDraftOutput = { ...r, kind: 'translate', source };
+        if (!r.verify.ok) this.toast('⚠ 数値・名称保全 NG: ' + r.verify.missing.slice(0, 3).join(', '), 'warning', 8000);
+      } catch (e) { this.toast(e.message, 'error'); }
+      finally { this.aiDrafting = false; }
+    },
+
+    /* ---- FX management ---- */
+    fxRows: [],
+    fxDraft: { base: 'USD', quote: 'JPY', date: '', basis: 'TTM', kind: 'spot', rate: '', source: '' },
+    fxCsvImportText: '',
+    fxApiUrlInput: '',
+    async refreshFxRows() { this.fxRows = await fxStore.list(); },
+    async addFxRow() {
+      try {
+        const draft = { ...this.fxDraft, rate: Number(this.fxDraft.rate) };
+        await fxStore.put(draft);
+        await this.refreshFxRows();
+        this.toast('FXレートを登録しました', 'success');
+        this.fxDraft = { ...this.fxDraft, rate: '' };
+      } catch (e) { this.toast(e.message, 'error'); }
+    },
+    async deleteFxRow(id) {
+      await db.fxRates.delete(id);
+      await this.refreshFxRows();
+    },
+    async importFxCsvV2() {
+      try {
+        const r = await fxStore.importCsv(this.fxCsvImportText);
+        await this.refreshFxRows();
+        this.toast(`${r.added} 件登録 / ${r.skipped} 件失敗`, r.skipped ? 'warning' : 'success');
+        this.fxCsvImportText = '';
+      } catch (e) { this.toast(e.message, 'error'); }
+    },
+    async fetchFxFromApi() {
+      if (!this.fxApiUrlInput) return;
+      try {
+        const r = await fxStore.fetchFromApi(this.fxApiUrlInput);
+        await this.refreshFxRows();
+        this.toast(`API から ${r.added} 件取得`, 'success');
+      } catch (e) { this.toast('取得失敗: ' + e.message + ' (CORSの可能性)', 'error', 8000); }
+    },
+
+    /* ---- Report currency + display currency (project-level) ---- */
+    /** Persist the project-level reportCurrency. */
+    async setProjectReportCurrency(currency) {
+      if (!this.currentProject) return;
+      this.currentProject.settings = this.currentProject.settings || {};
+      this.currentProject.settings.reportCurrency = currency;
+      await this.saveProject();
+    },
+    async setProjectConversionMethod(timing, basis) {
+      if (!this.currentProject) return;
+      this.currentProject.settings = this.currentProject.settings || {};
+      this.currentProject.settings.conversionTiming = timing;
+      this.currentProject.settings.conversionBasis  = basis;
+      await this.saveProject();
+    },
+
     /* ---- Industry code lookup UI ---- */
     /** Import a Census Bureau concordance CSV file. */
     async onConcordanceCsvPick(ev) {
@@ -3411,6 +3556,201 @@ async function runSelfTest() {
     for (const k of ['generatePdfEmbedded','generatePdfPrint','buildPrintHtml']) {
       if (typeof TPApp.report[k] !== 'function') throw new Error('missing TPApp.report.' + k);
     }
+  });
+
+  /* ================== Phase 7 acceptance checks ================== */
+
+  await check('Phase 7 - AES-GCM encrypt/decrypt round-trip', async () => {
+    const env = await encryptString('sk-test-1234567890', 'secret-pass');
+    if (env.enc !== 'aes-gcm-v1') throw new Error('envelope kind');
+    const back = await decryptString(env, 'secret-pass');
+    if (back !== 'sk-test-1234567890') throw new Error('roundtrip mismatch');
+    // Wrong passphrase must throw (AES-GCM auth).
+    let threw = false;
+    try { await decryptString(env, 'wrong'); } catch (_) { threw = true; }
+    if (!threw) throw new Error('decrypt should fail on wrong passphrase');
+  });
+
+  await check('Phase 7 - verifyNumbersPreserved catches dropped + altered numbers', async () => {
+    const src = '採用社数は20社、四分位レンジは2.70% 〜 11.48%、中央値は3.62%です。';
+    const good = '結論：採用 20社、レンジ 2.70% 〜 11.48%、中央値 3.62%。';
+    const bad1 = '結論：採用 20社、レンジ 2.70% 〜 12.00%、中央値 3.62%。';   // altered 11.48 → 12.00
+    const bad2 = '結論：採用 20社、中央値 3.62%。';                              // dropped LQ / UQ
+    const r1 = verifyNumbersPreserved(src, good); if (!r1.ok) throw new Error('good failed: ' + r1.missing.join(','));
+    const r2 = verifyNumbersPreserved(src, bad1); if (r2.ok)  throw new Error('alteration not caught');
+    const r3 = verifyNumbersPreserved(src, bad2); if (r3.ok)  throw new Error('drop not caught');
+  });
+
+  await check('Phase 7 - verifyNumbersPreserved enforces preserved-name list', async () => {
+    const src = '採用企業に Y.S.S. (Thailand) Public Company Limited を含む。';
+    const out = '採用企業を含む。';
+    const r = verifyNumbersPreserved(src, out, { preservedNames: ['Y.S.S. (Thailand) Public Company Limited'] });
+    if (r.ok) throw new Error('missing name not flagged');
+    if (!r.missing.some(s => s.includes('Y.S.S.'))) throw new Error('name not in missing list');
+  });
+
+  await check('Phase 7 - aiCall mock + summarise returns draft envelope', async () => {
+    window.__TPApp_aiMock = async (kind, cfg, system, user) => ({ text: '要約: TP の Net Cost Plus 3.00% は IQR 2.70%〜11.48% のレンジ内です。', tokensIn: 50, tokensOut: 30 });
+    try {
+      const src = '検証対象 TP の Net Cost Plus 3.00% は 2.70%〜11.48% (中央値 3.62%) のレンジ内。';
+      const res = await aiSummarize(src, { section: 'exec', lang: 'ja' }, { provider: 'openai', providerCfg: { apiKey: 'mock' } });
+      if (!res.isDraft) throw new Error('draft flag missing');
+      if (!res.verify) throw new Error('verify missing');
+      if (typeof res.verify.ok !== 'boolean') throw new Error('verify.ok missing');
+    } finally { delete window.__TPApp_aiMock; }
+  });
+
+  await check('Phase 7 - aiTranslate mock + verifies numbers + names', async () => {
+    window.__TPApp_aiMock = async () => ({ text: 'Tested party Net Cost Plus 3.00% is within the range of 2.70% to 11.48%.', tokensIn: 40, tokensOut: 30 });
+    try {
+      const src = '検証対象企業の Net Cost Plus 3.00% は 2.70% 〜 11.48% のレンジ内。';
+      const res = await aiTranslate(src, 'ja', 'en', null, { provider: 'openai', providerCfg: { apiKey: 'mock' }, preservedNames: ['Net Cost Plus'] });
+      if (!res.isDraft) throw new Error('draft flag missing');
+      if (res.verify.missing.length) throw new Error('numbers should be preserved');
+    } finally { delete window.__TPApp_aiMock; }
+  });
+
+  await check('Phase 7 - FX put / getRate exact match + identity', async () => {
+    await fxStore.put({ base: 'THB', quote: 'JPY', date: '2023-12-31', basis: 'TTM', rate: 4.05, source: 'self-test' });
+    const r = await fxStore.getRate('THB', 'JPY', '2023-12-31', { basis: 'TTM' });
+    if (!r || r.rate !== 4.05) throw new Error('exact match failed');
+    const id = await fxStore.getRate('JPY', 'JPY', '2023-12-31');
+    if (!id || id.rate !== 1) throw new Error('identity rate failed');
+    // Cleanup self-test row
+    await db.fxRates.delete(_fxKey('THB', 'JPY', '2023-12-31', 'TTM'));
+  });
+
+  await check('Phase 7 - FX TTM / TTS / TTB coexist and give different conversions', async () => {
+    await fxStore.put({ base: 'USD', quote: 'JPY', date: '2024-12-31', basis: 'TTM', rate: 150.00, source: 'self-test' });
+    await fxStore.put({ base: 'USD', quote: 'JPY', date: '2024-12-31', basis: 'TTS', rate: 151.00, source: 'self-test' });
+    await fxStore.put({ base: 'USD', quote: 'JPY', date: '2024-12-31', basis: 'TTB', rate: 149.00, source: 'self-test' });
+    const t = await fxConvertAmount(1000, 'USD', 'JPY', { basis: 'TTM', date: '2024-12-31' });
+    const s = await fxConvertAmount(1000, 'USD', 'JPY', { basis: 'TTS', date: '2024-12-31' });
+    const b = await fxConvertAmount(1000, 'USD', 'JPY', { basis: 'TTB', date: '2024-12-31' });
+    if (t.value !== 150000) throw new Error('TTM convert wrong');
+    if (s.value !== 151000) throw new Error('TTS convert wrong');
+    if (b.value !== 149000) throw new Error('TTB convert wrong');
+    if (s.value === b.value) throw new Error('TTS and TTB must differ');
+    // Cleanup
+    for (const basis of ['TTM','TTS','TTB']) await db.fxRates.delete(_fxKey('USD','JPY','2024-12-31', basis));
+  });
+
+  await check('Phase 7 - FX CSV import + interpolation between business days', async () => {
+    const csv = 'base,quote,date,basis,rate,source\nEUR,JPY,2024-01-31,TTM,160.0,bank\nEUR,JPY,2024-03-31,TTM,170.0,bank\n';
+    const out = await fxStore.importCsv(csv);
+    if (out.added !== 2) throw new Error('csv added != 2');
+    // Mid-point lookup must be interpolated.
+    const r = await fxStore.getRate('EUR', 'JPY', '2024-02-29', { basis: 'TTM' });
+    if (!r || !r.interpolated) throw new Error('expected interpolation');
+    if (r.rate < 160 || r.rate > 170) throw new Error('interp out of range');
+    // Cleanup
+    await db.fxRates.delete(_fxKey('EUR','JPY','2024-01-31','TTM'));
+    await db.fxRates.delete(_fxKey('EUR','JPY','2024-03-31','TTM'));
+  });
+
+  await check('Phase 7 - ★ normalizeToReportCurrency does NOT mutate canonical data', async () => {
+    // Set up two rates and one company.
+    await fxStore.put({ base: 'USD', quote: 'JPY', date: '2024-12-31', basis: 'TTM', rate: 150.0, source: 'self-test' });
+    const company = { id: 'p7m-a', name: 'A', country: 'US',
+      financials: { '2024': { year: 2024, currency: 'USD', netSales: 1000, operatingIncome: 100, cogs: 700, operatingExpenses: 200 } },
+    };
+    const snapshot = JSON.parse(JSON.stringify(company));
+    const project = { id: 'p7m-' + uuid() };
+    const r = await normalizeToReportCurrency(project, [company], null, 'JPY', { basis: 'TTM' });
+    // Canonical data must be byte-identical to snapshot.
+    if (JSON.stringify(company) !== JSON.stringify(snapshot)) throw new Error('canonical data was mutated');
+    // Display data must carry the converted absolute value.
+    const disp = r.companiesDisplay[0];
+    if (disp.financialsDisplay['2024'].netSales !== 150000) throw new Error('display netSales should be 1000 * 150');
+    // Cleanup
+    await db.fxRates.delete(_fxKey('USD','JPY','2024-12-31','TTM'));
+  });
+
+  await check('Phase 7 - ★ PLI / range invariant under currency conversion', async () => {
+    // Three companies in three currencies, computing the canonical PLI in
+    // each company's own currency. After normalising display to JPY, the
+    // *original* PLI computation must produce the same range. The point
+    // is that no code-path recomputes PLI from the display data.
+    await fxStore.put({ base: 'USD', quote: 'JPY', date: '2024-12-31', basis: 'TTM', rate: 150.0, source: 'self-test' });
+    await fxStore.put({ base: 'EUR', quote: 'JPY', date: '2024-12-31', basis: 'TTM', rate: 160.0, source: 'self-test' });
+    const mk = (id, currency, sales, op) => ({ id, name: id, country: 'XX',
+      financials: { '2024': { year: 2024, currency, netSales: sales, operatingIncome: op, cogs: sales * 0.7, operatingExpenses: sales * 0.2 } } });
+    const cs = [mk('a', 'USD', 100, 10), mk('b', 'EUR', 200, 20), mk('c', 'JPY', 30000, 3000)];
+    const pliBefore = computePLIForSet(cs, 'NET_COST_PLUS', null, 'WEIGHTED_AVG').map(r => r.value);
+    const rangeBefore = calculateRange(pliBefore, { type: 'IQR', lowerPercentile: 25, upperPercentile: 75, centralTendency: 'MEDIAN' }, 'IRS');
+
+    const project = { id: 'p7inv-' + uuid() };
+    await normalizeToReportCurrency(project, cs, null, 'JPY', { basis: 'TTM' });
+
+    // After normalisation: recompute PLI on the canonical data. Must equal pliBefore.
+    const pliAfter = computePLIForSet(cs, 'NET_COST_PLUS', null, 'WEIGHTED_AVG').map(r => r.value);
+    const rangeAfter = calculateRange(pliAfter, { type: 'IQR', lowerPercentile: 25, upperPercentile: 75, centralTendency: 'MEDIAN' }, 'IRS');
+    for (let i = 0; i < pliBefore.length; i++) {
+      if (Math.abs(pliBefore[i] - pliAfter[i]) > 1e-12) throw new Error('PLI[' + i + '] changed: ' + pliBefore[i] + ' vs ' + pliAfter[i]);
+    }
+    for (const k of ['lower','median','upper','min','max']) {
+      if (Math.abs(rangeBefore[k] - rangeAfter[k]) > 1e-12) throw new Error('range.' + k + ' changed');
+    }
+    // Cleanup
+    await db.fxRates.delete(_fxKey('USD','JPY','2024-12-31','TTM'));
+    await db.fxRates.delete(_fxKey('EUR','JPY','2024-12-31','TTM'));
+  });
+
+  await check('Phase 7 - ★ missingCurrencies flagged when no rate exists', async () => {
+    const c = { id: 'p7miss', name: 'Z', country: 'BR',
+      financials: { '2024': { year: 2024, currency: 'BRL', netSales: 100, operatingIncome: 10, cogs: 70, operatingExpenses: 20 } } };
+    const r = await normalizeToReportCurrency({ id: 'p7miss-prj' }, [c], null, 'JPY', { basis: 'TTM' });
+    if (!r.missingCurrencies.includes('BRL')) throw new Error('BRL must be flagged as missing');
+  });
+
+  await check('Phase 7 - ★ getConversionDisclosure aggregates per (from, to, timing, basis)', async () => {
+    await fxStore.put({ base: 'USD', quote: 'JPY', date: '2024-12-31', basis: 'TTM', rate: 150.0, source: 'Bank A' });
+    await fxStore.put({ base: 'USD', quote: 'JPY', date: '2024-06-30', basis: 'TTM', rate: 145.0, source: 'Bank A' });
+    const c = { id: 'p7d', name: 'D', country: 'US',
+      financials: { '2024': { year: 2024, currency: 'USD', netSales: 100, operatingIncome: 10, cogs: 70, operatingExpenses: 20, totalAssets: 500 } } };
+    const r = await normalizeToReportCurrency({ id: 'p7d-prj' }, [c], null, 'JPY', { basis: 'TTM', timing: 'item-default' });
+    const disc = getConversionDisclosure(r);
+    if (!disc.length) throw new Error('no disclosure rows');
+    for (const row of disc) {
+      if (!row.from || !row.to || row.rate == null || !row.basis || !row.timing || !row.asOf || !row.source) {
+        throw new Error('disclosure row missing field: ' + JSON.stringify(row));
+      }
+    }
+    // Cleanup
+    await db.fxRates.delete(_fxKey('USD','JPY','2024-12-31','TTM'));
+    await db.fxRates.delete(_fxKey('USD','JPY','2024-06-30','TTM'));
+  });
+
+  await check('Phase 7 - ★ display-currency change leaves PLI / range untouched', async () => {
+    // Simulate a Phase 4 analysis on a tiny project, change the project's
+    // displayCurrency, and verify analysisResults are not mutated.
+    const projectId = 'p7disp-' + uuid();
+    const project = { id: projectId, name: 'Disp test', createdAt: Date.now(), updatedAt: Date.now(),
+      targetJurisdiction: ['OECD_GENERIC'], testedPartyId: null, comparables: [], excludedCompanies: [], screeningHistory: [],
+      scoringConfig: {}, fxData: {}, settings: {}, notes: '',
+      analysisResults: { OECD_GENERIC: {
+        pliType: 'NET_COST_PLUS', method: 'WEIGHTED_AVG', quartileMethod: 'IRS',
+        range: { count: 4, min: 0.01, lower: 0.02, median: 0.03, upper: 0.04, max: 0.05, lowerP: 25, upperP: 75, centralTendency: 'MEDIAN', quartileMethod: 'IRS' },
+        testedPartyPli: 0.025, pliRows: [], similarity: [], wca: null,
+      }} };
+    await db.projects.put(project);
+    const before = JSON.stringify((await db.projects.get(projectId)).analysisResults);
+    await TPApp.fx.setDisplayCurrency('JPY', projectId);
+    const after = JSON.stringify((await db.projects.get(projectId)).analysisResults);
+    if (before !== after) throw new Error('analysisResults mutated on display change');
+    await db.projects.delete(projectId);
+  });
+
+  await check('Phase 7 - TPApp.ai / TPApp.fx surface exposed', async () => {
+    for (const k of ['summarize','translate','verifyNumbersPreserved','encryptString','decryptString','buildSummaryPrompt','buildTranslationPrompt','providers','glossary']) {
+      if (TPApp.ai[k] == null) throw new Error('missing TPApp.ai.' + k);
+    }
+    for (const k of ['put','list','getRate','importCsv','convert','normalizeToReportCurrency','getConversionDisclosure','setDisplayCurrency','bases','kinds','timings']) {
+      if (TPApp.fx[k] == null) throw new Error('missing TPApp.fx.' + k);
+    }
+    if (!TPApp.fx.bases.includes('TTM')) throw new Error('TTM missing from bases');
+    if (!TPApp.fx.bases.includes('TTS')) throw new Error('TTS missing');
+    if (!TPApp.fx.bases.includes('TTB')) throw new Error('TTB missing');
   });
 
   await check('Phase 2 - >10 years warning', async () => {
@@ -8237,6 +8577,601 @@ async function generatePdfReportPrint(model, opts = {}) {
 
 
 <!-- =====================================================================
+  PHASE 7 / BLOCK 41 : AI provider abstraction + AES-GCM key crypto
+===================================================================== -->
+<script id="ai-providers">
+/**
+ * @typedef {('openai'|'anthropic'|'google'|'azure')} AiProviderKind
+ */
+
+/** Provider-specific request shape so the rest of the AI layer is generic. */
+const AI_PROVIDER_DEFS = {
+  openai: {
+    label: 'OpenAI',
+    defaultModel: 'gpt-4o-mini',
+    defaultEndpoint: 'https://api.openai.com/v1/chat/completions',
+    buildHeaders: (p) => ({ 'Authorization': 'Bearer ' + p.apiKey, 'Content-Type': 'application/json' }),
+    buildBody:   (system, user, model) => JSON.stringify({ model, messages: [{ role: 'system', content: system }, { role: 'user', content: user }], temperature: 0.0 }),
+    parseBody:   (json) => json?.choices?.[0]?.message?.content || '',
+    estimateTokens: (text) => Math.ceil(text.length / 4),
+  },
+  anthropic: {
+    label: 'Anthropic',
+    defaultModel: 'claude-3-5-sonnet-latest',
+    defaultEndpoint: 'https://api.anthropic.com/v1/messages',
+    buildHeaders: (p) => ({ 'x-api-key': p.apiKey, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' }),
+    buildBody:   (system, user, model) => JSON.stringify({ model, max_tokens: 4096, system, messages: [{ role: 'user', content: user }] }),
+    parseBody:   (json) => json?.content?.[0]?.text || '',
+    estimateTokens: (text) => Math.ceil(text.length / 4),
+  },
+  google: {
+    label: 'Google Gemini',
+    defaultModel: 'gemini-1.5-pro',
+    defaultEndpoint: 'https://generativelanguage.googleapis.com/v1beta/models',
+    buildHeaders: () => ({ 'Content-Type': 'application/json' }),
+    buildUrl:     (p, model) => `${p.endpoint || AI_PROVIDER_DEFS.google.defaultEndpoint}/${model}:generateContent?key=${encodeURIComponent(p.apiKey)}`,
+    buildBody:    (system, user) => JSON.stringify({ contents: [{ role: 'user', parts: [{ text: system + '\n\n' + user }] }], generationConfig: { temperature: 0.0 } }),
+    parseBody:    (json) => json?.candidates?.[0]?.content?.parts?.[0]?.text || '',
+    estimateTokens: (text) => Math.ceil(text.length / 4),
+  },
+  azure: {
+    label: 'Azure OpenAI',
+    defaultModel: 'gpt-4',
+    defaultEndpoint: '',  // user-supplied resource URL
+    buildHeaders: (p) => ({ 'api-key': p.apiKey, 'Content-Type': 'application/json' }),
+    buildBody:    (system, user, model) => JSON.stringify({ model, messages: [{ role: 'system', content: system }, { role: 'user', content: user }], temperature: 0.0 }),
+    parseBody:    (json) => json?.choices?.[0]?.message?.content || '',
+    estimateTokens: (text) => Math.ceil(text.length / 4),
+  },
+};
+
+/* =====================================================================
+   AES-GCM passphrase encryption for API keys at rest.
+   ===================================================================== */
+const KEY_CRYPTO_ITER = 200000;
+
+/** Derive an AES-GCM key from a passphrase + salt via PBKDF2. */
+async function _deriveAesKey(passphrase, salt) {
+  const km = await crypto.subtle.importKey('raw', new TextEncoder().encode(passphrase), { name: 'PBKDF2' }, false, ['deriveKey']);
+  return crypto.subtle.deriveKey(
+    { name: 'PBKDF2', salt, iterations: KEY_CRYPTO_ITER, hash: 'SHA-256' },
+    km, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+}
+
+function _b64FromBuf(buf) {
+  const u8 = new Uint8Array(buf);
+  let s = ''; const CHUNK = 0x8000;
+  for (let i = 0; i < u8.length; i += CHUNK) s += String.fromCharCode.apply(null, u8.subarray(i, i + CHUNK));
+  return btoa(s);
+}
+function _bufFromB64(b64) {
+  const bin = atob(b64); const u8 = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+  return u8.buffer;
+}
+
+/**
+ * Encrypt a plaintext string with a passphrase using AES-GCM.
+ * Returns an opaque envelope storing {iv, salt, ct} as base64.
+ * @returns {Promise<{enc:'aes-gcm-v1', iv:string, salt:string, ct:string}>}
+ */
+async function encryptString(plaintext, passphrase) {
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv   = crypto.getRandomValues(new Uint8Array(12));
+  const key  = await _deriveAesKey(passphrase, salt);
+  const ct   = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, new TextEncoder().encode(plaintext));
+  return { enc: 'aes-gcm-v1', iv: _b64FromBuf(iv), salt: _b64FromBuf(salt), ct: _b64FromBuf(ct) };
+}
+
+/** Decrypt an envelope back to the original plaintext. */
+async function decryptString(envelope, passphrase) {
+  if (envelope?.enc !== 'aes-gcm-v1') throw new Error('unsupported envelope');
+  const salt = new Uint8Array(_bufFromB64(envelope.salt));
+  const iv   = new Uint8Array(_bufFromB64(envelope.iv));
+  const key  = await _deriveAesKey(passphrase, salt);
+  const pt   = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, _bufFromB64(envelope.ct));
+  return new TextDecoder().decode(pt);
+}
+</script>
+
+<!-- =====================================================================
+  PHASE 7 / BLOCK 42 : AI prompt builders + number preservation check
+  ---------------------------------------------------------------------
+  ★ Core safety net for the "AI must not generate numbers" rule. Prompts
+  carry the explicit guard. Outputs are verified post-hoc by extracting
+  numbers / percentages / company / law names and asserting nothing was
+  silently dropped or changed.
+===================================================================== -->
+<script id="ai-prompts">
+/** Default transfer-pricing glossary. Editable by the user via settings. */
+const DEFAULT_GLOSSARY = [
+  { en: 'arm\'s length',            ja: '独立企業間' },
+  { en: 'arm\'s-length range',      ja: 'アームスレングス・レンジ' },
+  { en: 'Profit Level Indicator',   ja: '利益水準指標' },
+  { en: 'PLI',                      ja: 'PLI' },
+  { en: 'interquartile range',      ja: '四分位レンジ' },
+  { en: 'Net Cost Plus',            ja: 'ネット・コスト・プラス' },
+  { en: 'Operating Margin',         ja: '営業利益率' },
+  { en: 'Berry Ratio',              ja: 'ベリー比' },
+  { en: 'tested party',             ja: '検証対象企業' },
+  { en: 'comparable',               ja: '比較対象企業' },
+  { en: 'working capital adjustment', ja: '運転資本調整' },
+  { en: 'BEPS Action 13',           ja: 'BEPS Action 13' },
+  { en: 'local file',               ja: 'ローカルファイル' },
+  { en: 'master file',              ja: 'マスターファイル' },
+  { en: 'controlled entity',        ja: '被支配企業' },
+];
+
+/** Build the canonical summary system + user prompt pair. */
+function buildSummaryPrompt(text, context = {}) {
+  const lang = context.lang || 'ja';
+  const sys = [
+    'You are a senior assistant helping draft a Transfer Pricing benchmarking report.',
+    '',
+    '★ STRICT RULES — these are non-negotiable:',
+    '1. DO NOT generate, invent, modify, round, or omit ANY numbers, percentages, monetary amounts, ratios, or counts.',
+    '2. DO NOT introduce new numerical estimates.',
+    '3. Preserve company names, legal references (IRC §482, OECD TPG, etc.) and the quartile method label verbatim.',
+    '4. Preserve the conclusion polarity (within / below / above the range) exactly.',
+    '5. Output language: ' + (lang === 'ja' ? 'Japanese (日本語)' : 'English'),
+    '',
+    'Your output will be marked as an "AI Draft" and reviewed by a human transfer pricing professional. Treat your role as a language editor over factually-fixed data.',
+  ].join('\n');
+  const usr = [
+    context.section ? `Section: ${context.section}` : '',
+    context.purpose ? `Purpose: ${context.purpose}` : '',
+    `Material to summarise (numbers must be reproduced verbatim):`,
+    '---',
+    text,
+    '---',
+    lang === 'ja' ? '上記の文章を要約してください。数値はすべてそのまま保持し、新たな数値を作らないでください。'
+                  : 'Summarise the above. Reproduce every number verbatim. Do not invent new figures.',
+  ].filter(Boolean).join('\n');
+  return { system: sys, user: usr };
+}
+
+/** Build the translation prompt with glossary anchoring. */
+function buildTranslationPrompt(text, fromLang, toLang, glossary = DEFAULT_GLOSSARY) {
+  const sys = [
+    'You are a professional translator specialising in transfer pricing documentation.',
+    '',
+    '★ STRICT RULES:',
+    '1. DO NOT translate numbers, percentages, currency codes, or monetary amounts. Keep them byte-identical.',
+    '2. DO NOT translate company names. Keep them verbatim.',
+    '3. DO NOT translate legal references (e.g. IRC §482, 措置法施規22の10, OECD TPG) — keep them verbatim.',
+    '4. DO NOT translate the quartile method label (IRS（§1.482） / Excel（QUARTILE.INC） / etc.).',
+    '5. Use the glossary below for term consistency.',
+    '6. Output must be translation-only with no explanations or surrounding prose.',
+    '',
+    'Glossary (' + fromLang + ' → ' + toLang + '):',
+    ...glossary.map(g => fromLang === 'ja' ? `  ${g.ja} → ${g.en}` : `  ${g.en} → ${g.ja}`),
+  ].join('\n');
+  const usr = [
+    `Translate the following from ${fromLang} to ${toLang}:`,
+    '---',
+    text,
+    '---',
+  ].join('\n');
+  return { system: sys, user: usr };
+}
+
+/**
+ * Verify that all numeric tokens, percentages, currency codes, and ALL_CAPS
+ * tokens from the source survive in the output. Pure / synchronous so it
+ * can run client-side as a guardrail on every AI invocation.
+ *
+ * @param {string} source
+ * @param {string} output
+ * @param {Object} [opts]
+ * @param {string[]} [opts.preservedNames] - additional names (companies, laws)
+ * @returns {{ok:boolean, missing:string[], altered:string[], sourceTokens:string[], outputTokens:string[]}}
+ */
+function verifyNumbersPreserved(source, output, opts = {}) {
+  // Tolerant tokeniser: matches number-with-optional-grouping, percentages,
+  // signed and unsigned, and a few common currency-suffix shapes.
+  const NUM_RE = /-?\d[\d,]*(?:\.\d+)?\s*(?:%|円|JPY|USD|EUR|GBP|CNY|KRW|SGD|THB|INR|AUD)?/g;
+  const normalise = (t) => String(t).replace(/\s+/g, '').replace(/,/g, '');
+  const src = (source.match(NUM_RE) || []).map(normalise);
+  const out = (output.match(NUM_RE) || []).map(normalise);
+  const outSet = new Set(out);
+  const missing = src.filter(t => !outSet.has(t));
+  // Quick "altered" heuristic: if output has tokens that look numeric but
+  // are not in the source we flag them so reviewers know to inspect.
+  const srcSet = new Set(src);
+  const altered = out.filter(t => /\d/.test(t) && !srcSet.has(t));
+  // Also enforce preservation of arbitrary additional strings (company / law names).
+  const extraMissing = [];
+  for (const n of (opts.preservedNames || [])) if (n && !output.includes(n)) extraMissing.push(n);
+  return {
+    ok: missing.length === 0 && altered.length === 0 && extraMissing.length === 0,
+    missing: [...missing, ...extraMissing],
+    altered,
+    sourceTokens: src,
+    outputTokens: out,
+  };
+}
+</script>
+
+<!-- =====================================================================
+  PHASE 7 / BLOCK 43 : AI provider HTTP layer + summarize / translate
+  ---------------------------------------------------------------------
+  All outputs are flagged as "draft" and returned with the verification
+  report so the UI can refuse to silently accept tampered output.
+===================================================================== -->
+<script id="ai-runtime">
+/** Default per-feature provider assignment if the user hasn't set one. */
+const AI_FEATURE_DEFAULTS = { summarise: 'openai', translate: 'openai', narrative: 'openai' };
+
+/** Sleep helper for retry/backoff. */
+function _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+/** Apply an exponential-backoff retry around an async function. */
+async function _withBackoff(fn, attempts = 3) {
+  let lastErr;
+  for (let i = 0; i < attempts; i++) {
+    try { return await fn(i); }
+    catch (e) { lastErr = e; if (i < attempts - 1) await _sleep(500 * Math.pow(2, i)); }
+  }
+  throw lastErr;
+}
+
+/**
+ * Low-level AI call. Returns the model's plain-text output.
+ * Tests can replace `window.__TPApp_aiMock` to intercept.
+ * @param {AiProviderKind} kind
+ * @param {{apiKey:string, model?:string, endpoint?:string}} providerCfg
+ * @param {string} system
+ * @param {string} user
+ * @returns {Promise<{text:string, tokensIn:number, tokensOut:number}>}
+ */
+async function aiCall(kind, providerCfg, system, user) {
+  const def = AI_PROVIDER_DEFS[kind];
+  if (!def) throw new Error('unknown provider: ' + kind);
+  if (window.__TPApp_aiMock) return window.__TPApp_aiMock(kind, providerCfg, system, user);
+  if (!providerCfg?.apiKey) throw new Error(`${def.label} の API キーが未設定です`);
+  const model = providerCfg.model || def.defaultModel;
+  const url   = def.buildUrl ? def.buildUrl(providerCfg, model) : (providerCfg.endpoint || def.defaultEndpoint);
+  if (!url) throw new Error(`${def.label} のエンドポイントが未設定です`);
+  const body  = def.buildBody(system, user, model);
+  const headers = def.buildHeaders(providerCfg);
+  return _withBackoff(async () => {
+    const res = await fetch(url, { method: 'POST', headers, body });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => '');
+      throw new Error(`${def.label} HTTP ${res.status}: ${detail.slice(0, 300)}`);
+    }
+    const json = await res.json();
+    return { text: def.parseBody(json), tokensIn: def.estimateTokens(system + user), tokensOut: def.estimateTokens(def.parseBody(json)) };
+  });
+}
+
+/**
+ * Public summarise() — never accepts user-typed numbers, only carefully
+ * curated app data. Returns a draft envelope with the verification report.
+ * @param {string} text
+ * @param {Object} [context]
+ * @param {{provider:AiProviderKind, model?:string, providerCfg:Object}} opts
+ * @returns {Promise<{draft:string, verify:Object, tokensIn:number, tokensOut:number, provider:string, isDraft:true}>}
+ */
+async function aiSummarize(text, context = {}, opts) {
+  const { system, user } = buildSummaryPrompt(text, context);
+  const res = await aiCall(opts.provider, opts.providerCfg, system, user);
+  const verify = verifyNumbersPreserved(text, res.text, { preservedNames: context.preservedNames });
+  await logAudit('AI_SUMMARIZE', { provider: opts.provider, tokensIn: res.tokensIn, tokensOut: res.tokensOut, section: context.section, verifyOk: verify.ok });
+  await logAudit('AI_NUMBER_CHECK', { kind: 'summarise', ok: verify.ok, missing: verify.missing.slice(0, 8), altered: verify.altered.slice(0, 8) });
+  return { draft: res.text, verify, tokensIn: res.tokensIn, tokensOut: res.tokensOut, provider: opts.provider, isDraft: true };
+}
+
+/** Public translate() — same draft + verification contract as summarise. */
+async function aiTranslate(text, fromLang, toLang, glossary, opts) {
+  const { system, user } = buildTranslationPrompt(text, fromLang, toLang, glossary || DEFAULT_GLOSSARY);
+  const res = await aiCall(opts.provider, opts.providerCfg, system, user);
+  const verify = verifyNumbersPreserved(text, res.text, { preservedNames: opts.preservedNames });
+  await logAudit('AI_TRANSLATE', { provider: opts.provider, fromLang, toLang, tokensIn: res.tokensIn, tokensOut: res.tokensOut, verifyOk: verify.ok });
+  await logAudit('AI_NUMBER_CHECK', { kind: 'translate', ok: verify.ok, missing: verify.missing.slice(0, 8), altered: verify.altered.slice(0, 8) });
+  return { draft: res.text, verify, tokensIn: res.tokensIn, tokensOut: res.tokensOut, provider: opts.provider, isDraft: true };
+}
+</script>
+
+<!-- =====================================================================
+  PHASE 7 / BLOCK 44 : FX rate store + interpolation
+===================================================================== -->
+<script id="fx-store">
+const FX_BASES   = ['TTM', 'TTS', 'TTB'];
+const FX_KINDS   = ['spot', 'avg'];
+const FX_TIMINGS = ['period-end', 'period-average', 'item-default'];
+
+/** Compose the compound primary key used by Dexie. */
+function _fxKey(base, quote, date, basis) { return `${base}/${quote}@${date}#${basis}`; }
+
+const fxStore = {
+  /**
+   * Insert one rate row (idempotent). Strict basis / kind validation.
+   * @returns {Promise<Object>} the persisted row
+   */
+  async put({ base, quote, date, basis = 'TTM', kind = 'spot', rate, source }) {
+    if (!base || !quote || !date) throw new Error('base / quote / date が必要です');
+    if (!FX_BASES.includes(basis)) throw new Error('basis must be TTM / TTS / TTB');
+    if (!FX_KINDS.includes(kind))  throw new Error('kind must be spot / avg');
+    if (typeof rate !== 'number' || !Number.isFinite(rate) || rate <= 0) throw new Error('rate must be a positive number');
+    const row = { id: _fxKey(base, quote, date, basis), base, quote, date, basis, kind, rate, source: source || 'manual', addedAt: Date.now() };
+    await db.fxRates.put(row);
+    await logAudit('FX_RATE_ADD', { base, quote, date, basis, kind, source });
+    return row;
+  },
+
+  /**
+   * Look up a rate. Returns the row plus an `interpolated` flag.
+   * @param {string} base   - source currency
+   * @param {string} quote  - target currency
+   * @param {string} date   - ISO date
+   * @param {Object} [opts]
+   * @param {string} [opts.basis='TTM']
+   * @param {boolean}[opts.interpolate=true]
+   * @param {string} [opts.kind] - filter spot/avg; default = any
+   * @returns {Promise<{rate:number, asOf:string, basis:string, source:string, interpolated:boolean}|null>}
+   */
+  async getRate(base, quote, date, opts = {}) {
+    const basis = opts.basis || 'TTM';
+    if (base === quote) return { rate: 1, asOf: date, basis, source: 'identity', interpolated: false };
+    const tryDirect = await db.fxRates.where('id').equals(_fxKey(base, quote, date, basis)).first();
+    if (tryDirect) return { rate: tryDirect.rate, asOf: tryDirect.date, basis, source: tryDirect.source, interpolated: false };
+    // Inverse lookup (quote -> base) flips the rate.
+    const tryInverse = await db.fxRates.where('id').equals(_fxKey(quote, base, date, basis)).first();
+    if (tryInverse) return { rate: 1 / tryInverse.rate, asOf: tryInverse.date, basis, source: tryInverse.source + ' (inverse)', interpolated: false };
+    if (opts.interpolate === false) return null;
+    // Interpolate: find nearest before & after, do linear interp by date.
+    const rows = await db.fxRates.where({ base, quote, basis }).toArray();
+    const before = rows.filter(r => r.date <= date).sort((a, b) => b.date.localeCompare(a.date))[0];
+    const after  = rows.filter(r => r.date >= date).sort((a, b) => a.date.localeCompare(b.date))[0];
+    if (before && after && before.id !== after.id) {
+      const t  = (new Date(date).getTime() - new Date(before.date).getTime()) / (new Date(after.date).getTime() - new Date(before.date).getTime());
+      const rate = before.rate + t * (after.rate - before.rate);
+      await logAudit('FX_INTERPOLATE', { base, quote, date, basis, before: before.date, after: after.date });
+      return { rate, asOf: `${before.date}↔${after.date}`, basis, source: `interp(${before.source} / ${after.source})`, interpolated: true };
+    }
+    if (before) return { rate: before.rate, asOf: before.date, basis, source: before.source, interpolated: true };
+    if (after)  return { rate: after.rate,  asOf: after.date,  basis, source: after.source,  interpolated: true };
+    // Inverse interpolation
+    const invRows = await db.fxRates.where({ base: quote, quote: base, basis }).toArray();
+    const invBefore = invRows.filter(r => r.date <= date).sort((a, b) => b.date.localeCompare(a.date))[0];
+    if (invBefore) return { rate: 1 / invBefore.rate, asOf: invBefore.date, basis, source: invBefore.source + ' (inverse)', interpolated: true };
+    return null;
+  },
+
+  /**
+   * Import a CSV of FX rows. Accepts the columns
+   *   base, quote, date, basis, rate, source, kind
+   * (basis defaults TTM, kind defaults spot).
+   * @param {string} csvText
+   * @returns {Promise<{added:number, skipped:number}>}
+   */
+  async importCsv(csvText) {
+    const parsed = Papa.parse(csvText, { header: true, skipEmptyLines: true });
+    let added = 0, skipped = 0;
+    for (const r of parsed.data) {
+      try {
+        await this.put({
+          base: String(r.base || r.from || '').toUpperCase().trim(),
+          quote: String(r.quote || r.to || '').toUpperCase().trim(),
+          date: String(r.date || r.asOf || '').trim(),
+          basis: (r.basis || 'TTM').toUpperCase().trim(),
+          kind: (r.kind || 'spot').toLowerCase().trim(),
+          rate: Number(r.rate),
+          source: r.source || 'csv',
+        });
+        added++;
+      } catch (e) { skipped++; }
+    }
+    await logAudit('FX_IMPORT', { added, skipped });
+    return { added, skipped };
+  },
+
+  /** Fetch a JSON list from a CORS-friendly API; same row shape as the CSV. */
+  async fetchFromApi(url, opts = {}) {
+    const res = await fetch(url, { headers: opts.headers || {} });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const json = await res.json();
+    const list = Array.isArray(json) ? json : (json.rates || []);
+    let added = 0;
+    for (const r of list) { try { await this.put(r); added++; } catch (_) {} }
+    await logAudit('FX_API_FETCH', { url, added });
+    return { added };
+  },
+
+  /** List all rates, optionally filtered. */
+  async list(filter = {}) {
+    let rows = await db.fxRates.toArray();
+    if (filter.base)  rows = rows.filter(r => r.base  === filter.base);
+    if (filter.quote) rows = rows.filter(r => r.quote === filter.quote);
+    rows.sort((a, b) => b.date.localeCompare(a.date));
+    return rows;
+  },
+};
+</script>
+
+<!-- =====================================================================
+  PHASE 7 / BLOCK 45 : Currency conversion + non-mutating normalisation
+  ---------------------------------------------------------------------
+  ★ DESIGN INVARIANT: this module NEVER writes back to a Company's
+  `financials` field. The canonical data is treated as immutable; this
+  module returns *separate derived structures* for the display layer.
+  Phase 4's `computePLI` / `calculateRange` therefore stay currency-
+  agnostic and PLI / range remain invariant under currency changes.
+===================================================================== -->
+<script id="fx-convert">
+/** Item-level default timing for the most common P&L / BS rows. */
+const FX_ITEM_DEFAULT_TIMING = {
+  // P&L → period-average (flows)
+  netSales: 'period-average', revenue: 'period-average',
+  cogs: 'period-average', operatingExpenses: 'period-average',
+  grossProfit: 'period-average', operatingIncome: 'period-average', operatingProfit: 'period-average',
+  rdExpense: 'period-average', rd: 'period-average',
+  interestExpense: 'period-average',
+  // BS Avg (already an average → use period-average for consistency)
+  avgTotalAssets: 'period-average', avgOperatingAssets: 'period-average',
+  avgNetReceivables: 'period-average', avgNetPayables: 'period-average',
+  avgNetInventory: 'period-average', avgNetPPE: 'period-average',
+  avgCash: 'period-average', avgCashEquivalents: 'period-average',
+  avgLIFOReserve: 'period-average', avgInvestedCapital: 'period-average',
+  // BS Period-end (stock)
+  totalAssets: 'period-end', fixedAssets: 'period-end',
+  inventory: 'period-end', receivables: 'period-end', payables: 'period-end',
+  depreciation: 'period-average',
+};
+
+/** Convert a single amount with full disclosure metadata. */
+async function fxConvertAmount(amount, from, to, opts = {}) {
+  if (amount == null || amount === '') return { value: null, rate: null, disclosure: null };
+  if (from === to)                      return { value: amount, rate: 1, disclosure: { from, to, rate: 1, basis: opts.basis || 'TTM', timing: opts.timing || 'period-end', asOf: opts.date || null, source: 'identity', interpolated: false } };
+  const basis  = opts.basis  || 'TTM';
+  // For period-average, prefer rows tagged kind='avg' if present.
+  const r = await fxStore.getRate(from, to, opts.date || new Date().toISOString().slice(0, 10), { basis, interpolate: opts.interpolate !== false, kind: opts.kind });
+  if (!r) return { value: null, rate: null, disclosure: { from, to, rate: null, basis, timing: opts.timing || 'period-end', asOf: opts.date, source: null, interpolated: false, missing: true } };
+  return {
+    value: Number(amount) * r.rate,
+    rate: r.rate,
+    disclosure: { from, to, rate: r.rate, basis, timing: opts.timing || 'period-end', asOf: r.asOf, source: r.source, interpolated: r.interpolated, missing: false },
+  };
+}
+
+/**
+ * Build display-layer financials for the entire comparable set + tested
+ * party so the UI can show absolute figures in a single report currency.
+ *
+ * ★ Mutation safety: this function does NOT touch the input companies'
+ * `financials`. It deep-clones their year rows and writes the converted
+ * values onto the clone only.
+ *
+ * @param {Project} project
+ * @param {Company[]} companies
+ * @param {Company|null} testedParty
+ * @param {string} reportCurrency
+ * @param {Object} [opts]
+ * @param {string} [opts.basis='TTM']
+ * @param {string} [opts.timing='item-default']
+ * @returns {Promise<{
+ *   companiesDisplay: Array<{id:string, name:string, country:string, currency:string, financialsDisplay:Object}>,
+ *   testedPartyDisplay: Object|null,
+ *   disclosure: Array<Object>,
+ *   missingCurrencies: string[],
+ * }>}
+ */
+async function normalizeToReportCurrency(project, companies, testedParty, reportCurrency, opts = {}) {
+  const basis  = opts.basis  || 'TTM';
+  const timing = opts.timing || 'item-default';
+  /** @type {Map<string, Object>} disclosure rows keyed by currency-pair + timing + basis */
+  const disclosureMap = new Map();
+  const missingCurrencies = new Set();
+
+  /** Convert one company's year rows into a parallel display dictionary. */
+  const transformOne = async (company) => {
+    if (!company) return null;
+    const origCurrency = _firstCurrency(company);
+    const display = {};
+    for (const [year, row] of Object.entries(company.financials || {})) {
+      // Determine the fiscal-year-end date in ISO form for rate lookup.
+      const fye = `${year}-12-31`;
+      const displayRow = { year: Number(year) };
+      for (const [field, value] of Object.entries(row)) {
+        if (field === 'year' || field === 'currency') continue;
+        if (typeof value !== 'number' || !Number.isFinite(value)) { displayRow[field] = value; continue; }
+        const t = timing === 'item-default' ? (FX_ITEM_DEFAULT_TIMING[field] || 'period-end') : timing;
+        const r = await fxConvertAmount(value, origCurrency, reportCurrency, { basis, timing: t, date: fye });
+        displayRow[field] = r.value;
+        // Record disclosure once per unique (from, to, t, basis).
+        if (r.disclosure) {
+          const k = `${r.disclosure.from}->${r.disclosure.to}|${r.disclosure.timing}|${r.disclosure.basis}`;
+          if (!disclosureMap.has(k)) disclosureMap.set(k, r.disclosure);
+          if (r.disclosure.missing) missingCurrencies.add(origCurrency);
+        }
+      }
+      displayRow.currency = reportCurrency;
+      display[year] = displayRow;
+    }
+    return { id: company.id, name: company.name, country: company.country, currency: origCurrency, financialsDisplay: display };
+  };
+
+  const companiesDisplay = [];
+  for (const c of companies) companiesDisplay.push(await transformOne(c));
+  const testedPartyDisplay = testedParty ? await transformOne(testedParty) : null;
+
+  const disclosure = [...disclosureMap.values()];
+  await logAudit('CURRENCY_NORMALIZE', { projectId: project.id, reportCurrency, basis, timing,
+    fromCurrencies: [...new Set(companiesDisplay.filter(Boolean).map(c => c.currency))],
+    missing: [...missingCurrencies] }, project.id);
+  return { companiesDisplay, testedPartyDisplay, disclosure, missingCurrencies: [...missingCurrencies] };
+}
+
+/** Lookup the dominant currency on a company (latest year wins). */
+function _firstCurrency(company) {
+  const ys = getYearsAvailable(company);
+  for (const y of ys.slice().reverse()) {
+    const c = company.financials[String(y)]?.currency;
+    if (c) return String(c).toUpperCase();
+  }
+  return company.currency || 'JPY';
+}
+
+/**
+ * Build the disclosure table the report renderer will lay out as
+ * "為替換算の前提". Pure function that aggregates each unique
+ * (from, to, timing, basis) into a single row.
+ */
+function getConversionDisclosure(normaliseResult) {
+  if (!normaliseResult) return [];
+  return [...normaliseResult.disclosure].sort((a, b) =>
+    (a.from + a.to + a.timing + a.basis).localeCompare(b.from + b.to + b.timing + b.basis));
+}
+</script>
+
+<!-- =====================================================================
+  PHASE 7 / BLOCK 46 : TPApp.{ai, fx} facade
+===================================================================== -->
+<script id="tp-app-phase7">
+TPApp.ai = {
+  providers: AI_PROVIDER_DEFS,
+  glossary: DEFAULT_GLOSSARY,
+  summarize:               (text, ctx, opts) => aiSummarize(text, ctx, opts),
+  translate:               (text, from, to, glossary, opts) => aiTranslate(text, from, to, glossary, opts),
+  verifyNumbersPreserved,
+  encryptString,
+  decryptString,
+  buildSummaryPrompt,
+  buildTranslationPrompt,
+};
+
+TPApp.fx = {
+  // Storage
+  put:        (row) => fxStore.put(row),
+  list:       (filter) => fxStore.list(filter),
+  getRate:    (from, to, date, opts) => fxStore.getRate(from, to, date, opts),
+  importCsv:  (text) => fxStore.importCsv(text),
+  fetchApi:   (url, opts) => fxStore.fetchFromApi(url, opts),
+  // Conversion (display-only)
+  convert:                    fxConvertAmount,
+  normalizeToReportCurrency:  normalizeToReportCurrency,
+  getConversionDisclosure:    getConversionDisclosure,
+  /** Set the display currency on the active project + emit audit event. */
+  async setDisplayCurrency(currency, projectId) {
+    const project = projectId ? await db.projects.get(projectId) : null;
+    if (project) {
+      project.settings = project.settings || {};
+      project.settings.displayCurrency = currency;
+      await db.projects.put(project);
+    }
+    await logAudit('CURRENCY_DISPLAY_CHANGE', { projectId, currency });
+  },
+  // Constants exported for the UI
+  bases:    FX_BASES,
+  kinds:    FX_KINDS,
+  timings:  FX_TIMINGS,
+  itemDefaultTiming: FX_ITEM_DEFAULT_TIMING,
+};
+</script>
+
+
+<!-- =====================================================================
   ROOT TEMPLATE
 ===================================================================== -->
 <div x-data="tpApp()" x-init="init()" x-cloak class="h-screen flex flex-col">
@@ -10228,6 +11163,48 @@ Foo Corp,JP,334413,2024,1000000,80000,..."></textarea>
                 <div class="flex-1"></div>
                 <button class="px-4 py-2 text-sm border rounded" :disabled="reportGenerating" @click="doGenerateAllJurisdictions('docx')">全法域 Word 一括</button>
               </div>
+
+              <!-- Phase 7: AI draft + translation -->
+              <div class="mt-4 border-t pt-3">
+                <h4 class="font-semibold mb-2 text-sm">AI ドラフト (要約・翻訳)</h4>
+                <p class="text-[11px] text-amber-700 bg-amber-50 p-2 rounded mb-2">
+                  ⓘ AI 出力は <strong>ドラフト</strong> として表示されます。数値・企業名・法令名はアプリの確定値が保持されているか自動チェックされますが、必ず人間がレビューしてから正式文書に採用してください。
+                </p>
+                <div class="flex flex-wrap gap-2 items-center text-xs">
+                  <button class="px-3 py-1.5 border rounded" @click="aiDraftExecutive()" :disabled="aiDrafting">エグゼクティブサマリー要約</button>
+                  <button class="px-3 py-1.5 border rounded" @click="aiTranslateConclusion()" :disabled="aiDrafting">結論文を翻訳 (日 → 英)</button>
+                  <span x-show="aiDrafting" class="text-slate-500">生成中...</span>
+                </div>
+                <template x-if="aiDraftOutput">
+                  <div class="mt-3 border rounded p-3 text-xs bg-slate-50">
+                    <div class="flex items-center gap-2 mb-2">
+                      <span class="font-semibold">AI ドラフト</span>
+                      <span class="text-[10px] px-1.5 py-0.5 rounded"
+                            :class="aiDraftOutput.verify?.ok ? 'bg-emerald-200 text-emerald-900' : 'bg-rose-200 text-rose-900'"
+                            x-text="aiDraftOutput.verify?.ok ? '数値保全 OK' : '数値保全 NG'"></span>
+                      <span class="text-[10px] text-slate-500" x-text="'provider=' + aiDraftOutput.provider"></span>
+                      <span class="text-[10px] text-slate-500" x-text="'tokens≈' + aiDraftOutput.tokensIn + '/' + aiDraftOutput.tokensOut"></span>
+                      <div class="flex-1"></div>
+                      <button class="text-xs px-2 py-0.5 border rounded" @click="aiDraftOutput = null">閉じる</button>
+                    </div>
+                    <template x-if="aiDraftOutput.kind === 'translate'">
+                      <div class="grid grid-cols-2 gap-3">
+                        <div><div class="text-[10px] text-slate-500 mb-1">原文 (日本語)</div><pre class="whitespace-pre-wrap" x-text="aiDraftOutput.source"></pre></div>
+                        <div><div class="text-[10px] text-slate-500 mb-1">訳文ドラフト (English)</div><pre class="whitespace-pre-wrap" x-text="aiDraftOutput.draft"></pre></div>
+                      </div>
+                    </template>
+                    <template x-if="aiDraftOutput.kind !== 'translate'">
+                      <pre class="whitespace-pre-wrap" x-text="aiDraftOutput.draft"></pre>
+                    </template>
+                    <template x-if="!aiDraftOutput.verify?.ok">
+                      <div class="mt-2 text-[11px] text-rose-700">
+                        欠落: <span x-text="aiDraftOutput.verify.missing.join(', ')"></span><br>
+                        改変の疑い: <span x-text="aiDraftOutput.verify.altered.join(', ')"></span>
+                      </div>
+                    </template>
+                  </div>
+                </template>
+              </div>
             </div>
           </div>
         </template>
@@ -10267,7 +11244,20 @@ Foo Corp,JP,334413,2024,1000000,80000,..."></textarea>
             </template>
           </div>
 
-          <div class="mt-4 flex justify-end"><button class="px-3 py-1.5 bg-blue-600 text-white text-sm rounded" @click="saveAiProviders()">保存</button></div>
+          <!-- Phase 7: passphrase encryption -->
+          <div class="mt-4 border-t pt-3 text-sm">
+            <h3 class="font-semibold mb-2">APIキー暗号化 (Phase 7)</h3>
+            <div class="text-xs text-slate-500 mb-2">
+              パスフレーズで AES-GCM 暗号化して IndexedDB に保存します。<br>
+              キーは選択した AI プロバイダ以外には一切送信されません (ローカル保存のみ)。
+            </div>
+            <div class="flex gap-2 items-center">
+              <input type="password" class="flex-1 px-2 py-1 border rounded text-sm" placeholder="パスフレーズ" x-model="aiEncryptPassphrase">
+              <button class="px-3 py-1 text-xs border rounded" @click="encryptAiKeys()">暗号化して保存</button>
+              <button class="px-3 py-1 text-xs border rounded" @click="decryptAiKeys()">復号して読込</button>
+              <span class="text-xs" x-text="aiEncryptStatus"></span>
+            </div>
+          </div>
         </div>
 
         <!-- FX -->
@@ -10295,6 +11285,70 @@ Foo Corp,JP,334413,2024,1000000,80000,..."></textarea>
           <div class="mt-3 flex justify-end gap-2">
             <button class="px-3 py-1.5 text-sm border rounded" @click="importFxCsv()">CSV取り込み</button>
             <button class="px-3 py-1.5 text-sm bg-blue-600 text-white rounded" @click="saveFxManual()">保存</button>
+          </div>
+        </div>
+
+        <!-- FX history database (Phase 7) -->
+        <div class="bg-white rounded-lg shadow p-5">
+          <h2 class="font-semibold text-lg mb-3">FX 履歴データベース (Phase 7)</h2>
+          <p class="text-xs text-slate-500 mb-3">
+            過年度の通貨換算用レートを蓄積します。基準 (TTM/TTS/TTB) とデータソースを記録し、開示テーブルに反映されます。
+            <strong>PLI・四分位レンジ (％) は通貨換算の影響を受けません。換算は絶対額の表示・規模スクリーニングに限定されます。</strong>
+          </p>
+
+          <h3 class="text-sm font-semibold mb-2">レート登録</h3>
+          <div class="grid grid-cols-7 gap-2 text-xs">
+            <div><label class="block text-slate-500">基準通貨</label><input class="w-full px-2 py-1 border rounded" x-model="fxDraft.base" placeholder="USD"></div>
+            <div><label class="block text-slate-500">対象通貨</label><input class="w-full px-2 py-1 border rounded" x-model="fxDraft.quote" placeholder="JPY"></div>
+            <div><label class="block text-slate-500">日付</label><input type="date" class="w-full px-2 py-1 border rounded" x-model="fxDraft.date"></div>
+            <div><label class="block text-slate-500">基準</label>
+              <select class="w-full px-2 py-1 border rounded" x-model="fxDraft.basis">
+                <option value="TTM">TTM (仲値)</option><option value="TTS">TTS (電信売)</option><option value="TTB">TTB (電信買)</option>
+              </select>
+            </div>
+            <div><label class="block text-slate-500">種別</label>
+              <select class="w-full px-2 py-1 border rounded" x-model="fxDraft.kind">
+                <option value="spot">spot (日次)</option><option value="avg">avg (期中平均)</option>
+              </select>
+            </div>
+            <div><label class="block text-slate-500">レート</label><input type="number" step="0.0001" class="w-full px-2 py-1 border rounded" x-model.number="fxDraft.rate"></div>
+            <div><label class="block text-slate-500">ソース</label><input class="w-full px-2 py-1 border rounded" x-model="fxDraft.source" placeholder="三菱UFJ銀行"></div>
+          </div>
+          <div class="mt-2 flex justify-end"><button class="px-3 py-1.5 text-xs bg-blue-600 text-white rounded" @click="addFxRow()">追加</button></div>
+
+          <h3 class="text-sm font-semibold mt-4 mb-2">CSV インポート</h3>
+          <textarea rows="3" class="w-full px-2 py-1 border rounded text-xs font-mono" x-model="fxCsvImportText" placeholder="base,quote,date,basis,kind,rate,source&#10;USD,JPY,2023-12-31,TTM,spot,141.50,日本銀行"></textarea>
+          <div class="flex justify-end mt-2"><button class="px-3 py-1.5 text-xs border rounded" @click="importFxCsvV2()">CSV取込</button></div>
+
+          <h3 class="text-sm font-semibold mt-4 mb-2">API 取得</h3>
+          <div class="flex gap-2 items-center text-xs">
+            <input class="flex-1 px-2 py-1 border rounded" placeholder="https://api.example.com/rates" x-model="fxApiUrlInput">
+            <button class="px-2 py-1 border rounded" @click="fetchFxFromApi()">取得</button>
+            <span class="text-slate-500">※ CORS 許可のあるエンドポイントのみ</span>
+          </div>
+
+          <h3 class="text-sm font-semibold mt-4 mb-2">登録済レート (<span x-text="fxRows.length"></span>)</h3>
+          <div class="overflow-auto max-h-64 border rounded">
+            <table class="w-full text-xs">
+              <thead class="bg-slate-100 sticky top-0">
+                <tr><th class="px-2 py-1">基準</th><th>対象</th><th>日付</th><th>基準</th><th>種別</th><th class="text-right">レート</th><th>ソース</th><th></th></tr>
+              </thead>
+              <tbody>
+                <template x-for="r in fxRows" :key="r.id">
+                  <tr class="border-t">
+                    <td class="px-2 py-1 font-mono" x-text="r.base"></td>
+                    <td class="px-2 py-1 font-mono" x-text="r.quote"></td>
+                    <td class="px-2 py-1" x-text="r.date"></td>
+                    <td class="px-2 py-1" x-text="r.basis"></td>
+                    <td class="px-2 py-1" x-text="r.kind"></td>
+                    <td class="px-2 py-1 text-right font-mono" x-text="r.rate"></td>
+                    <td class="px-2 py-1 text-slate-600" x-text="r.source"></td>
+                    <td class="px-2 py-1"><button class="text-xs px-2 py-0.5 border rounded text-rose-600" @click="deleteFxRow(r.id)">×</button></td>
+                  </tr>
+                </template>
+                <template x-if="!fxRows.length"><tr><td colspan="8" class="px-2 py-3 text-center text-slate-400">レートが登録されていません</td></tr></template>
+              </tbody>
+            </table>
           </div>
         </div>
 
