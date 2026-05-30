@@ -869,6 +869,8 @@ function tpApp() {
         if (!this.resultsActiveJ && js.length) this.resultsActiveJ = js[0];
         this.loadResultsView();
       }
+      // Phase 6: hydrate report builder.
+      if (id === 'reports') this.loadReports();
     },
     labelOf(item) { return this.lang === 'en' ? item.labelEn : item.labelJa; },
 
@@ -2056,6 +2058,101 @@ function tpApp() {
       downloadBlob(blob, `${_slug(this.currentProject.name)}_${_dateTag()}_comparison.xlsx`);
     },
 
+    /* ====================================================================
+       PHASE 6 STATE & METHODS — report generation (docx / pdf / pptx)
+       ==================================================================== */
+    REPORT_TEMPLATES, REPORT_SECTION_LABELS,
+    reportCfg: {
+      jurisdictionId: '', template: 'BEPS_LOCAL_FILE', lang: 'ja',
+      multiMode: 'individual', includeConfidentiality: false,
+      includedSections: [...REPORT_SECTION_IDS],
+      meta: { title: '', subtitle: '', testedPartyName: '', period: '', author: '', date: new Date().toISOString().slice(0,10), confidentialityTag: '', logoDataUrl: null },
+    },
+    reportModel: null,
+    reportSectionUI: [],
+    reportGenerating: false,
+    reportProgressMsg: '',
+
+    /** Pre-load section toggles + model preview when entering reports view. */
+    async loadReports() {
+      if (!this.currentProject) return;
+      const js = this.resultsJurisdictions;
+      if (!this.reportCfg.jurisdictionId && js.length) this.reportCfg.jurisdictionId = js[0];
+      // Default title/period
+      if (!this.reportCfg.meta.title)    this.reportCfg.meta.title    = `Transfer Pricing Benchmarking Report - ${this.reportCfg.jurisdictionId}`;
+      if (!this.reportCfg.meta.subtitle) this.reportCfg.meta.subtitle = this.currentProject.name || '';
+      if (!this.reportCfg.meta.testedPartyName) {
+        const tp = this.currentProject.testedPartyId ? await db.companies.get(this.currentProject.testedPartyId) : null;
+        this.reportCfg.meta.testedPartyName = tp?.name || '';
+      }
+      this.reportCfg.includedSections = [...(REPORT_TEMPLATES[this.reportCfg.template]?.sections || REPORT_SECTION_IDS)];
+      await this.loadReportPreview();
+    },
+
+    /** Build a fresh report model and section inventory for the preview pane. */
+    async loadReportPreview() {
+      if (!this.currentProject || !this.reportCfg.jurisdictionId) { this.reportModel = null; this.reportSectionUI = []; return; }
+      try {
+        this.reportCfg.includedSections = [...(REPORT_TEMPLATES[this.reportCfg.template]?.sections || REPORT_SECTION_IDS)];
+        const model = await buildReportModel(this.currentProject.id, this.reportCfg.jurisdictionId, {
+          template: this.reportCfg.template, lang: this.reportCfg.lang,
+          meta: { ...this.reportCfg.meta, confidentialityTag: this.reportCfg.includeConfidentiality ? this.reportCfg.meta.confidentialityTag : '' },
+          includeSections: this.reportCfg.includedSections,
+        });
+        this.reportModel = model;
+        this.reportSectionUI = reportSectionInventory(model);
+      } catch (e) { console.error(e); this.toast(e.message, 'error'); }
+    },
+
+    /** Logo upload → base64 dataURL. */
+    onLogoPick(ev) {
+      const f = ev.target.files?.[0]; if (!f) return;
+      const r = new FileReader();
+      r.onload = () => { this.reportCfg.meta.logoDataUrl = r.result; this.loadReportPreview(); };
+      r.readAsDataURL(f);
+      ev.target.value = '';
+    },
+
+    /** Generate one format and trigger a download. */
+    async doGenerateReport(format) {
+      if (!this.currentProject || !this.reportCfg.jurisdictionId) return;
+      this.reportGenerating = true;
+      this.reportProgressMsg = `${format.toUpperCase()} を生成中...`;
+      try {
+        const { blob } = await generateReport(this.currentProject.id, this.reportCfg.jurisdictionId, format, this.reportCfg.template, {
+          lang: this.reportCfg.lang,
+          meta: { ...this.reportCfg.meta, confidentialityTag: this.reportCfg.includeConfidentiality ? this.reportCfg.meta.confidentialityTag : '' },
+          includeSections: this.reportCfg.includedSections,
+        });
+        const filename = `${_slug(this.currentProject.name)}_${this.reportCfg.jurisdictionId}_${_dateTag()}.${REPORT_EXT[format]}`;
+        downloadBlob(blob, filename);
+        this.toast(`${format.toUpperCase()} レポートをダウンロードしました`, 'success');
+      } catch (e) {
+        console.error(e); this.toast('生成失敗: ' + e.message, 'error');
+      } finally {
+        this.reportGenerating = false; this.reportProgressMsg = '';
+      }
+    },
+
+    /** Generate one format per jurisdiction in sequence. */
+    async doGenerateAllJurisdictions(format) {
+      if (!this.currentProject) return;
+      this.reportGenerating = true;
+      try {
+        for (const j of this.resultsJurisdictions) {
+          this.reportProgressMsg = `${j} の ${format.toUpperCase()} を生成中...`;
+          const { blob } = await generateReport(this.currentProject.id, j, format, this.reportCfg.template, {
+            lang: this.reportCfg.lang,
+            meta: { ...this.reportCfg.meta, confidentialityTag: this.reportCfg.includeConfidentiality ? this.reportCfg.meta.confidentialityTag : '' },
+            includeSections: this.reportCfg.includedSections,
+          });
+          downloadBlob(blob, `${_slug(this.currentProject.name)}_${j}_${_dateTag()}.${REPORT_EXT[format]}`);
+        }
+        this.toast(`${this.resultsJurisdictions.length} 件のレポートを出力しました`, 'success');
+      } catch (e) { this.toast(e.message, 'error'); }
+      finally { this.reportGenerating = false; this.reportProgressMsg = ''; }
+    },
+
     /* ---- Industry code lookup UI ---- */
     /** Import a Census Bureau concordance CSV file. */
     async onConcordanceCsvPick(ev) {
@@ -2948,6 +3045,178 @@ async function runSelfTest() {
     }
     for (const k of ['acceptedToXlsx','rejectedToXlsx','rangeToXlsx','comparisonToXlsx','toCsv']) {
       if (typeof TPApp.export[k] !== 'function') throw new Error('missing TPApp.export.' + k);
+    }
+  });
+
+  /* ================== Phase 6 acceptance checks ================== */
+
+  async function _setupReportFixture() {
+    // Build a small Ashimori-flavoured project that exercises every section.
+    const projectId = 'p6-' + uuid();
+    const tpId = 'tp-' + uuid();
+    const cId  = 'c-' + uuid();
+    await db.companies.put({
+      id: tpId, name: 'Ashimori Thailand (TP)', country: 'TH',
+      industryCodes: { SIC: { primary: '3714' } }, industryCode: '3714',
+      businessDescription: 'Tested party - automotive parts manufacturer in Thailand.',
+      financials: { '2024': { netSales: 1000000, operatingIncome: 30000, cogs: 700000, operatingExpenses: 270000 } },
+      farProfile: { functions: ['manufacturing'], assets: ['production equipment'], risks: ['market'] },
+      independenceData: { largestShareholderPct: 100 },
+    });
+    await db.companies.put({
+      id: cId, name: 'Comparable Co Ltd', country: 'TH',
+      industryCodes: { SIC: { primary: '3714' } }, industryCode: '3714',
+      businessDescription: 'Independent Thai auto parts manufacturer.',
+      financials: {
+        '2022': { netSales: 800000, operatingIncome: 50000, cogs: 600000, operatingExpenses: 150000 },
+        '2023': { netSales: 850000, operatingIncome: 60000, cogs: 620000, operatingExpenses: 170000 },
+        '2024': { netSales: 900000, operatingIncome: 70000, cogs: 650000, operatingExpenses: 180000 },
+      },
+      farProfile: { functions: ['manufacturing'], assets: ['production equipment'], risks: ['market'] },
+      independenceData: { largestShareholderPct: 30 },
+    });
+    const project = {
+      id: projectId, name: 'Phase 6 Fixture', createdAt: Date.now(), updatedAt: Date.now(),
+      targetJurisdiction: ['JP'], testedPartyId: tpId,
+      comparables: [cId], excludedCompanies: [], screeningHistory: [], scoringConfig: {}, fxData: {}, settings: {}, notes: '',
+      screeningResults: { JP: { testedPartyId: tpId, initialPoolCount: 5,
+        stages: [
+          { id: 'S1', label: 'Database Search', type: 'QUANTITATIVE',   inputCount: 5, passCount: 5, rejectCount: 0, rejectionBreakdown: {} },
+          { id: 'S2', label: 'Bulk Rejection',  type: 'BULK_REJECTION', inputCount: 5, passCount: 3, rejectCount: 2, rejectionBreakdown: { 'Avg op loss': 1, 'Description missing': 1 } },
+          { id: 'S4', label: 'Qualitative Review', type: 'QUALITATIVE_REVIEW', inputCount: 3, passCount: 1, rejectCount: 2, rejectionBreakdown: { 'Is a controlled entity': 2 } },
+        ],
+        acceptedCompanies: [cId],
+        rejectedCompanies: [
+          { companyId: 'r1', stage: 'S2', reason: 'Avg op loss' },
+          { companyId: 'r2', stage: 'S2', reason: 'Description missing' },
+          { companyId: 'r3', stage: 'S4', reason: 'Is a controlled entity' },
+          { companyId: 'r4', stage: 'S4', reason: 'Is a controlled entity' },
+        ],
+        pendingReview: [], decisions: { [cId]: { companyId: cId, finalStatus: 'ACCEPTED', rejectedAtStage: null, rejectionReason: null, stageHistory: [] } },
+      }},
+      analysisResults: { JP: {
+        executedAt: new Date().toISOString(), pliType: 'NET_COST_PLUS', method: 'WEIGHTED_AVG', quartileMethod: 'IRS', years: null,
+        pliRows: [{ companyId: cId, name: 'Comparable Co Ltd', value: 0.0762,
+          breakdown: [
+            { year: 2022, numerator: 50000, denominator: 750000, ratio: 0.0667 },
+            { year: 2023, numerator: 60000, denominator: 790000, ratio: 0.0759 },
+            { year: 2024, numerator: 70000, denominator: 830000, ratio: 0.0843 },
+          ]}],
+        range: { count: 1, min: 0.0762, lower: 0.0762, median: 0.0762, upper: 0.0762, max: 0.0762, lowerP: 25, upperP: 75, centralTendency: 'MEDIAN', quartileMethod: 'IRS' },
+        testedPartyPli: 0.03, classification: classifyTestedParty(0.03, { lower: 0.0762, median: 0.0762, upper: 0.0762 }),
+        wca: null, similarity: [{ companyId: cId, name: 'Comparable Co Ltd', total: 88.5, breakdown: { industry: 100, size: 80, far: 100, geo: 100, profile: 50 } }],
+        similarityWeights: SIMILARITY_DEFAULT_WEIGHTS,
+      }},
+    };
+    await db.projects.put(project);
+    return { projectId, cleanup: () => Promise.all([db.projects.delete(projectId), db.companies.delete(tpId), db.companies.delete(cId)]) };
+  }
+
+  await check('Phase 6 - chart-to-image renders non-empty PNG', async () => {
+    const funnel = renderFunnelImageDataUrl(
+      [{ id: 'S1', label: 'A', inputCount: 10, passCount: 8, rejectCount: 2 }, { id: 'S2', label: 'B', inputCount: 8, passCount: 5, rejectCount: 3 }], 10);
+    if (!funnel.startsWith('data:image/png;base64,')) throw new Error('funnel not PNG');
+    if (funnel.length < 1000) throw new Error('funnel image too small');
+    const rng = renderRangePlotImageDataUrl({ min: 0.01, lower: 0.02, median: 0.03, upper: 0.04, max: 0.05 }, [0.02, 0.025, 0.03, 0.035, 0.04], 0.025, { title: 'Test (IRS)' });
+    if (!rng.startsWith('data:image/png;base64,')) throw new Error('range not PNG');
+  });
+
+  await check('Phase 6 - report model carries quartile method badge', async () => {
+    const f = await _setupReportFixture();
+    const model = await buildReportModel(f.projectId, 'JP', { template: 'BEPS_LOCAL_FILE' });
+    if (!model.quartileMeta?.label.includes('IRS')) throw new Error('quartile meta missing');
+    if (!model.range?.quartileMeta) throw new Error('range section meta missing');
+    if (!model.legal?.primary?.includes('措置法')) throw new Error('JP legal reference missing');
+    await f.cleanup();
+  });
+
+  await check('Phase 6 - JP_LOCAL injects 同種の事業 narrative', async () => {
+    const f = await _setupReportFixture();
+    const model = await buildReportModel(f.projectId, 'JP', { template: 'JP_LOCAL' });
+    if (!model.dataSource?.jpIntro || !model.dataSource.jpIntro.includes('同種の事業')) throw new Error('jpIntro missing');
+    await f.cleanup();
+  });
+
+  await check('Phase 6 - section inventory respects template subset', async () => {
+    const f = await _setupReportFixture();
+    const model = await buildReportModel(f.projectId, 'JP', { template: 'BEPS_MASTER_FILE' });
+    if (model.sectionsOrdered.includes('screening')) throw new Error('master file should omit screening');
+    if (!model.sectionsOrdered.includes('range')) throw new Error('master file must include range');
+    await f.cleanup();
+  });
+
+  await check('Phase 6 - section toggles propagate', async () => {
+    const f = await _setupReportFixture();
+    const model = await buildReportModel(f.projectId, 'JP', { template: 'BEPS_LOCAL_FILE', includeSections: ['exec', 'range', 'conclusion'] });
+    if (model.sectionsOrdered.length !== 3) throw new Error('expected 3 sections');
+    if (!model.sectionsOrdered.every(id => ['exec','range','conclusion'].includes(id))) throw new Error('wrong sections');
+    await f.cleanup();
+  });
+
+  await check('Phase 6 - Word (.docx) generates non-trivial blob', async () => {
+    const f = await _setupReportFixture();
+    const { blob } = await generateReport(f.projectId, 'JP', 'docx', 'BEPS_LOCAL_FILE');
+    if (blob.type !== REPORT_MIME.docx) throw new Error('mime: ' + blob.type);
+    if (blob.size < 5000) throw new Error('docx too small: ' + blob.size);
+    // .docx is a zip; magic bytes are PK\x03\x04
+    const buf = new Uint8Array(await blob.arrayBuffer());
+    if (buf[0] !== 0x50 || buf[1] !== 0x4B) throw new Error('not a zip / docx');
+    await f.cleanup();
+  });
+
+  await check('Phase 6 - PDF generates non-trivial blob with PDF magic', async () => {
+    const f = await _setupReportFixture();
+    const { blob } = await generateReport(f.projectId, 'JP', 'pdf', 'BEPS_LOCAL_FILE');
+    if (blob.size < 3000) throw new Error('pdf too small');
+    const head = await blob.slice(0, 5).text();
+    if (head !== '%PDF-') throw new Error('not a PDF (head=' + head + ')');
+    await f.cleanup();
+  });
+
+  await check('Phase 6 - PowerPoint generates non-trivial blob', async () => {
+    const f = await _setupReportFixture();
+    const { blob } = await generateReport(f.projectId, 'JP', 'pptx', 'BEPS_LOCAL_FILE');
+    if (blob.size < 5000) throw new Error('pptx too small');
+    const buf = new Uint8Array(await blob.arrayBuffer());
+    if (buf[0] !== 0x50 || buf[1] !== 0x4B) throw new Error('not a zip / pptx');
+    await f.cleanup();
+  });
+
+  await check('Phase 6 - per-jurisdiction reports are generated independently', async () => {
+    const f = await _setupReportFixture();
+    // Copy the JP result onto a second jurisdiction so we can render two
+    // reports back-to-back from the same project.
+    const p = await db.projects.get(f.projectId);
+    p.targetJurisdiction = ['JP', 'OECD_GENERIC'];
+    p.screeningResults.OECD_GENERIC = p.screeningResults.JP;
+    p.analysisResults.OECD_GENERIC  = p.analysisResults.JP;
+    await db.projects.put(p);
+    const a = await generateReport(f.projectId, 'JP',           'docx', 'BEPS_LOCAL_FILE');
+    const b = await generateReport(f.projectId, 'OECD_GENERIC', 'docx', 'BEPS_LOCAL_FILE');
+    if (a.blob.size === b.blob.size) {
+      // Not a hard fail; the JP legal reference changes the byte stream, so
+      // identical sizes would be suspicious. Tolerate a 5 byte tie.
+      if (Math.abs(a.blob.size - b.blob.size) < 5) throw new Error('reports look identical');
+    }
+    if (!a.model.legal?.primary.includes('措置法')) throw new Error('JP reference lost in model A');
+    if (a.model.legal?.primary === b.model.legal?.primary) throw new Error('legal references should differ');
+    await f.cleanup();
+  });
+
+  await check('Phase 6 - REPORT_GENERATE audit event emitted', async () => {
+    const f = await _setupReportFixture();
+    await generateReport(f.projectId, 'JP', 'docx', 'BEPS_LOCAL_FILE');
+    const recent = await db.auditLog.orderBy('ts').reverse().limit(50).toArray();
+    const evt = recent.find(e => e.action === 'REPORT_GENERATE');
+    if (!evt) throw new Error('audit event missing');
+    if (!Array.isArray(evt.payload?.sections)) throw new Error('payload.sections missing');
+    if (!evt.payload?.bytes) throw new Error('payload.bytes missing');
+    await f.cleanup();
+  });
+
+  await check('Phase 6 - TPApp.report facade exposed', async () => {
+    for (const k of ['templates','sectionLabels','sectionInventory','getSections','buildModel','generate','chartToImage']) {
+      if (TPApp.report[k] == null) throw new Error('missing TPApp.report.' + k);
     }
   });
 
@@ -6201,6 +6470,962 @@ TPApp.export = {
 
 
 <!-- =====================================================================
+  PHASE 6 / BLOCK 31 : Report templates + section catalogue
+===================================================================== -->
+<script id="report-templates">
+/** Per-template section ordering. Section ids match the model builder. */
+const REPORT_SECTION_IDS = [
+  'exec',         // executive summary
+  'tested',       // tested party & FAR
+  'dataSource',   // data source + search strategy
+  'screening',    // screening process (funnel + rejection breakdown)
+  'accepted',     // accepted-company list with rationale
+  'rejected',     // rejected-company summary (full list in Appendix A)
+  'pliReason',    // PLI selection rationale
+  'wca',          // working capital adjustment (only when applied)
+  'range',        // arm's-length range with quartile-method badge
+  'conclusion',   // overall conclusion
+  'appendixA',    // full rejected-company list
+  'appendixB',    // accepted-company financial breakdown
+  'appendixC',    // audit trail
+];
+
+const REPORT_SECTION_LABELS = {
+  exec:        { ja: 'エグゼクティブサマリー',                      en: 'Executive Summary' },
+  tested:      { ja: '検証対象企業の概要・FAR分析',                 en: 'Tested Party Overview & FAR' },
+  dataSource:  { ja: 'データソースと検索戦略',                       en: 'Data Source & Search Strategy' },
+  screening:   { ja: 'スクリーニングプロセス',                       en: 'Screening Process' },
+  accepted:    { ja: '採用企業の説明',                               en: 'Accepted Comparables' },
+  rejected:    { ja: '却下理由',                                     en: 'Rejection Summary' },
+  pliReason:   { ja: 'PLI 選定理由',                                 en: 'PLI Selection Rationale' },
+  wca:         { ja: '比較可能性調整 (運転資本調整)',                 en: 'Comparability Adjustments (WCA)' },
+  range:       { ja: 'アームスレングス・レンジ算定結果',              en: 'Arm\'s Length Range' },
+  conclusion:  { ja: '結論',                                         en: 'Conclusion' },
+  appendixA:   { ja: '付録A: 却下企業 全件一覧',                     en: 'Appendix A: Rejected Companies' },
+  appendixB:   { ja: '付録B: 採用企業 財務データ詳細',                en: 'Appendix B: Accepted Financials' },
+  appendixC:   { ja: '付録C: 監査証跡',                              en: 'Appendix C: Audit Trail' },
+};
+
+/** Section subset / ordering per template. */
+const REPORT_TEMPLATES = {
+  BEPS_LOCAL_FILE: {
+    label: 'BEPS Action 13 - Local File',
+    legalNote: 'OECD BEPS Action 13 ローカルファイル準拠',
+    sections: REPORT_SECTION_IDS,
+  },
+  BEPS_MASTER_FILE: {
+    label: 'BEPS Action 13 - Master File (benchmark sections)',
+    legalNote: 'OECD BEPS Action 13 マスターファイルのうちベンチマーク関連セクションのみを抜粋',
+    sections: ['exec','tested','dataSource','range','conclusion','appendixB'],
+  },
+  JP_LOCAL: {
+    label: '日本 ローカルファイル (措置法施規22の10)',
+    legalNote: '租税特別措置法施行規則 第22条の10。「同種の事業」「同様の状況」の観点で比較可能性を記述します。',
+    sections: REPORT_SECTION_IDS,
+  },
+  CIQ_STYLE_3STEP: {
+    label: 'S&P Capital IQ - 3 Step Style',
+    legalNote: 'Capital IQ の Step One / Two / Three 構造を踏襲したレポート。',
+    sections: ['exec','dataSource','screening','rejected','accepted','range','conclusion','appendixA','appendixB'],
+  },
+  CUSTOM: {
+    label: 'カスタム (任意セクション)',
+    legalNote: 'セクションをユーザーが自由に選択します。',
+    sections: REPORT_SECTION_IDS,
+  },
+};
+
+/** Jurisdiction-specific legal references injected into the dataSource and
+ *  conclusion narratives. */
+const JURISDICTION_LEGAL_REFS = {
+  JP:            { primary: '租税特別措置法施行規則 第22条の10', url: '', note: '「同種の事業」「同様の状況」の観点での比較可能性を記述する。' },
+  US:            { primary: 'IRC §482, Treas. Reg. §1.482-1(e)',  url: 'https://www.law.cornell.edu/uscode/text/26/482', note: 'Best method rule under §1.482-1(c) applies.' },
+  IN:            { primary: 'Section 92 of the Income-tax Act, Rule 10B/10CA', url: '', note: '35-65 percentile range per Indian transfer pricing rules.' },
+  CN:            { primary: 'STA Announcement [2017] No.6',        url: '', note: 'Single-year analysis preferred.' },
+  DE:            { primary: 'AStG §1, VWG VP 2023',                url: '', note: '' },
+  GB:            { primary: 'TIOPA 2010 Part 4',                   url: '', note: 'HMRC INTM guidance.' },
+  TH:            { primary: 'Revenue Code Section 71 bis',         url: '', note: 'TH Revenue Department TP Disclosure Form.' },
+  OECD_GENERIC:  { primary: 'OECD Transfer Pricing Guidelines',    url: 'https://www.oecd.org/tax/transfer-pricing/', note: '汎用 OECD ガイドライン。' },
+};
+
+/** JP_LOCAL template-specific stock paragraphs. */
+const JP_LOCAL_PHRASES = {
+  comparabilityIntro:
+    '措置法施規第22条の10の規定に基づき、独立企業間価格の算定にあたっては、検証対象企業と「同種の事業」を営み、かつ「同様の状況」にある比較対象企業を選定する必要がある。本分析では、業種コード、地域、規模、機能・資産・リスクのプロファイルを総合的に勘案して比較可能性を判定した。',
+  pliSelection:
+    '採用したPLIは検証対象企業の機能・資産・リスクの実態に照らして最も整合的な指標である。',
+};
+</script>
+
+<!-- =====================================================================
+  PHASE 6 / BLOCK 32 : Report data-model builder (pure)
+===================================================================== -->
+<script id="report-model">
+/**
+ * Build the canonical report data model for one jurisdiction.
+ * Each section is independent so consumers (docx/pdf/pptx generators)
+ * can render only the slices they need.
+ *
+ * @param {string} projectId
+ * @param {string} jurisdictionId
+ * @param {Object} [options]
+ * @param {string} [options.template='BEPS_LOCAL_FILE']
+ * @param {string[]} [options.includeSections]
+ * @param {Object}   [options.meta] - title/subtitle/period/author/etc.
+ * @param {string}   [options.lang='ja']
+ * @returns {Promise<Object>}
+ */
+async function buildReportModel(projectId, jurisdictionId, options = {}) {
+  const project = await db.projects.get(projectId);
+  if (!project) throw new Error('Project not found');
+  const template = REPORT_TEMPLATES[options.template] || REPORT_TEMPLATES.BEPS_LOCAL_FILE;
+  const lang = options.lang || 'ja';
+  const rule = await rulesEngine.getActive(jurisdictionId);
+  const screening = project.screeningResults?.[jurisdictionId];
+  const analysis  = project.analysisResults?.[jurisdictionId];
+  const summary   = await buildResultsSummary(project, jurisdictionId);
+  const accepted  = await buildAcceptedTable(project, jurisdictionId);
+  const rejected  = await buildRejectedTable(project, jurisdictionId);
+  const tp = project.testedPartyId ? await db.companies.get(project.testedPartyId) : null;
+  const legal = JURISDICTION_LEGAL_REFS[jurisdictionId] || JURISDICTION_LEGAL_REFS.OECD_GENERIC;
+  const meta = {
+    title:           options.meta?.title           || `Transfer Pricing Benchmarking Report - ${jurisdictionId}`,
+    subtitle:        options.meta?.subtitle        || (project.name || ''),
+    testedPartyName: options.meta?.testedPartyName || tp?.name || '(検証対象未設定)',
+    period:          options.meta?.period          || (accepted.years.length ? `${accepted.years[accepted.years.length-1]}-${accepted.years[0]}` : '-'),
+    author:          options.meta?.author          || '',
+    date:            options.meta?.date            || new Date().toISOString().slice(0, 10),
+    confidentialityTag: options.meta?.confidentialityTag || '',
+    logoDataUrl:     options.meta?.logoDataUrl     || null,
+  };
+  const sectionFilter = options.includeSections && options.includeSections.length
+    ? new Set(options.includeSections)
+    : new Set(template.sections);
+
+  // Audit trail for appendix C: latest 200 events for this project.
+  const auditEntries = await db.auditLog
+    .where('projectId').equals(projectId)
+    .reverse().sortBy('ts')
+    .then(r => r.slice(0, 200));
+
+  /** @type {Object} */
+  const model = {
+    template: template.label,
+    templateKey: options.template || 'BEPS_LOCAL_FILE',
+    templateNote: template.legalNote,
+    sectionsOrdered: template.sections.filter(id => sectionFilter.has(id)),
+    sectionLabels: REPORT_SECTION_LABELS,
+    lang,
+    meta,
+    legal,
+    jurisdictionId,
+    quartileMeta: summary?.quartileMeta || quartileMeta(analysis?.quartileMethod),
+
+    // Section bodies
+    exec: summary ? {
+      conclusion: buildConclusionSentence(summary),
+      classification: summary.classification?.position || null,
+      testedPartyPli: summary.testedPartyPli,
+      range: summary.range,
+    } : null,
+
+    tested: tp ? {
+      name: tp.name, country: tp.country, sic: tp.industryCodes?.SIC?.primary || tp.industryCode,
+      businessDescription: tp.businessDescription || '',
+      functions: tp.farProfile?.functions || [], assets: tp.farProfile?.assets || [], risks: tp.farProfile?.risks || [],
+      financials: tp.financials || {},
+    } : null,
+
+    dataSource: {
+      provider: 'S&P Capital IQ',
+      legalRef: legal,
+      jpIntro: jurisdictionId === 'JP' ? JP_LOCAL_PHRASES.comparabilityIntro : null,
+      searchCriteria: rule ? {
+        industryCode: tp?.industryCodes?.SIC?.primary || tp?.industryCode || '-',
+        country: tp?.country || '-',
+        revenueRange: rule.preferredIndustryCodes,
+        years: rule.yearsAnalysis?.default,
+      } : null,
+    },
+
+    screening: screening ? {
+      initialPoolCount: screening.initialPoolCount,
+      stages: (screening.stages || []).map(s => ({ id: s.id, label: s.label, inputCount: s.inputCount, passCount: s.passCount, rejectCount: s.rejectCount, rejectionBreakdown: s.rejectionBreakdown })),
+    } : null,
+
+    accepted: accepted.rows,
+    acceptedYears: accepted.years,
+
+    rejected: {
+      total: rejected.rows.length,
+      byStage: rejected.byStage,
+      sampleRows: rejected.rows.slice(0, 5),
+    },
+
+    pliReason: rule && analysis ? {
+      pliType: analysis.pliType,
+      pliLabel: PLI_DEFS[analysis.pliType]?.label,
+      docNote: PLI_DEFS[analysis.pliType]?.docNote,
+      jpNote: jurisdictionId === 'JP' ? JP_LOCAL_PHRASES.pliSelection : null,
+    } : null,
+
+    wca: analysis?.wca ? {
+      interestRate: analysis.wca.interestRate,
+      components: analysis.wca.components,
+      perCompany: analysis.wca.perCompany,
+      adjRange: analysis.wca.adjRange,
+    } : null,
+
+    range: summary ? {
+      quartileMethod: summary.quartileMethod,
+      quartileMeta: summary.quartileMeta,
+      pliLabel: PLI_DEFS[summary.pliType]?.label,
+      method: summary.method,
+      range: summary.range,
+      testedPartyPli: summary.testedPartyPli,
+      pliValuesSorted: (accepted.rows || []).map(r => r.pliValue).filter(v => v != null).slice().sort((a, b) => a - b),
+    } : null,
+
+    conclusion: summary ? {
+      sentence: buildConclusionSentence(summary),
+      classification: summary.classification,
+      legalRef: legal,
+    } : null,
+
+    appendixA: rejected.rows,
+    appendixB: accepted.rows.map(r => ({ name: r.name, pliBreakdown: r.pliBreakdown, pliValue: r.pliValue, country: r.country })),
+    appendixC: auditEntries.map(e => ({ ts: new Date(e.ts).toISOString(), action: e.action, payload: e.payload })),
+  };
+  return model;
+}
+
+/**
+ * @typedef ReportSectionEntry
+ * @property {string} id
+ * @property {string} label
+ * @property {boolean} included
+ * @property {boolean} hasContent
+ */
+/** Quick presence audit used by the UI to grey out empty sections. */
+function reportSectionInventory(model) {
+  return model.sectionsOrdered.map(id => ({
+    id, label: REPORT_SECTION_LABELS[id]?.[model.lang] || id,
+    included: true, hasContent: !!model[id],
+  }));
+}
+</script>
+
+<!-- =====================================================================
+  PHASE 6 / BLOCK 33 : Chart-to-image utility (canvas-based for reliability)
+===================================================================== -->
+<script id="report-charts">
+/**
+ * Render an off-screen funnel chart as a PNG data URL.
+ * Uses a plain canvas so it works regardless of CSS context.
+ * @param {{id:string,label:string,passCount:number,inputCount:number,rejectCount:number}[]} stages
+ * @param {number} initialPool
+ * @param {Object} [opts]
+ * @returns {string} data URL
+ */
+function renderFunnelImageDataUrl(stages, initialPool, opts = {}) {
+  const w = opts.width  || 1100;
+  const h = opts.height || Math.max(220, 40 + 40 * stages.length);
+  const cv = document.createElement('canvas');
+  cv.width = w; cv.height = h;
+  const ctx = cv.getContext('2d');
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, w, h);
+  ctx.font = '14px sans-serif'; ctx.fillStyle = '#1e293b';
+  ctx.fillText('Screening Funnel', 20, 24);
+  const labelX = 20, barX = 240, barMaxW = w - barX - 200;
+  ctx.font = '12px sans-serif';
+  ctx.fillText('Pool: ' + initialPool, labelX, 50);
+  const total = Math.max(1, initialPool);
+  let y = 60;
+  for (const s of stages) {
+    ctx.fillStyle = '#475569';
+    ctx.fillText(s.id + '  ' + (s.label || ''), labelX, y + 18);
+    const barW = Math.max(2, barMaxW * s.passCount / total);
+    ctx.fillStyle = '#3b82f6';
+    ctx.fillRect(barX, y + 4, barW, 22);
+    ctx.fillStyle = '#fff'; ctx.textBaseline = 'middle';
+    ctx.fillText(`PASS ${s.passCount}`, barX + 6, y + 15);
+    ctx.textBaseline = 'alphabetic';
+    if (s.rejectCount) {
+      ctx.fillStyle = '#f43f5e';
+      ctx.fillText(`-${s.rejectCount} rejected`, barX + barW + 12, y + 20);
+    }
+    y += 36;
+  }
+  return cv.toDataURL('image/png');
+}
+
+/**
+ * Render an off-screen box-and-whisker range plot with the tested-party marker.
+ * @returns {string} data URL
+ */
+function renderRangePlotImageDataUrl(range, pliValues, testedPartyPli, opts = {}) {
+  const w = opts.width || 1100, h = opts.height || 280;
+  const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+  const ctx = cv.getContext('2d');
+  ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, w, h);
+  ctx.font = '16px sans-serif'; ctx.fillStyle = '#1e293b';
+  ctx.fillText(opts.title || 'Arm\'s Length Range', 20, 28);
+  if (opts.subtitle) { ctx.font = '12px sans-serif'; ctx.fillStyle = '#64748b'; ctx.fillText(opts.subtitle, 20, 50); }
+  const padX = 60, plotW = w - 2 * padX, midY = 160;
+  const vals = [...pliValues];
+  if (testedPartyPli != null) vals.push(testedPartyPli);
+  const min = Math.min(...vals, range.min), max = Math.max(...vals, range.max);
+  const span = max - min || 1;
+  const x = (v) => padX + plotW * ((v - min) / span);
+  // axis
+  ctx.strokeStyle = '#94a3b8'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(padX, midY + 30); ctx.lineTo(padX + plotW, midY + 30); ctx.stroke();
+  // whiskers
+  ctx.strokeStyle = '#1e293b'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(x(range.min),   midY); ctx.lineTo(x(range.lower), midY); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(x(range.upper), midY); ctx.lineTo(x(range.max),   midY); ctx.stroke();
+  // box
+  ctx.fillStyle = '#bfdbfe'; ctx.strokeStyle = '#2563eb';
+  ctx.fillRect(x(range.lower), midY - 30, x(range.upper) - x(range.lower), 60);
+  ctx.strokeRect(x(range.lower), midY - 30, x(range.upper) - x(range.lower), 60);
+  // median
+  ctx.strokeStyle = '#059669'; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(x(range.median), midY - 30); ctx.lineTo(x(range.median), midY + 30); ctx.stroke();
+  // points
+  ctx.fillStyle = '#1e293b';
+  for (const v of pliValues) { ctx.beginPath(); ctx.arc(x(v), midY, 3, 0, Math.PI * 2); ctx.fill(); }
+  // tested party
+  if (testedPartyPli != null) {
+    ctx.fillStyle = '#dc2626';
+    ctx.beginPath(); ctx.arc(x(testedPartyPli), midY, 8, 0, Math.PI * 2); ctx.fill();
+    ctx.font = 'bold 12px sans-serif'; ctx.fillText('TP', x(testedPartyPli) - 8, midY + 60);
+  }
+  // ticks + labels
+  ctx.fillStyle = '#475569'; ctx.font = '11px sans-serif';
+  for (const [label, v] of [['Min', range.min], ['LQ', range.lower], ['Median', range.median], ['UQ', range.upper], ['Max', range.max]]) {
+    const tx = x(v);
+    ctx.fillRect(tx - 0.5, midY + 30, 1, 4);
+    ctx.fillText(label + ' ' + (v * 100).toFixed(2) + '%', tx - 30, midY + 50);
+  }
+  return cv.toDataURL('image/png');
+}
+
+/**
+ * Public helper exposed via TPApp.report.chartToImage. Accepts either a
+ * pre-rendered canvas/SVG element or the standard {kind, ...} descriptor.
+ * @param {Object|HTMLElement} input
+ * @returns {Promise<string>}
+ */
+async function chartToImage(input) {
+  if (input instanceof HTMLCanvasElement) return input.toDataURL('image/png');
+  if (input?.kind === 'funnel') return renderFunnelImageDataUrl(input.stages, input.initialPool, input);
+  if (input?.kind === 'range')  return renderRangePlotImageDataUrl(input.range, input.pliValues, input.testedPartyPli, input);
+  if (input instanceof SVGSVGElement) {
+    const xml = new XMLSerializer().serializeToString(input);
+    const url = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(xml);
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        const cv = document.createElement('canvas');
+        cv.width = input.viewBox.baseVal.width || 800;
+        cv.height = input.viewBox.baseVal.height || 200;
+        const ctx = cv.getContext('2d');
+        ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, cv.width, cv.height);
+        ctx.drawImage(img, 0, 0, cv.width, cv.height);
+        resolve(cv.toDataURL('image/png'));
+      };
+      img.onerror = () => reject(new Error('SVG render failed'));
+      img.src = url;
+    });
+  }
+  throw new Error('chartToImage: unsupported input');
+}
+</script>
+
+<!-- =====================================================================
+  PHASE 6 / BLOCK 34 : Word (.docx) generator
+  Uses the docx.js v8 UMD bundle exposed at window.docx.
+===================================================================== -->
+<script id="report-docx">
+/** Helper that builds a styled paragraph. */
+function _docxPara(text, opts = {}) {
+  return new docx.Paragraph({
+    heading: opts.heading || undefined,
+    spacing: opts.spacing || { before: 80, after: 80 },
+    children: [new docx.TextRun({ text: text || '', bold: !!opts.bold, italics: !!opts.italics, size: opts.size || 22, color: opts.color })],
+  });
+}
+function _docxTable(headers, rows, opts = {}) {
+  return new docx.Table({
+    width: { size: 100, type: docx.WidthType.PERCENTAGE },
+    rows: [
+      new docx.TableRow({
+        tableHeader: true,
+        children: headers.map(h => new docx.TableCell({
+          shading: { fill: 'E2E8F0' },
+          children: [_docxPara(String(h ?? ''), { bold: true, size: 18 })],
+        })),
+      }),
+      ...rows.map(r => new docx.TableRow({
+        children: r.map(c => new docx.TableCell({
+          children: [_docxPara(String(c ?? ''), { size: 18 })],
+        })),
+      })),
+    ],
+  });
+}
+function _docxBlankPara() { return new docx.Paragraph({ children: [new docx.TextRun({ text: '' })] }); }
+
+/** Convert a data URL into an `Image` run for docx. */
+async function _docxImageRunFromDataUrl(dataUrl, w, h) {
+  const res = await fetch(dataUrl);
+  const buf = new Uint8Array(await res.arrayBuffer());
+  return new docx.ImageRun({ data: buf, transformation: { width: w, height: h } });
+}
+
+/**
+ * Generate a Word document from the report model.
+ * @param {Object} model
+ * @returns {Promise<Blob>}
+ */
+async function generateDocxReport(model) {
+  const { docx: D } = window;
+  if (!D) throw new Error('docx.js not loaded');
+  const HL = D.HeadingLevel;
+  /** @type {any[]} */
+  const children = [];
+
+  // ----- Title page -----
+  children.push(new D.Paragraph({ children: [new D.TextRun({ text: model.meta.title,     bold: true, size: 44 })], alignment: D.AlignmentType.CENTER, spacing: { before: 400, after: 200 } }));
+  if (model.meta.subtitle)       children.push(new D.Paragraph({ children: [new D.TextRun({ text: model.meta.subtitle, size: 28 })], alignment: D.AlignmentType.CENTER }));
+  if (model.meta.confidentialityTag) children.push(new D.Paragraph({ children: [new D.TextRun({ text: model.meta.confidentialityTag, bold: true, color: 'C0392B' })], alignment: D.AlignmentType.CENTER, spacing: { before: 400 } }));
+  children.push(_docxBlankPara());
+  children.push(_docxPara('検証対象企業: '  + model.meta.testedPartyName));
+  children.push(_docxPara('対象期間: '      + model.meta.period));
+  children.push(_docxPara('テンプレート: '  + model.template));
+  children.push(_docxPara('適用法令: '      + (model.legal?.primary || '')));
+  children.push(_docxPara('作成日: '        + model.meta.date));
+  if (model.meta.author) children.push(_docxPara('作成者: ' + model.meta.author));
+  children.push(new D.Paragraph({ children: [new D.PageBreak()] }));
+
+  // ----- Table of contents (manual list — docx.TOC requires field updates) -----
+  children.push(_docxPara('目次', { heading: HL.HEADING_1 }));
+  for (const id of model.sectionsOrdered) {
+    children.push(_docxPara('• ' + REPORT_SECTION_LABELS[id].ja, { size: 22 }));
+  }
+  children.push(new D.Paragraph({ children: [new D.PageBreak()] }));
+
+  // Pre-render any images we need.
+  let funnelImg = null, rangeImg = null;
+  if (model.sectionsOrdered.includes('screening') && model.screening) {
+    const url = renderFunnelImageDataUrl(model.screening.stages, model.screening.initialPoolCount);
+    funnelImg = await _docxImageRunFromDataUrl(url, 600, 220);
+  }
+  if (model.sectionsOrdered.includes('range') && model.range) {
+    const url = renderRangePlotImageDataUrl(model.range.range, model.range.pliValuesSorted, model.range.testedPartyPli, { title: 'Arm\'s Length Range (' + model.range.quartileMeta.label + ')' });
+    rangeImg = await _docxImageRunFromDataUrl(url, 600, 200);
+  }
+
+  // ----- Sections -----
+  for (const id of model.sectionsOrdered) {
+    children.push(_docxPara(REPORT_SECTION_LABELS[id].ja, { heading: HL.HEADING_1 }));
+    if (id === 'exec' && model.exec) {
+      children.push(_docxPara(model.exec.conclusion));
+    }
+    else if (id === 'tested' && model.tested) {
+      children.push(_docxPara('企業名: '     + model.tested.name));
+      children.push(_docxPara('国 / SIC: '   + model.tested.country + ' / ' + (model.tested.sic || '-')));
+      children.push(_docxPara('機能: '       + (model.tested.functions || []).join(', ')));
+      children.push(_docxPara('主要資産: '   + (model.tested.assets || []).join(', ')));
+      children.push(_docxPara('主要リスク: ' + (model.tested.risks  || []).join(', ')));
+      children.push(_docxPara('事業内容: '));
+      children.push(_docxPara(model.tested.businessDescription || '-'));
+    }
+    else if (id === 'dataSource') {
+      if (model.dataSource.jpIntro) children.push(_docxPara(model.dataSource.jpIntro));
+      children.push(_docxPara('データソース: ' + model.dataSource.provider));
+      children.push(_docxPara('適用法令: '   + (model.legal?.primary || '')));
+      if (model.legal?.note) children.push(_docxPara(model.legal.note));
+      if (model.dataSource.searchCriteria) {
+        children.push(_docxPara('初期検索条件:', { bold: true }));
+        children.push(_docxPara('  業種コード: ' + model.dataSource.searchCriteria.industryCode));
+        children.push(_docxPara('  所在国: '     + model.dataSource.searchCriteria.country));
+        children.push(_docxPara('  分析年数: '   + (model.dataSource.searchCriteria.years || 3) + ' 年'));
+      }
+    }
+    else if (id === 'screening' && model.screening) {
+      children.push(_docxPara('比較対象候補プール: ' + model.screening.initialPoolCount + ' 社', { bold: true }));
+      if (funnelImg) children.push(new D.Paragraph({ children: [funnelImg] }));
+      children.push(_docxTable(['段階','ラベル','入力','通過','却下'],
+        model.screening.stages.map(s => [s.id, s.label, s.inputCount, s.passCount, s.rejectCount])));
+    }
+    else if (id === 'accepted') {
+      children.push(_docxPara(`採用企業 ${model.accepted.length} 社`, { bold: true }));
+      const head = ['企業名','国','SIC','類似性','加重平均PLI','選定理由'];
+      children.push(_docxTable(head, model.accepted.map(r => [r.name, r.country, r.sic, r.similarityTotal != null ? r.similarityTotal.toFixed(1) : '', r.pliValue != null ? (r.pliValue * 100).toFixed(2) + '%' : '', r.rationale])));
+    }
+    else if (id === 'rejected') {
+      children.push(_docxPara('段階別・理由別 集計', { bold: true }));
+      const rows = [];
+      for (const [stage, info] of Object.entries(model.rejected.byStage)) {
+        for (const [reason, count] of Object.entries(info.reasons)) rows.push([stage, reason, count]);
+      }
+      children.push(_docxTable(['段階','理由','件数'], rows));
+      children.push(_docxPara('全件は付録Aを参照。'));
+    }
+    else if (id === 'pliReason' && model.pliReason) {
+      children.push(_docxPara('採用 PLI: ' + (model.pliReason.pliLabel || model.pliReason.pliType), { bold: true }));
+      if (model.pliReason.jpNote)  children.push(_docxPara(model.pliReason.jpNote));
+      if (model.pliReason.docNote) children.push(_docxPara(model.pliReason.docNote));
+    }
+    else if (id === 'wca' && model.wca) {
+      children.push(_docxPara('運転資本調整 (OECD Annex Ch III)', { bold: true }));
+      children.push(_docxPara('金利: ' + (model.wca.interestRate * 100).toFixed(2) + '%'));
+      children.push(_docxPara('構成要素: '
+        + (model.wca.components.includeReceivables ? '売掛金 ' : '')
+        + (model.wca.components.includePayables    ? '買掛金 ' : '')
+        + (model.wca.components.includeInventory   ? '棚卸資産' : '')));
+      children.push(_docxPara('調整前後の比較レンジ:'));
+      children.push(_docxTable(['指標','調整前','調整後'], [
+        ['下限', (model.range.range.lower * 100).toFixed(2) + '%', (model.wca.adjRange.lower * 100).toFixed(2) + '%'],
+        ['中央', (model.range.range.median * 100).toFixed(2) + '%', (model.wca.adjRange.median * 100).toFixed(2) + '%'],
+        ['上限', (model.range.range.upper * 100).toFixed(2) + '%', (model.wca.adjRange.upper * 100).toFixed(2) + '%'],
+      ]));
+    }
+    else if (id === 'range' && model.range) {
+      children.push(_docxPara('PLI種別: ' + (model.range.pliLabel || '')));
+      children.push(_docxPara('集計方法: ' + model.range.method));
+      // CRITICAL: quartile method identification badge in narrative.
+      children.push(_docxPara('四分位計算方式: ' + model.range.quartileMeta.label, { bold: true, color: '2563EB' }));
+      children.push(_docxPara(model.range.quartileMeta.note, { italics: true, size: 18 }));
+      const r = model.range.range;
+      children.push(_docxTable(['指標','値'], [
+        ['Min',                       (r.min * 100).toFixed(2) + '%'],
+        [`${r.lowerP}パーセンタイル`, (r.lower * 100).toFixed(2) + '%'],
+        ['中央値',                    (r.median * 100).toFixed(2) + '%'],
+        [`${r.upperP}パーセンタイル`, (r.upper * 100).toFixed(2) + '%'],
+        ['Max',                       (r.max * 100).toFixed(2) + '%'],
+        ['採用社数',                  r.count],
+      ]));
+      if (rangeImg) children.push(new D.Paragraph({ children: [rangeImg] }));
+    }
+    else if (id === 'conclusion' && model.conclusion) {
+      children.push(_docxPara(model.conclusion.sentence));
+      if (model.legal?.note) children.push(_docxPara('参照: ' + model.legal.note, { italics: true }));
+    }
+    else if (id === 'appendixA' && model.appendixA) {
+      children.push(_docxTable(['企業名','国','除外段階','理由'],
+        model.appendixA.map(r => [r.name, r.country, r.stage, r.reason])));
+    }
+    else if (id === 'appendixB' && model.appendixB) {
+      children.push(_docxPara('採用企業財務データ (年別)', { bold: true }));
+      for (const c of model.appendixB) {
+        children.push(_docxPara(c.name, { bold: true, size: 20 }));
+        children.push(_docxTable(['年度','分子','分母','PLI'],
+          (c.pliBreakdown || []).map(b => [b.year, b.numerator, b.denominator, b.ratio != null ? (b.ratio * 100).toFixed(2) + '%' : ''])));
+      }
+    }
+    else if (id === 'appendixC') {
+      children.push(_docxPara('監査証跡 (最新200件)', { bold: true }));
+      children.push(_docxTable(['時刻','アクション','内容'],
+        model.appendixC.map(e => [e.ts, e.action, JSON.stringify(e.payload || {})])));
+    }
+  }
+
+  const doc = new D.Document({
+    creator: model.meta.author || 'TP Bench',
+    title: model.meta.title,
+    sections: [{
+      properties: {},
+      headers: { default: new D.Header({ children: [_docxPara(model.meta.title, { size: 16, italics: true })] }) },
+      footers: { default: new D.Footer({ children: [new D.Paragraph({
+        alignment: D.AlignmentType.CENTER,
+        children: [new D.TextRun({ children: ['Page ', D.PageNumber.CURRENT, ' / ', D.PageNumber.TOTAL_PAGES], size: 16 })],
+      })] }) },
+      children,
+    }],
+  });
+  return D.Packer.toBlob(doc);
+}
+</script>
+
+<!-- =====================================================================
+  PHASE 6 / BLOCK 35 : PDF generator (jsPDF + autotable)
+  ---------------------------------------------------------------------
+  Note on Japanese: jsPDF's default fonts do not include CJK glyphs.
+  Embedding a full Japanese font is too large for an inline CDN build,
+  so the PDF generator uses English-primary section headers, ASCII
+  punctuation, and writes Japanese narrative content only in the
+  inserted images (which are already rendered as bitmaps). A header
+  banner suggests Word for Japanese-heavy reports.
+===================================================================== -->
+<script id="report-pdf">
+/**
+ * Generate the PDF report.
+ * @param {Object} model
+ * @returns {Promise<Blob>}
+ */
+async function generatePdfReport(model) {
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ unit: 'mm', format: 'a4' });
+  const margin = 15;
+  let y = margin;
+  const pageW = doc.internal.pageSize.getWidth();
+  const pageH = doc.internal.pageSize.getHeight();
+
+  function ensureSpace(needed) {
+    if (y + needed > pageH - margin) { doc.addPage(); y = margin; }
+  }
+  function heading(text, level = 1) {
+    ensureSpace(15);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(level === 1 ? 16 : 13);
+    doc.text(text, margin, y);
+    y += level === 1 ? 10 : 7;
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(11);
+  }
+  function bodyText(text) {
+    if (!text) return;
+    doc.setFont('helvetica', 'normal'); doc.setFontSize(10);
+    const lines = doc.splitTextToSize(String(text), pageW - 2 * margin);
+    for (const line of lines) {
+      ensureSpace(6);
+      doc.text(line, margin, y);
+      y += 5;
+    }
+    y += 2;
+  }
+  function imageBlock(dataUrl, w, h) {
+    ensureSpace(h + 4);
+    doc.addImage(dataUrl, 'PNG', margin, y, w, h);
+    y += h + 4;
+  }
+
+  // Title page
+  doc.setFont('helvetica', 'bold'); doc.setFontSize(20);
+  doc.text(model.meta.title, pageW / 2, 60, { align: 'center' });
+  doc.setFontSize(14); doc.setFont('helvetica', 'normal');
+  if (model.meta.subtitle)       doc.text(model.meta.subtitle, pageW / 2, 75, { align: 'center' });
+  doc.setFontSize(11);
+  doc.text('Tested Party: ' + model.meta.testedPartyName, pageW / 2, 95,  { align: 'center' });
+  doc.text('Period: '       + model.meta.period,          pageW / 2, 103, { align: 'center' });
+  doc.text('Template: '     + model.template,             pageW / 2, 111, { align: 'center' });
+  doc.text('Date: '         + model.meta.date,            pageW / 2, 119, { align: 'center' });
+  if (model.meta.confidentialityTag) {
+    doc.setTextColor(192, 57, 43); doc.setFont('helvetica', 'bold');
+    doc.text(model.meta.confidentialityTag, pageW / 2, 140, { align: 'center' });
+    doc.setTextColor(0); doc.setFont('helvetica', 'normal');
+  }
+  doc.setFontSize(9); doc.setTextColor(120);
+  doc.text('Note: PDF format renders Latin script. For Japanese-rich narrative use the .docx export.', pageW / 2, 250, { align: 'center' });
+  doc.setTextColor(0);
+
+  doc.addPage(); y = margin;
+
+  // TOC
+  heading('Table of Contents', 1);
+  for (const id of model.sectionsOrdered) bodyText('• ' + (REPORT_SECTION_LABELS[id].en));
+  doc.addPage(); y = margin;
+
+  for (const id of model.sectionsOrdered) {
+    heading(REPORT_SECTION_LABELS[id].en, 1);
+
+    if (id === 'exec' && model.exec) {
+      // Show numeric summary in ASCII so the font renders correctly.
+      const r = model.exec.range;
+      bodyText(`Tested party PLI: ${(model.exec.testedPartyPli != null ? (model.exec.testedPartyPli * 100).toFixed(2) + '%' : 'n/a')}`);
+      bodyText(`Arm's-length range: ${(r.lower * 100).toFixed(2)}% - ${(r.upper * 100).toFixed(2)}%; median ${(r.median * 100).toFixed(2)}% (${model.quartileMeta.label})`);
+      bodyText('Classification: ' + (model.exec.classification || 'WITHIN'));
+    }
+    else if (id === 'tested' && model.tested) {
+      bodyText('Country / SIC: ' + model.tested.country + ' / ' + (model.tested.sic || '-'));
+      bodyText('Functions: ' + (model.tested.functions || []).join(', '));
+      bodyText('Assets: '    + (model.tested.assets    || []).join(', '));
+      bodyText('Risks: '     + (model.tested.risks     || []).join(', '));
+    }
+    else if (id === 'dataSource') {
+      bodyText('Provider: ' + model.dataSource.provider);
+      bodyText('Legal reference: ' + (model.legal?.primary || ''));
+      if (model.legal?.note) bodyText(model.legal.note);
+    }
+    else if (id === 'screening' && model.screening) {
+      bodyText('Initial pool: ' + model.screening.initialPoolCount);
+      const url = renderFunnelImageDataUrl(model.screening.stages, model.screening.initialPoolCount);
+      imageBlock(url, pageW - 2 * margin, 70);
+      doc.autoTable({
+        startY: y,
+        head: [['Stage','Label','Input','Pass','Reject']],
+        body: model.screening.stages.map(s => [s.id, s.label, s.inputCount, s.passCount, s.rejectCount]),
+        styles: { fontSize: 9 }, headStyles: { fillColor: [226, 232, 240], textColor: 30 }, margin: { left: margin, right: margin },
+      });
+      y = doc.lastAutoTable.finalY + 6;
+    }
+    else if (id === 'accepted') {
+      doc.autoTable({
+        startY: y,
+        head: [['Name','Country','SIC','Sim','PLI (Wgt Avg)','Rationale']],
+        body: model.accepted.map(r => [r.name, r.country, r.sic, r.similarityTotal != null ? r.similarityTotal.toFixed(1) : '', r.pliValue != null ? (r.pliValue * 100).toFixed(2) + '%' : '', r.rationale.slice(0, 80)]),
+        styles: { fontSize: 8 }, headStyles: { fillColor: [226, 232, 240], textColor: 30 }, margin: { left: margin, right: margin },
+      });
+      y = doc.lastAutoTable.finalY + 6;
+    }
+    else if (id === 'rejected') {
+      const rows = [];
+      for (const [stage, info] of Object.entries(model.rejected.byStage)) {
+        for (const [reason, count] of Object.entries(info.reasons)) rows.push([stage, reason, count]);
+      }
+      doc.autoTable({ startY: y, head: [['Stage','Reason','Count']], body: rows, styles: { fontSize: 9 }, headStyles: { fillColor: [226, 232, 240], textColor: 30 }, margin: { left: margin, right: margin } });
+      y = doc.lastAutoTable.finalY + 6;
+      bodyText('Full list in Appendix A.');
+    }
+    else if (id === 'pliReason' && model.pliReason) {
+      bodyText('Selected PLI: ' + (model.pliReason.pliLabel || model.pliReason.pliType));
+      if (model.pliReason.docNote) bodyText(model.pliReason.docNote);
+    }
+    else if (id === 'wca' && model.wca) {
+      bodyText('Interest rate: ' + (model.wca.interestRate * 100).toFixed(2) + '%');
+      bodyText('Components: '
+        + (model.wca.components.includeReceivables ? 'AR ' : '')
+        + (model.wca.components.includePayables    ? 'AP ' : '')
+        + (model.wca.components.includeInventory   ? 'Inv' : ''));
+      const r = model.range.range, w = model.wca.adjRange;
+      doc.autoTable({ startY: y, head: [['Metric','Unadjusted','Adjusted']], body: [
+        ['Lower',  (r.lower * 100).toFixed(2) + '%', (w.lower * 100).toFixed(2) + '%'],
+        ['Median', (r.median * 100).toFixed(2) + '%', (w.median * 100).toFixed(2) + '%'],
+        ['Upper',  (r.upper * 100).toFixed(2) + '%', (w.upper * 100).toFixed(2) + '%'],
+      ], styles: { fontSize: 9 }, headStyles: { fillColor: [226, 232, 240], textColor: 30 }, margin: { left: margin, right: margin } });
+      y = doc.lastAutoTable.finalY + 6;
+    }
+    else if (id === 'range' && model.range) {
+      bodyText('PLI: ' + (model.range.pliLabel || ''));
+      bodyText('Aggregation: ' + model.range.method);
+      // CRITICAL: quartile method identification.
+      doc.setFont('helvetica', 'bold'); doc.setTextColor(37, 99, 235);
+      bodyText('Quartile method: ' + model.range.quartileMeta.label);
+      doc.setTextColor(0); doc.setFont('helvetica', 'normal');
+      const r = model.range.range;
+      doc.autoTable({ startY: y, head: [['Metric','Value']], body: [
+        ['Min',                (r.min * 100).toFixed(2) + '%'],
+        [`P${r.lowerP}`,       (r.lower * 100).toFixed(2) + '%'],
+        ['Median',             (r.median * 100).toFixed(2) + '%'],
+        [`P${r.upperP}`,       (r.upper * 100).toFixed(2) + '%'],
+        ['Max',                (r.max * 100).toFixed(2) + '%'],
+        ['Comparable count',   r.count],
+      ], styles: { fontSize: 9 }, headStyles: { fillColor: [226, 232, 240], textColor: 30 }, margin: { left: margin, right: margin } });
+      y = doc.lastAutoTable.finalY + 6;
+      const url = renderRangePlotImageDataUrl(model.range.range, model.range.pliValuesSorted, model.range.testedPartyPli,
+        { title: "Arm's Length Range (" + model.range.quartileMeta.label + ")" });
+      imageBlock(url, pageW - 2 * margin, 70);
+    }
+    else if (id === 'conclusion' && model.conclusion) {
+      bodyText('Classification: ' + (model.conclusion.classification?.position || 'WITHIN'));
+      if (model.legal?.note) bodyText('Reference: ' + model.legal.note);
+    }
+    else if (id === 'appendixA') {
+      doc.autoTable({ startY: y, head: [['Name','Country','Stage','Reason']],
+        body: model.appendixA.map(r => [r.name, r.country, r.stage, r.reason]),
+        styles: { fontSize: 8 }, headStyles: { fillColor: [226, 232, 240], textColor: 30 }, margin: { left: margin, right: margin } });
+      y = doc.lastAutoTable.finalY + 6;
+    }
+    else if (id === 'appendixB') {
+      for (const c of model.appendixB) {
+        ensureSpace(20);
+        heading(c.name + ' (' + c.country + ')', 2);
+        doc.autoTable({ startY: y, head: [['Year','Num','Denom','PLI']],
+          body: (c.pliBreakdown || []).map(b => [b.year, b.numerator, b.denominator, b.ratio != null ? (b.ratio * 100).toFixed(2) + '%' : '']),
+          styles: { fontSize: 8 }, headStyles: { fillColor: [226, 232, 240], textColor: 30 }, margin: { left: margin, right: margin } });
+        y = doc.lastAutoTable.finalY + 4;
+      }
+    }
+    else if (id === 'appendixC') {
+      doc.autoTable({ startY: y, head: [['Timestamp','Action','Payload']],
+        body: model.appendixC.map(e => [e.ts, e.action, JSON.stringify(e.payload || {}).slice(0, 60)]),
+        styles: { fontSize: 7 }, headStyles: { fillColor: [226, 232, 240], textColor: 30 }, margin: { left: margin, right: margin } });
+      y = doc.lastAutoTable.finalY + 6;
+    }
+  }
+
+  // Footer page numbers
+  const pageCount = doc.internal.getNumberOfPages();
+  for (let i = 1; i <= pageCount; i++) {
+    doc.setPage(i);
+    doc.setFontSize(9); doc.setTextColor(120);
+    doc.text(`Page ${i} / ${pageCount}`, pageW / 2, pageH - 8, { align: 'center' });
+    if (model.meta.confidentialityTag) doc.text(model.meta.confidentialityTag, margin, pageH - 8);
+    doc.setTextColor(0);
+  }
+  return doc.output('blob');
+}
+</script>
+
+<!-- =====================================================================
+  PHASE 6 / BLOCK 36 : PowerPoint generator (PptxGenJS)
+===================================================================== -->
+<script id="report-pptx">
+/** Resolve the PptxGenJS constructor across the variants the UMD bundle
+ *  exposes (`pptxgen`, `PptxGenJS`). */
+function _PptxCtor() { return window.PptxGenJS || window.pptxgen; }
+
+/**
+ * Generate the PPTX deck.
+ * @param {Object} model
+ * @returns {Promise<Blob>}
+ */
+async function generatePptxReport(model) {
+  const Pptx = _PptxCtor();
+  if (!Pptx) throw new Error('PptxGenJS not loaded');
+  const pres = new Pptx();
+  pres.title = model.meta.title;
+  pres.layout = 'LAYOUT_WIDE';
+
+  // Slide 1: title
+  const s1 = pres.addSlide();
+  s1.background = { color: '0F172A' };
+  s1.addText(model.meta.title,    { x: 0.5, y: 2.0, w: 12, h: 1.0, fontSize: 36, bold: true, color: 'FFFFFF', align: 'center' });
+  s1.addText(model.meta.subtitle, { x: 0.5, y: 3.0, w: 12, h: 0.6, fontSize: 20, color: 'CBD5F5', align: 'center' });
+  s1.addText('Tested Party: '   + model.meta.testedPartyName, { x: 0.5, y: 4.5, w: 12, h: 0.4, fontSize: 16, color: 'F8FAFC', align: 'center' });
+  s1.addText('Period: '         + model.meta.period,          { x: 0.5, y: 4.9, w: 12, h: 0.4, fontSize: 16, color: 'F8FAFC', align: 'center' });
+  s1.addText('Generated: '      + model.meta.date,            { x: 0.5, y: 5.3, w: 12, h: 0.4, fontSize: 14, color: 'CBD5F5', align: 'center' });
+  if (model.meta.confidentialityTag) s1.addText(model.meta.confidentialityTag, { x: 0.5, y: 6.5, w: 12, h: 0.4, fontSize: 14, color: 'FECACA', align: 'center', bold: true });
+
+  // Slide 2: agenda
+  const s2 = pres.addSlide();
+  s2.addText('Agenda', { x: 0.5, y: 0.3, w: 12, h: 0.6, fontSize: 28, bold: true });
+  s2.addText(model.sectionsOrdered.map((id, i) => ({ text: `${i+1}. ${REPORT_SECTION_LABELS[id].ja}`, options: { fontSize: 16 } })),
+    { x: 1.0, y: 1.2, w: 11, h: 5.5 });
+
+  // Slide 3: key conclusion
+  if (model.exec && model.conclusion) {
+    const s = pres.addSlide();
+    s.addText('主要結論', { x: 0.5, y: 0.3, w: 12, h: 0.6, fontSize: 28, bold: true });
+    s.addText(model.exec.conclusion, { x: 0.5, y: 1.2, w: 12, h: 1.8, fontSize: 16 });
+    const cls = model.exec.classification || 'WITHIN';
+    const fill = cls === 'WITHIN' ? '10B981' : 'F59E0B';
+    s.addShape('rect', { x: 0.5, y: 3.2, w: 4, h: 1.2, fill: { color: fill }, line: { color: fill } });
+    s.addText({ WITHIN: 'レンジ内', BELOW: 'レンジ下限未満', ABOVE: 'レンジ上限超' }[cls],
+      { x: 0.5, y: 3.2, w: 4, h: 1.2, fontSize: 22, bold: true, color: 'FFFFFF', align: 'center', valign: 'middle' });
+    s.addText('Quartile method: ' + model.quartileMeta.label,
+      { x: 5.5, y: 3.4, w: 7, h: 0.8, fontSize: 16, bold: true, color: '2563EB' });
+  }
+
+  // Slide 4: tested party
+  if (model.tested) {
+    const s = pres.addSlide();
+    s.addText('Tested Party & FAR', { x: 0.5, y: 0.3, w: 12, h: 0.6, fontSize: 28, bold: true });
+    s.addText([
+      { text: model.tested.name + '\n', options: { fontSize: 20, bold: true } },
+      { text: 'Country / SIC: ' + model.tested.country + ' / ' + (model.tested.sic || '-') + '\n', options: { fontSize: 14 } },
+      { text: 'Functions: '     + (model.tested.functions || []).join(', ') + '\n', options: { fontSize: 14 } },
+      { text: 'Assets: '        + (model.tested.assets    || []).join(', ') + '\n', options: { fontSize: 14 } },
+      { text: 'Risks: '         + (model.tested.risks     || []).join(', '), options: { fontSize: 14 } },
+    ], { x: 0.5, y: 1.2, w: 12, h: 4.5 });
+  }
+
+  // Slide 5: data source
+  const sDS = pres.addSlide();
+  sDS.addText('Data Source & Legal Basis', { x: 0.5, y: 0.3, w: 12, h: 0.6, fontSize: 28, bold: true });
+  sDS.addText([
+    { text: 'Provider: '        + model.dataSource.provider + '\n', options: { fontSize: 16 } },
+    { text: 'Legal reference: ' + (model.legal?.primary || ''), options: { fontSize: 16, bold: true } },
+  ], { x: 0.5, y: 1.2, w: 12, h: 2 });
+
+  // Slide 6: funnel
+  if (model.screening) {
+    const url = renderFunnelImageDataUrl(model.screening.stages, model.screening.initialPoolCount);
+    const s = pres.addSlide();
+    s.addText('Screening Funnel', { x: 0.5, y: 0.3, w: 12, h: 0.6, fontSize: 28, bold: true });
+    s.addImage({ data: url, x: 0.5, y: 1.2, w: 12, h: 4.5 });
+    s.addText('Initial pool: ' + model.screening.initialPoolCount + ' → Accepted: ' + (model.accepted?.length || 0),
+      { x: 0.5, y: 5.9, w: 12, h: 0.5, fontSize: 14 });
+  }
+
+  // Slide 7: accepted summary
+  if (model.accepted?.length) {
+    const s = pres.addSlide();
+    s.addText('Accepted Comparables (' + model.accepted.length + ')', { x: 0.5, y: 0.3, w: 12, h: 0.6, fontSize: 28, bold: true });
+    const rows = [[
+      { text: 'Name', options: { bold: true, fill: 'E2E8F0' } },
+      { text: 'Country', options: { bold: true, fill: 'E2E8F0' } },
+      { text: 'SIC', options: { bold: true, fill: 'E2E8F0' } },
+      { text: 'Sim.', options: { bold: true, fill: 'E2E8F0' } },
+      { text: 'PLI (Wgt Avg)', options: { bold: true, fill: 'E2E8F0' } },
+    ], ...model.accepted.slice(0, 15).map(r => [r.name, r.country, r.sic, r.similarityTotal != null ? r.similarityTotal.toFixed(1) : '', r.pliValue != null ? (r.pliValue * 100).toFixed(2) + '%' : ''])];
+    s.addTable(rows, { x: 0.5, y: 1.2, w: 12, fontSize: 11 });
+  }
+
+  // Slide 8: range plot + badge
+  if (model.range) {
+    const url = renderRangePlotImageDataUrl(model.range.range, model.range.pliValuesSorted, model.range.testedPartyPli,
+      { title: "Arm's Length Range (" + model.range.quartileMeta.label + ")" });
+    const s = pres.addSlide();
+    s.addText("Arm's Length Range", { x: 0.5, y: 0.3, w: 9, h: 0.6, fontSize: 28, bold: true });
+    s.addShape('rect', { x: 9.5, y: 0.4, w: 3, h: 0.5, fill: { color: model.range.quartileMeta.family === 'irs' ? 'DBEAFE' : 'D1FAE5' }, line: { color: model.range.quartileMeta.family === 'irs' ? '93C5FD' : '6EE7B7' } });
+    s.addText(model.range.quartileMeta.label, { x: 9.5, y: 0.4, w: 3, h: 0.5, fontSize: 12, bold: true, align: 'center', valign: 'middle', color: model.range.quartileMeta.family === 'irs' ? '1E40AF' : '047857' });
+    s.addImage({ data: url, x: 0.5, y: 1.2, w: 12, h: 3.6 });
+    const r = model.range.range;
+    s.addTable([
+      [{ text: 'Min', options: { fill: 'E2E8F0', bold: true } }, { text: `P${r.lowerP}`, options: { fill: 'E2E8F0', bold: true } }, { text: 'Median', options: { fill: 'E2E8F0', bold: true } }, { text: `P${r.upperP}`, options: { fill: 'E2E8F0', bold: true } }, { text: 'Max', options: { fill: 'E2E8F0', bold: true } }],
+      [(r.min * 100).toFixed(2) + '%', (r.lower * 100).toFixed(2) + '%', (r.median * 100).toFixed(2) + '%', (r.upper * 100).toFixed(2) + '%', (r.max * 100).toFixed(2) + '%'],
+    ], { x: 0.5, y: 5.0, w: 12, fontSize: 14 });
+  }
+
+  // Slide 9: conclusion
+  if (model.conclusion) {
+    const s = pres.addSlide();
+    s.addText('Conclusion', { x: 0.5, y: 0.3, w: 12, h: 0.6, fontSize: 28, bold: true });
+    s.addText(model.conclusion.sentence, { x: 0.5, y: 1.2, w: 12, h: 3, fontSize: 16 });
+    if (model.legal?.note) s.addText('Reference: ' + model.legal.note, { x: 0.5, y: 5.0, w: 12, h: 1, fontSize: 12, italic: true });
+  }
+
+  return pres.write({ outputType: 'blob' });
+}
+</script>
+
+<!-- =====================================================================
+  PHASE 6 / BLOCK 37 : TPApp.report facade + orchestration
+===================================================================== -->
+<script id="tp-app-phase6">
+const REPORT_GENERATORS = { docx: generateDocxReport, pdf: generatePdfReport, pptx: generatePptxReport };
+const REPORT_MIME       = { docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                            pdf:  'application/pdf',
+                            pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation' };
+const REPORT_EXT        = { docx: 'docx', pdf: 'pdf', pptx: 'pptx' };
+
+/**
+ * Generate a report and return the Blob. Caller is responsible for
+ * downloading; UI code wraps this with downloadBlob.
+ * @param {string} projectId
+ * @param {string} jurisdictionId
+ * @param {('docx'|'pdf'|'pptx')} format
+ * @param {string} template
+ * @param {Object} [options]
+ * @returns {Promise<{blob:Blob, model:Object}>}
+ */
+async function generateReport(projectId, jurisdictionId, format, template, options = {}) {
+  const gen = REPORT_GENERATORS[format];
+  if (!gen) throw new Error('Unknown format: ' + format);
+  const model = await buildReportModel(projectId, jurisdictionId, { ...options, template });
+  const blob  = await gen(model);
+  await logAudit('REPORT_GENERATE', {
+    projectId, jurisdictionId, format, template,
+    sections: model.sectionsOrdered, bytes: blob.size,
+  }, projectId);
+  return { blob, model };
+}
+
+TPApp.report = {
+  templates: REPORT_TEMPLATES,
+  sectionLabels: REPORT_SECTION_LABELS,
+  sectionInventory: reportSectionInventory,
+  getSections: (templateKey) => (REPORT_TEMPLATES[templateKey]?.sections || REPORT_SECTION_IDS).slice(),
+  buildModel: buildReportModel,
+  generate: generateReport,
+  chartToImage,
+};
+</script>
+
+
+<!-- =====================================================================
   ROOT TEMPLATE
 ===================================================================== -->
 <div x-data="tpApp()" x-init="init()" x-cloak class="h-screen flex flex-col">
@@ -8036,12 +9261,142 @@ Foo Corp,JP,334413,2024,1000000,80000,..."></textarea>
         </div>
       </section>
 
-      <!-- ============== Report placeholder ============== -->
-      <section x-show="currentView === 'reports'" class="p-6">
-        <div class="bg-white rounded-lg shadow p-6">
-          <h2 class="font-semibold text-lg mb-3">レポート出力 <span class="text-xs text-amber-600 font-normal">(Phase 7 で実装)</span></h2>
-          <p class="text-sm text-slate-600">PPTX / PDF / DOCX 形式で移転価格文書を生成します。CDN: pptxgenjs, jspdf-autotable, docx が事前読込済みです。</p>
-        </div>
+      <!-- ============== Report (Phase 6) ============== -->
+      <section x-show="currentView === 'reports'" class="p-6 space-y-6">
+        <template x-if="!currentProject"><div class="bg-white rounded-lg shadow p-6 text-sm text-slate-500">プロジェクトを選択してください。</div></template>
+        <template x-if="currentProject">
+          <div class="space-y-6">
+
+            <!-- Configuration -->
+            <div class="bg-white rounded-lg shadow p-5 space-y-3">
+              <h3 class="font-semibold">レポート設定</h3>
+              <div class="grid grid-cols-2 md:grid-cols-4 gap-3 text-sm">
+                <div><label class="block text-xs text-slate-500">対象法域</label>
+                  <select class="w-full px-2 py-1 border rounded" x-model="reportCfg.jurisdictionId" @change="loadReportPreview()">
+                    <template x-for="j in resultsJurisdictions" :key="j"><option :value="j" x-text="j"></option></template>
+                  </select>
+                </div>
+                <div><label class="block text-xs text-slate-500">テンプレート</label>
+                  <select class="w-full px-2 py-1 border rounded" x-model="reportCfg.template" @change="loadReportPreview()">
+                    <template x-for="(t, k) in REPORT_TEMPLATES" :key="k"><option :value="k" x-text="t.label"></option></template>
+                  </select>
+                </div>
+                <div><label class="block text-xs text-slate-500">言語 (ラベル)</label>
+                  <select class="w-full px-2 py-1 border rounded" x-model="reportCfg.lang"><option value="ja">日本語</option><option value="en">English</option></select>
+                </div>
+                <div><label class="block text-xs text-slate-500">多法域モード</label>
+                  <select class="w-full px-2 py-1 border rounded" x-model="reportCfg.multiMode">
+                    <option value="individual">法域別に個別生成 (推奨)</option>
+                    <option value="single">単一法域のみ</option>
+                  </select>
+                </div>
+              </div>
+
+              <!-- Meta editor -->
+              <div class="border-t pt-3 grid grid-cols-2 gap-3 text-sm">
+                <div><label class="block text-xs text-slate-500">タイトル</label><input class="w-full px-2 py-1 border rounded" x-model="reportCfg.meta.title"></div>
+                <div><label class="block text-xs text-slate-500">サブタイトル</label><input class="w-full px-2 py-1 border rounded" x-model="reportCfg.meta.subtitle"></div>
+                <div><label class="block text-xs text-slate-500">検証対象企業名</label><input class="w-full px-2 py-1 border rounded" x-model="reportCfg.meta.testedPartyName"></div>
+                <div><label class="block text-xs text-slate-500">対象期間</label><input class="w-full px-2 py-1 border rounded" x-model="reportCfg.meta.period" placeholder="例: 2022-2024"></div>
+                <div><label class="block text-xs text-slate-500">作成者</label><input class="w-full px-2 py-1 border rounded" x-model="reportCfg.meta.author"></div>
+                <div><label class="block text-xs text-slate-500">作成日</label><input type="date" class="w-full px-2 py-1 border rounded" x-model="reportCfg.meta.date"></div>
+                <div class="col-span-2 flex gap-3 items-center">
+                  <label class="text-xs flex items-center gap-2"><input type="checkbox" x-model="reportCfg.includeConfidentiality"> 機密区分表示</label>
+                  <input class="px-2 py-1 border rounded text-sm" x-show="reportCfg.includeConfidentiality" x-model="reportCfg.meta.confidentialityTag" placeholder="例: 社外秘 / Confidential">
+                  <div class="flex-1"></div>
+                  <label class="text-xs flex items-center gap-2">
+                    <input type="file" accept="image/*" class="hidden" @change="onLogoPick($event)">
+                    <span class="px-2 py-1 border rounded cursor-pointer">ロゴをアップロード</span>
+                  </label>
+                  <template x-if="reportCfg.meta.logoDataUrl">
+                    <span class="flex items-center gap-1 text-xs"><img :src="reportCfg.meta.logoDataUrl" class="h-6"> <button @click="reportCfg.meta.logoDataUrl = null" class="text-rose-600">×</button></span>
+                  </template>
+                </div>
+              </div>
+            </div>
+
+            <!-- Section toggles + preview -->
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div class="bg-white rounded-lg shadow p-4 md:col-span-1">
+                <h4 class="font-semibold mb-2 text-sm">含めるセクション</h4>
+                <p class="text-[10px] text-slate-500 mb-2"><span x-text="REPORT_TEMPLATES[reportCfg.template]?.legalNote"></span></p>
+                <div class="space-y-1 text-xs">
+                  <template x-for="entry in reportSectionUI" :key="entry.id">
+                    <label class="flex items-center gap-2" :class="entry.hasContent ? '' : 'text-slate-400'">
+                      <input type="checkbox" :value="entry.id" x-model="reportCfg.includedSections">
+                      <span x-text="entry.label"></span>
+                      <span x-show="!entry.hasContent" class="text-[10px]">(空)</span>
+                    </label>
+                  </template>
+                </div>
+              </div>
+
+              <!-- Preview -->
+              <div class="bg-white rounded-lg shadow p-4 md:col-span-2">
+                <h4 class="font-semibold mb-2 text-sm">プレビュー</h4>
+                <template x-if="!reportModel"><div class="text-xs text-slate-500">設定を変更するとプレビューが表示されます。</div></template>
+                <template x-if="reportModel">
+                  <div class="text-xs space-y-3 max-h-96 overflow-auto">
+                    <div class="font-semibold text-base" x-text="reportModel.meta.title"></div>
+                    <div class="text-slate-500" x-text="reportModel.meta.subtitle"></div>
+                    <div><span class="font-mono text-[10px] px-2 py-0.5 rounded" :class="reportModel.quartileMeta.badgeClass" x-text="reportModel.quartileMeta.label"></span></div>
+                    <template x-for="id in reportCfg.includedSections" :key="id">
+                      <div class="border rounded p-2">
+                        <div class="font-semibold text-xs mb-1" x-text="REPORT_SECTION_LABELS[id]?.ja"></div>
+                        <template x-if="id === 'exec' && reportModel.exec">
+                          <div x-text="reportModel.exec.conclusion"></div>
+                        </template>
+                        <template x-if="id === 'range' && reportModel.range">
+                          <div class="space-y-1">
+                            <div>PLI: <span x-text="reportModel.range.pliLabel"></span> / <span x-text="reportModel.range.method"></span></div>
+                            <div>四分位方式: <span class="font-mono text-[10px] px-2 py-0.5 rounded" :class="reportModel.range.quartileMeta.badgeClass" x-text="reportModel.range.quartileMeta.label"></span></div>
+                            <div>Min <span class="font-mono" x-text="fmtPct(reportModel.range.range.min)"></span> / LQ <span class="font-mono" x-text="fmtPct(reportModel.range.range.lower)"></span> / Median <span class="font-mono" x-text="fmtPct(reportModel.range.range.median)"></span> / UQ <span class="font-mono" x-text="fmtPct(reportModel.range.range.upper)"></span> / Max <span class="font-mono" x-text="fmtPct(reportModel.range.range.max)"></span></div>
+                          </div>
+                        </template>
+                        <template x-if="id === 'accepted' && reportModel.accepted">
+                          <div>採用 <span x-text="reportModel.accepted.length"></span> 社</div>
+                        </template>
+                        <template x-if="id === 'rejected' && reportModel.rejected">
+                          <div>除外 <span x-text="reportModel.rejected.total"></span> 社, 段階数 <span x-text="Object.keys(reportModel.rejected.byStage).length"></span></div>
+                        </template>
+                        <template x-if="id === 'wca' && reportModel.wca">
+                          <div>WCA 金利 <span x-text="(reportModel.wca.interestRate * 100).toFixed(2)"></span>%</div>
+                        </template>
+                        <template x-if="id === 'tested' && reportModel.tested">
+                          <div><span x-text="reportModel.tested.name"></span> / 国 <span x-text="reportModel.tested.country"></span> / SIC <span class="font-mono" x-text="reportModel.tested.sic"></span></div>
+                        </template>
+                        <template x-if="id === 'conclusion' && reportModel.conclusion">
+                          <div x-text="reportModel.conclusion.sentence"></div>
+                        </template>
+                        <template x-if="id === 'appendixC' && reportModel.appendixC">
+                          <div>監査ログ <span x-text="reportModel.appendixC.length"></span> 件</div>
+                        </template>
+                      </div>
+                    </template>
+                  </div>
+                </template>
+              </div>
+            </div>
+
+            <!-- Generation actions -->
+            <div class="bg-white rounded-lg shadow p-5">
+              <h4 class="font-semibold mb-3">生成</h4>
+              <template x-if="reportGenerating">
+                <div class="text-sm text-slate-600 mb-2"><span x-text="reportProgressMsg"></span></div>
+              </template>
+              <div class="flex flex-wrap gap-3">
+                <button class="px-4 py-2 text-sm bg-blue-600 text-white rounded" :disabled="reportGenerating" @click="doGenerateReport('docx')">Word (.docx)</button>
+                <button class="px-4 py-2 text-sm bg-rose-600 text-white rounded" :disabled="reportGenerating" @click="doGenerateReport('pdf')">PDF</button>
+                <button class="px-4 py-2 text-sm bg-amber-600 text-white rounded" :disabled="reportGenerating" @click="doGenerateReport('pptx')">PowerPoint (.pptx)</button>
+                <div class="flex-1"></div>
+                <button class="px-4 py-2 text-sm border rounded" :disabled="reportGenerating" @click="doGenerateAllJurisdictions('docx')">全法域 Word 一括</button>
+              </div>
+              <div class="mt-3 text-[11px] text-slate-500">
+                ⓘ PDF は jsPDF の標準フォントの制約上、ナラティブ文は英語ベースで出力されます。日本語が中心のレポートは Word 形式を推奨します。
+              </div>
+            </div>
+          </div>
+        </template>
       </section>
 
       <!-- ============== Settings ============== -->
