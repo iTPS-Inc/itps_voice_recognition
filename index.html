@@ -863,6 +863,12 @@ function tpApp() {
         if (!this.activeScreeningJurisdiction && this._screeningJurisdictions?.length) this.activeScreeningJurisdiction = this._screeningJurisdictions[0];
         this.loadAnalysis();
       }
+      // Phase 5: hydrate results dashboard.
+      if (id === 'results') {
+        const js = this.resultsJurisdictions;
+        if (!this.resultsActiveJ && js.length) this.resultsActiveJ = js[0];
+        this.loadResultsView();
+      }
     },
     labelOf(item) { return this.lang === 'en' ? item.labelEn : item.labelJa; },
 
@@ -1915,6 +1921,141 @@ function tpApp() {
       this.toast(`${r.acceptedCompanies.length} 社を採用確定`, 'success');
     },
 
+    /* ====================================================================
+       PHASE 5 STATE & METHODS — results dashboard + exports
+       ==================================================================== */
+    QUARTILE_METHOD_META,
+    resultsActiveJ: '',
+    resultsSummary: null,
+    resultsConclusion: '',
+    resultsAccepted: { rows: [], years: [], headers: [] },
+    resultsRejected: { rows: [], byStage: {}, headers: [] },
+    resultsFilters: { accepted: '' },
+    resultsSort: { col: 'similarityTotal', dir: 'desc' },
+    acceptedDetail: null,
+    rejectedDetail: null,
+    rangeExportEmbedFormulas: true,
+    comparisonRows: [],
+
+    /** Jurisdictions with both screening + analysis results. */
+    get resultsJurisdictions() {
+      const s = this.currentProject?.screeningResults || {};
+      const a = this.currentProject?.analysisResults  || {};
+      return Object.keys(a).filter(j => s[j]);
+    },
+
+    /** Hydrate the results view. */
+    async loadResultsView() {
+      if (!this.currentProject || !this.resultsActiveJ || this.resultsActiveJ === '__COMPARE__') return;
+      const j = this.resultsActiveJ;
+      this.currentScreeningResult = this.currentProject.screeningResults?.[j] || null;
+      this.resultsSummary  = await buildResultsSummary(this.currentProject, j);
+      this.resultsConclusion = buildConclusionSentence(this.resultsSummary);
+      this.resultsAccepted = await buildAcceptedTable(this.currentProject, j);
+      this.resultsRejected = await buildRejectedTable(this.currentProject, j);
+      await logAudit('RESULT_VIEW', { projectId: this.currentProject.id, jurisdictionId: j }, this.currentProject.id);
+    },
+
+    /** Pre-load the multi-jurisdiction comparison table. */
+    async loadResultsComparison() {
+      const rows = [];
+      for (const j of this.resultsJurisdictions) {
+        const sum = await buildResultsSummary(this.currentProject, j); if (!sum) continue;
+        rows.push({
+          j, pli: PLI_DEFS[sum.pliType]?.label || sum.pliType,
+          method: { WEIGHTED_AVG: '加重平均', SIMPLE_AVG: '単純平均', SINGLE_YEAR: '単年' }[sum.method] || sum.method,
+          meta: sum.quartileMeta,
+          count: sum.range.count, lower: sum.range.lower, median: sum.range.median, upper: sum.range.upper,
+          tp: sum.testedPartyPli, position: sum.classification?.position || 'WITHIN',
+        });
+      }
+      this.comparisonRows = rows;
+    },
+
+    /** Apply textual filter + sort to the accepted rows. */
+    get filteredAccepted() {
+      const f = (this.resultsFilters.accepted || '').toLowerCase();
+      const list = (this.resultsAccepted.rows || []).filter(r =>
+        !f || r.name?.toLowerCase().includes(f) || r.country?.toLowerCase().includes(f) || r.sic?.includes(f)
+      );
+      const { col, dir } = this.resultsSort;
+      list.sort((a, b) => {
+        const va = a[col]; const vb = b[col];
+        if (va == null) return 1;
+        if (vb == null) return -1;
+        if (va < vb) return dir === 'asc' ? -1 : 1;
+        if (va > vb) return dir === 'asc' ? 1  : -1;
+        return 0;
+      });
+      return list;
+    },
+    sortAccepted(col) {
+      if (this.resultsSort.col === col) this.resultsSort.dir = this.resultsSort.dir === 'asc' ? 'desc' : 'asc';
+      else this.resultsSort = { col, dir: col === 'similarityTotal' || col === 'pliValue' ? 'desc' : 'asc' };
+    },
+
+    /** Build SVG range plot for the results dashboard. */
+    resultsRangePlotElements() {
+      const sum = this.resultsSummary; if (!sum?.range) return [];
+      const vals = (this.resultsAccepted?.rows || []).map(r => r.pliValue).filter(v => v != null && Number.isFinite(v));
+      if (!vals.length) return [];
+      const padX = 40, w = 600 - 2 * padX;
+      const min = Math.min(...vals, sum.testedPartyPli ?? sum.range.min);
+      const max = Math.max(...vals, sum.testedPartyPli ?? sum.range.max);
+      const span = max - min || 1;
+      const x = (v) => padX + w * ((v - min) / span);
+      const els = [{ key: 'axis', kind: 'axis', x1: padX, x2: padX + w, y: 60 }];
+      els.push({ key: 'wl', kind: 'whisker', x1: x(sum.range.min),   x2: x(sum.range.lower) });
+      els.push({ key: 'wr', kind: 'whisker', x1: x(sum.range.upper), x2: x(sum.range.max)   });
+      els.push({ key: 'box', kind: 'box',    x: x(sum.range.lower),  w: x(sum.range.upper) - x(sum.range.lower) });
+      els.push({ key: 'med', kind: 'median', x: x(sum.range.median) });
+      for (const v of vals) els.push({ key: 'p' + v, kind: 'point', x: x(v), color: '#1e293b' });
+      if (sum.testedPartyPli != null) els.push({ key: 'tp', kind: 'tp', x: x(sum.testedPartyPli) });
+      for (const [label, v] of [['Min', sum.range.min], ['LQ', sum.range.lower], ['M', sum.range.median], ['UQ', sum.range.upper], ['Max', sum.range.max]]) {
+        els.push({ key: 'tk' + label, kind: 'tick', x: x(v), label: label + ' ' + (v * 100).toFixed(1) + '%' });
+      }
+      return els;
+    },
+
+    openAcceptedDetail(row) { this.acceptedDetail = row; },
+    openRejectedDetail(row) { this.rejectedDetail = row; },
+
+    /** Trigger an Accepted XLSX download. */
+    async exportAccepted() {
+      const blob = await exportAcceptedXlsx(this.currentProject, this.resultsActiveJ, { embedFormulas: this.rangeExportEmbedFormulas });
+      downloadBlob(blob, `${_slug(this.currentProject.name)}_${this.resultsActiveJ}_${_dateTag()}_accepted.xlsx`);
+      this.toast('採用企業の Excel をダウンロードしました', 'success');
+    },
+    async exportAcceptedCsv() {
+      const t = this.resultsAccepted;
+      const headers = ['企業名','国','SIC','類似性','加重平均PLI','選定理由','事業内容'];
+      const map = (r) => [r.name, r.country, r.sic, r.similarityTotal?.toFixed(2) ?? '', r.pliValue != null ? (r.pliValue * 100).toFixed(4) + '%' : '', r.rationale, r.businessDescription];
+      const csv = rowsToCsv(headers, t.rows, map);
+      const blob = new Blob(['﻿', csv], { type: 'text/csv;charset=utf-8' });
+      downloadBlob(blob, `${_slug(this.currentProject.name)}_${this.resultsActiveJ}_${_dateTag()}_accepted.csv`);
+    },
+    async exportRejected() {
+      const blob = await exportRejectedXlsx(this.currentProject, this.resultsActiveJ);
+      downloadBlob(blob, `${_slug(this.currentProject.name)}_${this.resultsActiveJ}_${_dateTag()}_rejected.xlsx`);
+      this.toast('除外企業の Excel をダウンロードしました', 'success');
+    },
+    async exportRejectedCsv() {
+      const t = this.resultsRejected;
+      const map = (r) => [r.name, r.country, r.sic, r.stage, r.reason, JSON.stringify(r.detail), r.ciqStatus, r.ciqReason];
+      const csv = rowsToCsv(['企業名','国','SIC','段階','理由','根拠','CIQ Status','CIQ Reason'], t.rows, map);
+      const blob = new Blob(['﻿', csv], { type: 'text/csv;charset=utf-8' });
+      downloadBlob(blob, `${_slug(this.currentProject.name)}_${this.resultsActiveJ}_${_dateTag()}_rejected.csv`);
+    },
+    async exportRange() {
+      const blob = await exportRangeXlsx(this.currentProject, this.resultsActiveJ);
+      downloadBlob(blob, `${_slug(this.currentProject.name)}_${this.resultsActiveJ}_${_dateTag()}_range.xlsx`);
+      this.toast('レンジ Excel をダウンロードしました', 'success');
+    },
+    async exportComparison() {
+      const blob = await exportComparisonXlsx(this.currentProject);
+      downloadBlob(blob, `${_slug(this.currentProject.name)}_${_dateTag()}_comparison.xlsx`);
+    },
+
     /* ---- Industry code lookup UI ---- */
     /** Import a Census Bureau concordance CSV file. */
     async onConcordanceCsvPick(ev) {
@@ -2634,6 +2775,180 @@ async function runSelfTest() {
     const official = calculateRange(officialVals, { type: 'IQR', lowerPercentile: 25, upperPercentile: 75, centralTendency: 'MEDIAN' }, 'IRS');
     if (Math.abs(r.range.lower - official.lower) > 1e-12) throw new Error('live ≠ official');
     if (Math.abs(r.range.upper - official.upper) > 1e-12) throw new Error('live ≠ official');
+  });
+
+  /* ================== Phase 5 acceptance checks ================== */
+
+  await check('Phase 5 - quartile method metadata complete', async () => {
+    for (const m of ['IRS','INCLUSIVE','EXCLUSIVE','NEAREST_RANK']) {
+      const meta = QUARTILE_METHOD_META[m];
+      if (!meta?.label) throw new Error('missing label for ' + m);
+      if (!meta.badgeClass) throw new Error('missing badge class for ' + m);
+    }
+    if (!QUARTILE_METHOD_META.IRS.label.includes('IRS')) throw new Error('IRS label');
+    if (!QUARTILE_METHOD_META.INCLUSIVE.label.includes('Excel')) throw new Error('Excel must appear in inclusive label');
+    if (!QUARTILE_METHOD_META.EXCLUSIVE.label.includes('Excel')) throw new Error('Excel must appear in exclusive label');
+    if (QUARTILE_METHOD_META.IRS.excelReproducible) throw new Error('IRS must not be marked Excel-reproducible');
+    if (!QUARTILE_METHOD_META.INCLUSIVE.excelReproducible) throw new Error('INC must be marked Excel-reproducible');
+    if (typeof QUARTILE_METHOD_META.INCLUSIVE.excelFormula(25) !== 'string') throw new Error('formula generator');
+  });
+
+  await check('Phase 5 - CSV escaping', async () => {
+    const headers = ['a', 'b', 'c'];
+    const rows = [{ a: 'plain', b: 'has, comma', c: 'has "quote"' }, { a: 'line\nbreak', b: 'normal', c: '' }];
+    const csv = rowsToCsv(headers, rows, r => [r.a, r.b, r.c]);
+    if (!csv.includes('"has, comma"')) throw new Error('comma not escaped');
+    if (!csv.includes('"has ""quote"""')) throw new Error('quote not doubled');
+    if (!csv.includes('"line\nbreak"')) throw new Error('newline not quoted');
+  });
+
+  await check('Phase 5 - selection rationale generator', async () => {
+    const tp = { country: 'TH', industryCodes: { SIC: { primary: '3714' } }, financials: { '2024': { netSales: 1000 } } };
+    const c  = { country: 'TH', industryCodes: { SIC: { primary: '3714' } }, businessDescription: 'Auto parts mfr.',
+                 independenceData: { largestShareholderPct: 30 }, financials: { '2024': { netSales: 800 } } };
+    const sim = computeSimilarity(c, tp);
+    const pli = computePLI(c, 'OPERATING_MARGIN', null, 'WEIGHTED_AVG');
+    const decision = { stageHistory: [{ stage: 'S1', result: 'PASS' }, { stage: 'S2', result: 'PASS' }, { stage: 'S3', result: 'PASS' }, { stage: 'S4', result: 'PASS' }] };
+    const text = generateSelectionRationale({ company: c, testedParty: tp, decision, similarity: sim, pliRow: pli });
+    if (!text.includes('SIC')) throw new Error('rationale missing SIC mention');
+    if (!text.includes('4桁完全一致')) throw new Error('4-digit match label missing');
+    if (!text.includes('独立企業')) throw new Error('independence mention missing');
+    if (!text.includes('スクリーニング段階を通過')) throw new Error('stage-pass mention missing');
+  });
+
+  await check('Phase 5 - XLSX export is parseable round-trip (accepted)', async () => {
+    // Use the existing Ashimori-sample project shape: build a minimal project
+    // with one accepted company and an analysisResults entry.
+    const projectId = 'p5-' + uuid();
+    const cId = 'c5-' + uuid();
+    const company = { id: cId, name: 'XLSX Test Co', country: 'TH',
+      industryCodes: { SIC: { primary: '3714' } }, businessDescription: 'tests',
+      financials: { '2024': { netSales: 1000, operatingIncome: 100, cogs: 700, operatingExpenses: 200 } },
+      independenceData: { largestShareholderPct: 30 }, farProfile: { functions: ['manufacturing'] },
+    };
+    await db.companies.put(company);
+    const project = {
+      id: projectId, name: 'P5 Test', createdAt: Date.now(), updatedAt: Date.now(),
+      targetJurisdiction: ['OECD_GENERIC'], testedPartyId: null,
+      comparables: [cId], excludedCompanies: [], screeningHistory: [], scoringConfig: {}, fxData: {}, settings: {}, notes: '',
+      screeningResults: { OECD_GENERIC: { testedPartyId: null, initialPoolCount: 1, stages: [],
+        acceptedCompanies: [cId], rejectedCompanies: [], pendingReview: [], decisions: {} } },
+      analysisResults: { OECD_GENERIC: {
+        executedAt: new Date().toISOString(), pliType: 'NET_COST_PLUS', method: 'WEIGHTED_AVG', quartileMethod: 'IRS', years: null,
+        pliRows: [{ companyId: cId, name: 'XLSX Test Co', value: 0.111, breakdown: [{ year: 2024, numerator: 100, denominator: 900, ratio: 0.111 }] }],
+        range: { count: 1, min: 0.111, lower: 0.111, median: 0.111, upper: 0.111, max: 0.111, lowerP: 25, upperP: 75, centralTendency: 'MEDIAN', quartileMethod: 'IRS' },
+        testedPartyPli: null, classification: null,
+        wca: null, similarity: [], similarityWeights: SIMILARITY_DEFAULT_WEIGHTS,
+      } },
+    };
+    await db.projects.put(project);
+    const blob = await exportAcceptedXlsx(project, 'OECD_GENERIC');
+    const buf  = await blob.arrayBuffer();
+    const wb   = XLSX.read(buf, { type: 'array' });
+    if (!wb.SheetNames.includes('Accepted')) throw new Error('Accepted sheet missing');
+    if (!wb.SheetNames.includes('PLI明細')) throw new Error('PLI breakdown sheet missing');
+    if (!wb.SheetNames.includes('レンジ・サマリー')) throw new Error('Range summary sheet missing');
+    // Verify the range sheet contains the quartile method name.
+    const rangeRows = XLSX.utils.sheet_to_json(wb.Sheets['レンジ・サマリー'], { header: 1 });
+    const flat = JSON.stringify(rangeRows);
+    if (!flat.includes('IRS')) throw new Error('IRS badge missing from range sheet');
+    if (!flat.includes('昇順PLI一覧')) throw new Error('IRS verification list missing');
+    // Cleanup
+    await db.projects.delete(projectId);
+    await db.companies.delete(cId);
+  });
+
+  await check('Phase 5 - Excel formula embedding when quartile method is Excel-reproducible', async () => {
+    const projectId = 'p5e-' + uuid();
+    const cId = 'c5e-' + uuid();
+    await db.companies.put({ id: cId, name: 'Excel Co', country: 'TH', industryCodes: { SIC: { primary: '3714' } },
+      financials: { '2024': { netSales: 1000, operatingIncome: 100, cogs: 700, operatingExpenses: 200 } },
+      independenceData: { largestShareholderPct: 30 } });
+    const project = {
+      id: projectId, name: 'P5E', createdAt: Date.now(), updatedAt: Date.now(),
+      targetJurisdiction: ['OECD_GENERIC'], testedPartyId: null,
+      comparables: [cId], excludedCompanies: [], screeningHistory: [], scoringConfig: {}, fxData: {}, settings: {}, notes: '',
+      screeningResults: { OECD_GENERIC: { testedPartyId: null, initialPoolCount: 1, stages: [], acceptedCompanies: [cId], rejectedCompanies: [], pendingReview: [], decisions: {} } },
+      analysisResults: { OECD_GENERIC: {
+        executedAt: new Date().toISOString(), pliType: 'NET_COST_PLUS', method: 'WEIGHTED_AVG', quartileMethod: 'INCLUSIVE', years: null,
+        pliRows: [{ companyId: cId, name: 'Excel Co', value: 0.111, breakdown: [] }],
+        range: { count: 1, min: 0.111, lower: 0.111, median: 0.111, upper: 0.111, max: 0.111, lowerP: 25, upperP: 75, centralTendency: 'MEDIAN', quartileMethod: 'INCLUSIVE' },
+        testedPartyPli: null, classification: null, wca: null, similarity: [], similarityWeights: SIMILARITY_DEFAULT_WEIGHTS,
+      } },
+    };
+    await db.projects.put(project);
+    const blob = await exportAcceptedXlsx(project, 'OECD_GENERIC', { embedFormulas: true });
+    const buf = await blob.arrayBuffer();
+    const wb = XLSX.read(buf, { type: 'array' });
+    const rangeRows = XLSX.utils.sheet_to_json(wb.Sheets['レンジ・サマリー'], { header: 1 });
+    const flat = JSON.stringify(rangeRows);
+    if (!flat.includes('QUARTILE.INC')) throw new Error('Excel formula not embedded');
+    await db.projects.delete(projectId); await db.companies.delete(cId);
+  });
+
+  await check('Phase 5 - results summary builds and classifies correctly', async () => {
+    // Build a synthetic project mirroring Phase 4 outputs.
+    const projectId = 'p5sum-' + uuid();
+    const project = {
+      id: projectId, name: 'P5 Sum', createdAt: Date.now(), updatedAt: Date.now(),
+      targetJurisdiction: ['OECD_GENERIC'], testedPartyId: null,
+      comparables: [], excludedCompanies: [], screeningHistory: [], scoringConfig: {}, fxData: {}, settings: {}, notes: '',
+      screeningResults: { OECD_GENERIC: { testedPartyId: null, initialPoolCount: 10, stages: [], acceptedCompanies: ['x','y','z','w'], rejectedCompanies: [{ companyId: 'r1', stage: 'S2', reason: 'X' }], pendingReview: [], decisions: {} } },
+      analysisResults: { OECD_GENERIC: {
+        executedAt: new Date().toISOString(), pliType: 'NET_COST_PLUS', method: 'WEIGHTED_AVG', quartileMethod: 'IRS', years: null,
+        pliRows: [], range: { count: 4, min: 0.01, lower: 0.03, median: 0.05, upper: 0.07, max: 0.10, lowerP: 25, upperP: 75, centralTendency: 'MEDIAN', quartileMethod: 'IRS' },
+        testedPartyPli: 0.02, classification: classifyTestedParty(0.02, { lower: 0.03, median: 0.05, upper: 0.07 }),
+        wca: null, similarity: [], similarityWeights: SIMILARITY_DEFAULT_WEIGHTS,
+      } },
+    };
+    await db.projects.put(project);
+    const sum = await buildResultsSummary(project, 'OECD_GENERIC');
+    if (!sum) throw new Error('no summary');
+    if (sum.classification.position !== 'BELOW') throw new Error('below expected');
+    if (!sum.quartileMeta.label.includes('IRS')) throw new Error('badge label missing IRS');
+    const conclusion = buildConclusionSentence(sum);
+    if (!conclusion.includes('IRS')) throw new Error('conclusion missing badge');
+    if (!conclusion.includes('レンジ下限未満')) throw new Error('conclusion missing classification');
+    await db.projects.delete(projectId);
+  });
+
+  await check('Phase 5 - rejected table groups by stage', async () => {
+    const projectId = 'p5rej-' + uuid();
+    const project = {
+      id: projectId, name: 'P5R', createdAt: Date.now(), updatedAt: Date.now(),
+      targetJurisdiction: ['OECD_GENERIC'], testedPartyId: null,
+      comparables: [], excludedCompanies: [], screeningHistory: [], scoringConfig: {}, fxData: {}, settings: {}, notes: '',
+      screeningResults: { OECD_GENERIC: { testedPartyId: null, initialPoolCount: 5, stages: [],
+        acceptedCompanies: [], pendingReview: [], decisions: {},
+        rejectedCompanies: [
+          { companyId: 'a', stage: 'S2', reason: 'Avg op loss' },
+          { companyId: 'b', stage: 'S2', reason: 'Avg op loss' },
+          { companyId: 'c', stage: 'S2', reason: 'Desc missing' },
+          { companyId: 'd', stage: 'S4', reason: 'Controlled' },
+        ] } },
+      analysisResults: {},
+    };
+    await db.projects.put(project);
+    const t = await buildRejectedTable(project, 'OECD_GENERIC');
+    if (t.byStage.S2.count !== 3) throw new Error('S2 count wrong');
+    if (t.byStage.S2.reasons['Avg op loss'] !== 2) throw new Error('reason grouping wrong');
+    if (t.byStage.S4.count !== 1) throw new Error('S4 count wrong');
+    await db.projects.delete(projectId);
+  });
+
+  await check('Phase 5 - filename slug + date tag are filesystem-safe', async () => {
+    const slug = _slug('Pro<ject>/name:risky*');
+    if (/[\\/:*?"<>|]/.test(slug)) throw new Error('slug contains illegal char');
+    if (!/^\d{8}$/.test(_dateTag())) throw new Error('date tag format');
+  });
+
+  await check('Phase 5 - TPApp.results / TPApp.export surface exposed', async () => {
+    for (const k of ['getSummary','getAcceptedTable','getRejectedTable','generateSelectionRationale','buildConclusionSentence','quartileMeta']) {
+      if (typeof TPApp.results[k] !== 'function' && k !== 'quartileMeta') throw new Error('missing TPApp.results.' + k);
+    }
+    for (const k of ['acceptedToXlsx','rejectedToXlsx','rangeToXlsx','comparisonToXlsx','toCsv']) {
+      if (typeof TPApp.export[k] !== 'function') throw new Error('missing TPApp.export.' + k);
+    }
   });
 
   await check('Phase 2 - >10 years warning', async () => {
@@ -5432,6 +5747,460 @@ TPApp.phase4 = {
 
 
 <!-- =====================================================================
+  PHASE 5 / BLOCK 27 : Quartile method metadata (badge labels + colours)
+  ---------------------------------------------------------------------
+  Single source of truth so every UI location and every export labels
+  the quartile method identically. IRS vs Excel must be visually
+  distinguishable to prevent recipient confusion.
+===================================================================== -->
+<script id="quartile-method-meta">
+const QUARTILE_METHOD_META = {
+  IRS:           { label: 'IRS（§1.482）',           shortLabel: 'IRS',          family: 'irs',    excelReproducible: false, excelFormula: null,                     note: '米国財務省規則 §1.482-1(e)(2)(iii)(C) に基づく移転価格特化方式。Excel標準関数では再現できません。',  badgeClass: 'bg-blue-100 text-blue-800 border border-blue-300'   },
+  INCLUSIVE:     { label: 'Excel（QUARTILE.INC）',   shortLabel: 'Excel INC',    family: 'excel',  excelReproducible: true,  excelFormula: (p) => `QUARTILE.INC(<range>, ${Math.round(p / 25)})`, note: 'Excel の QUARTILE.INC 関数と同等の結果になります。',                                            badgeClass: 'bg-emerald-100 text-emerald-800 border border-emerald-300' },
+  EXCLUSIVE:     { label: 'Excel（QUARTILE.EXC）',   shortLabel: 'Excel EXC',    family: 'excel',  excelReproducible: true,  excelFormula: (p) => `QUARTILE.EXC(<range>, ${Math.round(p / 25)})`, note: 'Excel の QUARTILE.EXC 関数と同等の結果になります。',                                            badgeClass: 'bg-emerald-100 text-emerald-800 border border-emerald-300' },
+  NEAREST_RANK:  { label: '最近接順位法',             shortLabel: 'Nearest',      family: 'other',  excelReproducible: false, excelFormula: null,                     note: 'パーセンタイル順位の切り上げ位置を採用します。',                                                  badgeClass: 'bg-slate-100 text-slate-800 border border-slate-300' },
+};
+
+/** Return the metadata object for a quartile method, falling back to IRS. */
+function quartileMeta(method) { return QUARTILE_METHOD_META[method] || QUARTILE_METHOD_META.IRS; }
+</script>
+
+<!-- =====================================================================
+  PHASE 5 / BLOCK 28 : Results data builders (pure functions)
+===================================================================== -->
+<script id="results-builders">
+/**
+ * @typedef {Object} ResultsSummary
+ * @property {string} jurisdictionId
+ * @property {string} pliType
+ * @property {string} method            - PLI aggregation method
+ * @property {string} quartileMethod
+ * @property {{label,shortLabel,family,excelReproducible,excelFormula,note,badgeClass}} quartileMeta
+ * @property {Object} range
+ * @property {number|null} testedPartyPli
+ * @property {{position:('WITHIN'|'BELOW'|'ABOVE')}|null} classification
+ * @property {number} acceptedCount
+ * @property {number} rejectedCount
+ * @property {number} initialPoolCount
+ * @property {boolean} wcaApplied
+ * @property {string} executedAt
+ * @property {string} testedPartyName
+ */
+
+/**
+ * Build the headline conclusion summary for one jurisdiction.
+ * @param {Project} project
+ * @param {string} jurisdictionId
+ * @returns {Promise<ResultsSummary|null>}
+ */
+async function buildResultsSummary(project, jurisdictionId) {
+  const analysis = project?.analysisResults?.[jurisdictionId];
+  const screening = project?.screeningResults?.[jurisdictionId];
+  if (!analysis || !screening) return null;
+  const tp = project.testedPartyId ? await db.companies.get(project.testedPartyId) : null;
+  return {
+    jurisdictionId,
+    pliType: analysis.pliType,
+    method: analysis.method,
+    quartileMethod: analysis.quartileMethod,
+    quartileMeta: quartileMeta(analysis.quartileMethod),
+    range: analysis.range,
+    testedPartyPli: analysis.testedPartyPli,
+    classification: analysis.classification,
+    acceptedCount: (screening.acceptedCompanies || []).length,
+    rejectedCount: (screening.rejectedCompanies || []).length,
+    initialPoolCount: screening.initialPoolCount,
+    wcaApplied: !!analysis.wca,
+    executedAt: analysis.executedAt,
+    testedPartyName: tp?.name || '(検証対象未設定)',
+  };
+}
+
+/**
+ * Generate a Japanese rationale sentence for one accepted company by
+ * combining its Phase 3 stage history and Phase 4 similarity breakdown.
+ * @param {Object} args
+ * @param {Company} args.company
+ * @param {Company|null} args.testedParty
+ * @param {Object|null} args.decision        - screening result decision
+ * @param {Object|null} args.similarity      - {breakdown:{industry,size,far,geo,profile}, total}
+ * @param {Object|null} args.pliRow          - {value, breakdown}
+ * @returns {string}
+ */
+function generateSelectionRationale({ company, testedParty, decision, similarity, pliRow }) {
+  const parts = [];
+  // Industry
+  if (similarity?.breakdown?.industry != null) {
+    const s = similarity.breakdown.industry;
+    const own = company.industryCodes?.SIC?.primary || company.industryCode;
+    if (s >= 100) parts.push(`SIC ${own}（4桁完全一致）`);
+    else if (s >= 75) parts.push(`SIC ${own}（3桁一致）`);
+    else if (s >= 50) parts.push(`SIC ${own}（2桁一致）`);
+    else if (own) parts.push(`SIC ${own}（業種一致度低）`);
+  }
+  // Size
+  if (similarity?.breakdown?.size != null && testedParty) {
+    const cy = getYearsAvailable(company);
+    const ty = getYearsAvailable(testedParty);
+    if (cy.length && ty.length) {
+      const cRev = (company.financials[String(cy[cy.length-1])] || {}).netSales ?? (company.financials[String(cy[cy.length-1])] || {}).revenue;
+      const tRev = (testedParty.financials[String(ty[ty.length-1])] || {}).netSales ?? (testedParty.financials[String(ty[ty.length-1])] || {}).revenue;
+      if (cRev && tRev) {
+        const ratio = cRev / tRev;
+        parts.push(`売上は検証対象企業の${ratio.toFixed(2)}倍（レンジ内）`);
+      }
+    }
+  }
+  // Independence
+  const own = company.independenceData?.largestShareholderPct;
+  if (own == null) parts.push('独立企業（持株比率記載なし）');
+  else if (own <= 50) parts.push(`独立企業（筆頭株主 ${own}%）`);
+  // FAR
+  if (similarity?.breakdown?.far != null && similarity.breakdown.far >= 50) parts.push('主要機能が類似');
+  // All stages passed
+  if (decision?.stageHistory?.length) {
+    const passCount = decision.stageHistory.filter(h => h.result === 'PASS' || h.result === 'ACCEPT').length;
+    if (passCount) parts.push(`全 ${passCount} スクリーニング段階を通過`);
+  }
+  // PLI
+  if (pliRow?.value != null) parts.push(`PLI = ${(pliRow.value * 100).toFixed(2)}%`);
+  return parts.length ? parts.join('、') + '。' : 'スクリーニング全段階を通過。';
+}
+
+/**
+ * Build the accepted-company table rows for one jurisdiction.
+ * Shape is the canonical view used by both the UI and the exporter so
+ * the spreadsheet matches what the user sees on screen.
+ * @returns {Promise<{rows:Object[], years:number[], headers:string[]}>}
+ */
+async function buildAcceptedTable(project, jurisdictionId) {
+  const analysis = project?.analysisResults?.[jurisdictionId];
+  const screening = project?.screeningResults?.[jurisdictionId];
+  if (!analysis || !screening) return { rows: [], years: [], headers: [] };
+  const acceptedIds = screening.acceptedCompanies || [];
+  const companies = (await db.companies.bulkGet(acceptedIds)).filter(Boolean)
+    .map(c => ({ ...c, financials: migrateFinancials(c.financials) }));
+  const tp = project.testedPartyId ? await db.companies.get(project.testedPartyId) : null;
+  const testedParty = tp ? { ...tp, financials: migrateFinancials(tp.financials) } : null;
+  const byId = Object.fromEntries(companies.map(c => [c.id, c]));
+  const pliById = Object.fromEntries((analysis.pliRows || []).map(r => [r.companyId, r]));
+  const simById = Object.fromEntries((analysis.similarity || []).map(s => [s.companyId, s]));
+  const wcaById = analysis.wca ? Object.fromEntries(analysis.wca.perCompany.map(w => [w.companyId, w])) : {};
+  const yearSet = new Set();
+  for (const r of (analysis.pliRows || [])) for (const b of r.breakdown || []) yearSet.add(b.year);
+  const years = [...yearSet].sort((a, b) => b - a);
+  const rows = acceptedIds.map(id => {
+    const c = byId[id] || {};
+    const sim = simById[id];
+    const pli = pliById[id];
+    const wca = wcaById[id];
+    const decision = screening.decisions?.[id];
+    const byYear = {};
+    for (const b of (pli?.breakdown || [])) byYear[b.year] = b.ratio;
+    return {
+      companyId: id,
+      name: c.name || id,
+      country: c.country || '',
+      sic: c.industryCodes?.SIC?.primary || c.industryCode || '',
+      naics: c.industryCodes?.NAICS_2012?.primary || c.industryCodes?.NAICS_2017?.primary || '',
+      similarityTotal: sim?.total ?? null,
+      similarityBreakdown: sim?.breakdown || {},
+      pliByYear: byYear,
+      pliValue: pli?.value ?? null,
+      pliBreakdown: pli?.breakdown || [],
+      pliAdjusted: wca?.adjusted ?? null,
+      pliWcaNet: wca?.netAdjustment ?? null,
+      businessDescription: c.businessDescription || '',
+      rationale: generateSelectionRationale({ company: c, testedParty, decision, similarity: sim, pliRow: pli }),
+    };
+  });
+  const headers = ['企業名', '国', 'SIC', 'NAICS', '類似性スコア',
+    ...years.map(y => `PLI ${y}`),
+    '加重平均PLI', ...(analysis.wca ? ['WCA調整後PLI'] : []),
+    '選定理由', '事業内容'];
+  return { rows, years, headers };
+}
+
+/**
+ * Build the rejected-company table with stage / reason grouping.
+ * @returns {Promise<{rows:Object[], byStage:Object, headers:string[]}>}
+ */
+async function buildRejectedTable(project, jurisdictionId) {
+  const screening = project?.screeningResults?.[jurisdictionId];
+  if (!screening) return { rows: [], byStage: {}, headers: [] };
+  const ids = (screening.rejectedCompanies || []).map(r => r.companyId);
+  const companies = (await db.companies.bulkGet(ids)).filter(Boolean);
+  const byId = Object.fromEntries(companies.map(c => [c.id, c]));
+  const rows = (screening.rejectedCompanies || []).map(r => {
+    const c = byId[r.companyId] || {};
+    return {
+      companyId: r.companyId, name: c.name || r.companyId, country: c.country || '',
+      sic: c.industryCodes?.SIC?.primary || c.industryCode || '',
+      stage: r.stage, reason: r.reason, detail: r.detail || {},
+      ciqStatus: c.cIQStatus || '', ciqReason: c.cIQRejectionReason || '',
+      businessDescription: c.businessDescription || '',
+    };
+  });
+  // Group by stage → by reason
+  const byStage = {};
+  for (const r of rows) {
+    byStage[r.stage] = byStage[r.stage] || { count: 0, reasons: {} };
+    byStage[r.stage].count++;
+    byStage[r.stage].reasons[r.reason] = (byStage[r.stage].reasons[r.reason] || 0) + 1;
+  }
+  const headers = ['企業名', '国', 'SIC', '除外段階', '除外理由', '判定根拠', 'CIQ Status', 'CIQ Reason'];
+  return { rows, byStage, headers };
+}
+
+/**
+ * Get the headline conclusion sentence (Japanese) for the dashboard
+ * top banner.
+ * @param {ResultsSummary} sum
+ * @returns {string}
+ */
+function buildConclusionSentence(sum) {
+  if (!sum) return '';
+  const pliLabel = PLI_DEFS[sum.pliType]?.label || sum.pliType;
+  const meth = { WEIGHTED_AVG: '加重平均', SIMPLE_AVG: '単純平均', SINGLE_YEAR: '単年度' }[sum.method] || sum.method;
+  const fmt = (v) => (v == null || !Number.isFinite(v)) ? '—' : (v * 100).toFixed(2) + '%';
+  const tpVal = fmt(sum.testedPartyPli);
+  const inOut = { WITHIN: 'レンジ内', BELOW: 'レンジ下限未満', ABOVE: 'レンジ上限超' }[sum.classification?.position || 'WITHIN'];
+  return `検証対象企業の${pliLabel}（${meth}）= ${tpVal} は、` +
+         `比較対象 ${sum.range.count} 社のアームスレングス・レンジ` +
+         `（${fmt(sum.range.lower)} 〜 ${fmt(sum.range.upper)}、中央値 ${fmt(sum.range.median)}、${sum.quartileMeta.label}）の` +
+         `${inOut} にあります。`;
+}
+</script>
+
+<!-- =====================================================================
+  PHASE 5 / BLOCK 29 : Exporters (SheetJS + CSV)
+===================================================================== -->
+<script id="results-export">
+/** Escape one field for CSV (RFC 4180): wrap in double quotes when the
+ *  field contains a comma, double quote, or line break; double-up any
+ *  inner quotes. */
+function _csvField(v) {
+  if (v == null) return '';
+  const s = String(v);
+  if (/[",\r\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+  return s;
+}
+
+/** Convert a header/row table to CSV text. */
+function rowsToCsv(headers, rows, mapRow) {
+  const lines = [headers.map(_csvField).join(',')];
+  for (const r of rows) lines.push(mapRow(r).map(_csvField).join(','));
+  return lines.join('\r\n');
+}
+
+/** Filesystem-safe filename slug. */
+function _slug(s) { return String(s || 'project').replace(/[\\/:*?"<>|]/g, '_'); }
+function _dateTag() { return new Date().toISOString().slice(0, 10).replace(/-/g, ''); }
+
+/**
+ * Export accepted companies as a multi-sheet XLSX.
+ * Sheets: ①Accepted Summary  ②PLI breakdown (numerator/denominator by year)
+ *         ③Similarity breakdown  ④Range card + method badge + verification PLI list
+ *         ⑤Quartile method note (IRS verification list / Excel formula notes)
+ * @returns {Promise<Blob>}
+ */
+async function exportAcceptedXlsx(project, jurisdictionId, opts = {}) {
+  const summary = await buildResultsSummary(project, jurisdictionId);
+  const table   = await buildAcceptedTable(project, jurisdictionId);
+  const wb = XLSX.utils.book_new();
+
+  // Sheet 1: Accepted summary
+  const acceptedHead = ['企業名','国','SIC','NAICS','類似性スコア',
+    ...table.years.map(y => 'PLI ' + y),
+    '加重平均PLI', ...(project.analysisResults?.[jurisdictionId]?.wca ? ['WCA調整後PLI'] : []),
+    '選定理由','事業内容'];
+  const acceptedData = [
+    [`採用企業一覧 (${jurisdictionId}, PLI=${PLI_DEFS[summary.pliType]?.label}, ${summary.method}, ${summary.quartileMeta.label})`],
+    [summary.quartileMeta.note],
+    [],
+    acceptedHead,
+    ...table.rows.map(r => [
+      r.name, r.country, r.sic, r.naics,
+      r.similarityTotal != null ? Number(r.similarityTotal.toFixed(2)) : '',
+      ...table.years.map(y => r.pliByYear[y] != null ? Number((r.pliByYear[y] * 100).toFixed(4)) : ''),
+      r.pliValue != null ? Number((r.pliValue * 100).toFixed(4)) : '',
+      ...(project.analysisResults?.[jurisdictionId]?.wca ? [r.pliAdjusted != null ? Number((r.pliAdjusted * 100).toFixed(4)) : ''] : []),
+      r.rationale, r.businessDescription,
+    ]),
+  ];
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(acceptedData), 'Accepted');
+
+  // Sheet 2: PLI breakdown (numerator / denominator / ratio by year)
+  const breakdown = [['企業名','年度','分子','分母','PLI']];
+  for (const r of table.rows) {
+    for (const b of (r.pliBreakdown || [])) {
+      breakdown.push([r.name, b.year, b.numerator, b.denominator, b.ratio != null ? Number((b.ratio * 100).toFixed(4)) : '']);
+    }
+  }
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(breakdown), 'PLI明細');
+
+  // Sheet 3: Similarity breakdown
+  const simHead = ['企業名','総合', ...SIMILARITY_DIMS.map(d => d.label)];
+  const simRows = [simHead];
+  for (const r of table.rows) {
+    simRows.push([r.name, r.similarityTotal != null ? Number(r.similarityTotal.toFixed(2)) : '',
+                  ...SIMILARITY_DIMS.map(d => r.similarityBreakdown?.[d.key] != null ? Number(r.similarityBreakdown[d.key].toFixed(2)) : '')]);
+  }
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(simRows), '類似性スコア');
+
+  // Sheet 4: Range card + quartile-method badge note + sorted verification list
+  const range = summary.range;
+  const meta  = summary.quartileMeta;
+  const rangeSheet = [
+    ['四分位計算方式', meta.label],
+    ['注記', meta.note],
+    ['Excel関数で再現可能', meta.excelReproducible ? 'Yes' : 'No'],
+    [],
+    ['', '値'], ['Min', range.min], [`${range.lowerP}パーセンタイル`, range.lower],
+    ['中央値', range.median], [`${range.upperP}パーセンタイル`, range.upper], ['Max', range.max],
+    ['採用社数', range.count],
+    [],
+    ['検証対象企業 PLI', summary.testedPartyPli],
+    ['判定', { WITHIN: 'レンジ内', BELOW: 'レンジ下限未満', ABOVE: 'レンジ上限超' }[summary.classification?.position] || ''],
+  ];
+  // Add the sorted verification PLI list (for IRS hand-check) or Excel formulas
+  rangeSheet.push([], ['昇順PLI一覧（検算用）']);
+  const sortedVals = table.rows.map(r => r.pliValue).filter(v => v != null).slice().sort((a, b) => a - b);
+  for (let i = 0; i < sortedVals.length; i++) {
+    rangeSheet.push([`#${i + 1}`, Number((sortedVals[i] * 100).toFixed(4)) + '%']);
+  }
+  if (meta.excelReproducible && opts.embedFormulas !== false) {
+    // The sorted PLI values live in the column for the verification list.
+    // SheetJS makes building actual cell references awkward across nested
+    // sheet layouts, so we embed a parametric formula tied to a named range
+    // hint that the user can adjust.
+    rangeSheet.push([], ['Excel数式（参考: 採用企業の昇順PLIを A:A セルに置いた場合）']);
+    if (meta.excelFormula) {
+      rangeSheet.push([`${range.lowerP}パーセンタイル`, meta.excelFormula(range.lowerP).replace('<range>', 'A:A')]);
+      rangeSheet.push(['中央値',                     meta.excelFormula(50).replace('<range>', 'A:A')]);
+      rangeSheet.push([`${range.upperP}パーセンタイル`, meta.excelFormula(range.upperP).replace('<range>', 'A:A')]);
+    }
+  } else {
+    rangeSheet.push([], ['※ IRS方式（§1.482）は Excel の QUARTILE 関数では再現できません。',
+      '上記の昇順PLI一覧をもとに、k = p × n の整数判定で隣接平均を取って手計算で検証してください。']);
+  }
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(rangeSheet), 'レンジ・サマリー');
+
+  await logAudit('EXPORT_ACCEPTED', { projectId: project.id, jurisdictionId, count: table.rows.length, quartileMethod: summary.quartileMethod }, project.id);
+  return new Blob([XLSX.write(wb, { type: 'array', bookType: 'xlsx' })], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+}
+
+/**
+ * Export rejected companies as an XLSX with grouped breakdowns.
+ */
+async function exportRejectedXlsx(project, jurisdictionId) {
+  const summary = await buildResultsSummary(project, jurisdictionId);
+  const table   = await buildRejectedTable(project, jurisdictionId);
+  const wb = XLSX.utils.book_new();
+
+  const head = ['企業名','国','SIC','除外段階','除外理由','判定根拠','CIQ Status','CIQ Reason','事業内容'];
+  const data = [[`除外企業一覧 (${jurisdictionId})`], [], head,
+    ...table.rows.map(r => [r.name, r.country, r.sic, r.stage, r.reason, JSON.stringify(r.detail), r.ciqStatus, r.ciqReason, r.businessDescription]),
+  ];
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(data), 'Rejected');
+
+  // Aggregate sheet
+  const agg = [['段階','理由','件数']];
+  for (const [stage, info] of Object.entries(table.byStage)) {
+    for (const [reason, count] of Object.entries(info.reasons)) agg.push([stage, reason, count]);
+  }
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(agg), '段階別集計');
+
+  await logAudit('EXPORT_REJECTED', { projectId: project.id, jurisdictionId, count: table.rows.length }, project.id);
+  return new Blob([XLSX.write(wb, { type: 'array', bookType: 'xlsx' })], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+}
+
+/** Range-only XLSX, including the quartile-method note + verification list. */
+async function exportRangeXlsx(project, jurisdictionId) {
+  const summary = await buildResultsSummary(project, jurisdictionId);
+  if (!summary) throw new Error('No analysis result');
+  const wb = XLSX.utils.book_new();
+  const meta = summary.quartileMeta;
+  const data = [
+    ['プロジェクト', project.name], ['法域', jurisdictionId], ['作成日', new Date().toISOString().slice(0, 10)],
+    [],
+    ['PLI種別', PLI_DEFS[summary.pliType]?.label],
+    ['集計方法', summary.method],
+    ['四分位計算方式', meta.label],
+    ['Excelで再現可能', meta.excelReproducible ? 'Yes' : 'No'],
+    ['注記', meta.note],
+    [],
+    ['指標','値'],
+    ['Min', summary.range.min],
+    [`${summary.range.lowerP}パーセンタイル`, summary.range.lower],
+    ['中央値', summary.range.median],
+    [`${summary.range.upperP}パーセンタイル`, summary.range.upper],
+    ['Max', summary.range.max],
+    ['採用社数', summary.range.count],
+    [],
+    ['検証対象企業', summary.testedPartyName],
+    ['検証対象企業 PLI', summary.testedPartyPli],
+    ['判定', { WITHIN: 'レンジ内', BELOW: 'レンジ下限未満', ABOVE: 'レンジ上限超' }[summary.classification?.position] || ''],
+  ];
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(data), 'Range Summary');
+  await logAudit('EXPORT_RANGE', { projectId: project.id, jurisdictionId, quartileMethod: summary.quartileMethod }, project.id);
+  return new Blob([XLSX.write(wb, { type: 'array', bookType: 'xlsx' })], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+}
+
+/** Compare summary across all jurisdictions of a project. */
+async function exportComparisonXlsx(project) {
+  const wb = XLSX.utils.book_new();
+  const head = ['法域','PLI種別','集計方法','四分位法','採用社数','Lower%','下限','中央値','上限','Upper%','Max','TP PLI','判定','Excel再現可'];
+  const rows = [head];
+  for (const j of Object.keys(project.analysisResults || {})) {
+    const sum = await buildResultsSummary(project, j); if (!sum) continue;
+    rows.push([
+      j, PLI_DEFS[sum.pliType]?.label, sum.method, sum.quartileMeta.label,
+      sum.range.count, sum.range.lowerP, sum.range.lower, sum.range.median, sum.range.upper, sum.range.upperP, sum.range.max,
+      sum.testedPartyPli, sum.classification?.position || '', sum.quartileMeta.excelReproducible ? 'Yes' : 'No',
+    ]);
+  }
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(rows), 'Comparison');
+  return new Blob([XLSX.write(wb, { type: 'array', bookType: 'xlsx' })], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+}
+</script>
+
+<!-- =====================================================================
+  PHASE 5 / BLOCK 30 : TPApp.results + TPApp.export facade
+===================================================================== -->
+<script id="tp-app-phase5">
+TPApp.results = {
+  getSummary:           buildResultsSummary,
+  getAcceptedTable:     buildAcceptedTable,
+  getRejectedTable:     buildRejectedTable,
+  generateSelectionRationale: (args) => generateSelectionRationale(args),
+  buildConclusionSentence,
+  quartileMeta,
+  quartileMetaAll:      QUARTILE_METHOD_META,
+};
+
+TPApp.export = {
+  acceptedToXlsx: (projectId, jurisdictionId, opts) =>
+    db.projects.get(projectId).then(p => exportAcceptedXlsx(p, jurisdictionId, opts)),
+  rejectedToXlsx: (projectId, jurisdictionId) =>
+    db.projects.get(projectId).then(p => exportRejectedXlsx(p, jurisdictionId)),
+  rangeToXlsx:    (projectId, jurisdictionId) =>
+    db.projects.get(projectId).then(p => exportRangeXlsx(p, jurisdictionId)),
+  comparisonToXlsx: (projectId) =>
+    db.projects.get(projectId).then(p => exportComparisonXlsx(p)),
+  toCsv: (headers, rows, mapRow, filename) => {
+    const csv = rowsToCsv(headers, rows, mapRow);
+    // Prepend UTF-8 BOM so Excel auto-detects encoding.
+    const blob = new Blob(['﻿', csv], { type: 'text/csv;charset=utf-8' });
+    downloadBlob(blob, filename);
+    return blob;
+  },
+  csvFromTable: rowsToCsv,
+};
+</script>
+
+
+<!-- =====================================================================
   ROOT TEMPLATE
 ===================================================================== -->
 <div x-data="tpApp()" x-init="init()" x-cloak class="h-screen flex flex-col">
@@ -6208,6 +6977,16 @@ Foo Corp,JP,334413,2024,1000000,80000,..."></textarea>
                 </div>
                 <div><label class="block text-xs text-slate-500">下限パーセンタイル <span title="日本/米国はIQRの25%。インドは35%">[?]</span></label><input type="number" min="0" max="100" class="w-full px-2 py-1 border rounded" x-model.number="editingRule.rangeMethod.lowerPercentile"></div>
                 <div><label class="block text-xs text-slate-500">上限パーセンタイル</label><input type="number" min="0" max="100" class="w-full px-2 py-1 border rounded" x-model.number="editingRule.rangeMethod.upperPercentile"></div>
+                <div class="col-span-2 border-t pt-3 mt-2">
+                  <label class="block text-xs text-slate-500">四分位計算方式 <span title="IRS方式は米国財務省規則 §1.482。Excel方式は QUARTILE.INC/EXC と同等。">[?]</span></label>
+                  <div class="flex gap-2 items-center mt-1">
+                    <select class="px-2 py-1 border rounded" x-model="editingRule.quartileMethod">
+                      <template x-for="m in QUARTILE_METHODS" :key="m"><option :value="m" x-text="QUARTILE_METHOD_META[m].label"></option></template>
+                    </select>
+                    <span class="font-mono text-xs px-2 py-0.5 rounded" :class="QUARTILE_METHOD_META[editingRule.quartileMethod || 'IRS']?.badgeClass" x-text="QUARTILE_METHOD_META[editingRule.quartileMethod || 'IRS']?.label"></span>
+                    <span class="text-[10px] text-slate-500 ml-2" x-text="QUARTILE_METHOD_META[editingRule.quartileMethod || 'IRS']?.note"></span>
+                  </div>
+                </div>
               </div>
 
               <!-- TAB: years -->
@@ -6609,6 +7388,8 @@ Foo Corp,JP,334413,2024,1000000,80000,..."></textarea>
                     <div class="border rounded p-3 bg-slate-50 mb-3 text-xs sticky top-0 z-10">
                       <div class="flex items-center gap-3 mb-2">
                         <span class="font-semibold">ライブIQRプレビュー</span>
+                        <!-- Phase 5: quartile method badge -->
+                        <span class="font-mono text-[10px] px-2 py-0.5 rounded" :class="QUARTILE_METHOD_META[analysisCfg.quartileMethod]?.badgeClass" x-text="QUARTILE_METHOD_META[analysisCfg.quartileMethod]?.label"></span>
                         <span>選択中: <span class="font-mono" x-text="livePreviewSelected.size"></span> 社</span>
                         <div class="flex-1"></div>
                         <button class="px-2 py-0.5 border rounded bg-white" @click="livePreviewSelected = new Set(); recomputeLivePreview()">クリア</button>
@@ -6791,10 +7572,14 @@ Foo Corp,JP,334413,2024,1000000,80000,..."></textarea>
               <div class="space-y-6">
                 <!-- Range summary -->
                 <div class="bg-white rounded-lg shadow p-5">
-                  <h3 class="font-semibold mb-3">アームスレングス・レンジ
-                    <span class="text-xs text-slate-500 font-normal"
-                          x-text="'(' + (PLI_DEFS[currentAnalysis.pliType]?.label) + ' / ' + currentAnalysis.method + ' / ' + currentAnalysis.quartileMethod + '方式)'"></span>
-                  </h3>
+                  <div class="flex items-center justify-between mb-3">
+                    <h3 class="font-semibold">アームスレングス・レンジ
+                      <span class="text-xs text-slate-500 font-normal"
+                            x-text="'(' + (PLI_DEFS[currentAnalysis.pliType]?.label) + ' / ' + currentAnalysis.method + ')'"></span>
+                    </h3>
+                    <!-- Phase 5: quartile method badge -->
+                    <span class="font-mono text-xs px-2 py-0.5 rounded" :class="QUARTILE_METHOD_META[currentAnalysis.quartileMethod]?.badgeClass" x-text="QUARTILE_METHOD_META[currentAnalysis.quartileMethod]?.label"></span>
+                  </div>
                   <div class="grid grid-cols-5 gap-3 text-sm">
                     <div class="bg-slate-50 p-3 rounded text-center"><div class="text-xs text-slate-500">最小</div><div class="font-mono" x-text="fmtPct(currentAnalysis.range.min)"></div></div>
                     <div class="bg-slate-50 p-3 rounded text-center"><div class="text-xs text-slate-500" x-text="currentAnalysis.range.lowerP + 'パーセンタイル'"></div><div class="font-mono text-blue-700" x-text="fmtPct(currentAnalysis.range.lower)"></div></div>
@@ -6828,7 +7613,11 @@ Foo Corp,JP,334413,2024,1000000,80000,..."></textarea>
 
                 <!-- Range plot (box + tested party marker) -->
                 <div class="bg-white rounded-lg shadow p-5">
-                  <h3 class="font-semibold mb-3 text-sm">レンジ・プロット</h3>
+                  <div class="flex items-center justify-between mb-3">
+                    <h3 class="font-semibold text-sm">レンジ・プロット</h3>
+                    <!-- Phase 5: quartile method badge -->
+                    <span class="font-mono text-xs px-2 py-0.5 rounded" :class="QUARTILE_METHOD_META[currentAnalysis.quartileMethod]?.badgeClass" x-text="QUARTILE_METHOD_META[currentAnalysis.quartileMethod]?.label"></span>
+                  </div>
                   <svg viewBox="0 0 800 100" width="100%" height="100">
                     <template x-for="el in rangePlotElements()" :key="el.key">
                       <g>
@@ -6918,11 +7707,332 @@ Foo Corp,JP,334413,2024,1000000,80000,..."></textarea>
         </template>
       </section>
 
-      <!-- ============== Results placeholder ============== -->
-      <section x-show="currentView === 'results'" class="p-6">
-        <div class="bg-white rounded-lg shadow p-6">
-          <h2 class="font-semibold text-lg mb-3">結果 <span class="text-xs text-amber-600 font-normal">(Phase 6 で実装)</span></h2>
-          <p class="text-sm text-slate-600">最終比較対象企業群、PLI 分布、ベンチマークレンジを表示します。</p>
+      <!-- ============== Results (Phase 5) ============== -->
+      <section x-show="currentView === 'results'" class="p-6 space-y-6">
+        <template x-if="!currentProject"><div class="bg-white rounded-lg shadow p-6 text-sm text-slate-500">プロジェクトを選択してください。</div></template>
+
+        <template x-if="currentProject">
+          <div class="space-y-6">
+            <!-- Jurisdiction tabs -->
+            <div class="flex border-b">
+              <template x-for="j in resultsJurisdictions" :key="j">
+                <button class="px-3 py-2 text-sm border-b-2 -mb-px"
+                        :class="resultsActiveJ === j ? 'border-blue-600 text-blue-700 font-semibold' : 'border-transparent text-slate-500'"
+                        @click="resultsActiveJ = j; loadResultsView()">
+                  <span class="font-mono" x-text="j"></span>
+                </button>
+              </template>
+              <template x-if="resultsJurisdictions.length >= 2">
+                <button class="px-3 py-2 text-sm border-b-2 -mb-px"
+                        :class="resultsActiveJ === '__COMPARE__' ? 'border-blue-600 text-blue-700 font-semibold' : 'border-transparent text-slate-500'"
+                        @click="resultsActiveJ = '__COMPARE__'; loadResultsComparison()">多法域比較</button>
+              </template>
+            </div>
+
+            <!-- Single-jurisdiction view -->
+            <template x-if="resultsActiveJ !== '__COMPARE__' && resultsSummary">
+              <div class="space-y-6">
+                <!-- Headline conclusion -->
+                <div class="bg-gradient-to-br rounded-lg shadow p-6"
+                     :class="{
+                       WITHIN: 'from-emerald-50 to-emerald-100 border border-emerald-300',
+                       BELOW:  'from-amber-50 to-amber-100 border border-amber-300',
+                       ABOVE:  'from-amber-50 to-amber-100 border border-amber-300'
+                     }[resultsSummary.classification?.position]">
+                  <div class="flex items-start gap-3 mb-3">
+                    <span class="text-xs px-2 py-0.5 rounded font-mono" :class="resultsSummary.quartileMeta.badgeClass" x-text="resultsSummary.quartileMeta.label"></span>
+                    <span class="text-xs text-slate-500">執行: <span x-text="new Date(resultsSummary.executedAt).toLocaleString()"></span></span>
+                  </div>
+                  <p class="text-lg font-semibold leading-relaxed" x-text="resultsConclusion"></p>
+                  <template x-if="resultsSummary.classification && resultsSummary.classification.position !== 'WITHIN'">
+                    <div class="mt-3 text-sm">
+                      <div>中央値までの差: <span class="font-mono" x-text="fmtPct(-resultsSummary.classification.distanceToMedian)"></span></div>
+                      <div>直近の四分位までの差:
+                        <span class="font-mono" x-text="fmtPct(resultsSummary.classification.position === 'BELOW' ? (resultsSummary.range.lower - resultsSummary.testedPartyPli) : (resultsSummary.testedPartyPli - resultsSummary.range.upper))"></span>
+                      </div>
+                    </div>
+                  </template>
+                </div>
+
+                <!-- Meta cards -->
+                <div class="grid grid-cols-2 md:grid-cols-5 gap-3 text-sm">
+                  <div class="bg-white rounded-lg shadow p-3"><div class="text-xs text-slate-500">法域 (ルール)</div><div class="font-mono font-semibold" x-text="resultsSummary.jurisdictionId"></div></div>
+                  <div class="bg-white rounded-lg shadow p-3"><div class="text-xs text-slate-500">PLI</div><div class="font-semibold" x-text="PLI_DEFS[resultsSummary.pliType]?.label"></div></div>
+                  <div class="bg-white rounded-lg shadow p-3"><div class="text-xs text-slate-500">集計方法</div><div x-text="{WEIGHTED_AVG:'N年加重平均',SIMPLE_AVG:'N年単純平均',SINGLE_YEAR:'単年度'}[resultsSummary.method]"></div></div>
+                  <div class="bg-white rounded-lg shadow p-3"><div class="text-xs text-slate-500">四分位方式</div><span class="font-mono text-xs px-2 py-0.5 rounded" :class="resultsSummary.quartileMeta.badgeClass" x-text="resultsSummary.quartileMeta.label"></span></div>
+                  <div class="bg-white rounded-lg shadow p-3"><div class="text-xs text-slate-500">採用社数 / WCA</div><div><span class="font-mono" x-text="resultsSummary.acceptedCount + ' 社'"></span> / <span x-text="resultsSummary.wcaApplied ? '適用済' : '未適用'"></span></div></div>
+                </div>
+
+                <!-- Funnel + range plot -->
+                <div class="grid grid-cols-2 gap-4">
+                  <div class="bg-white rounded-lg shadow p-4">
+                    <h3 class="text-sm font-semibold mb-2">スクリーニング・ファネル</h3>
+                    <div class="space-y-1">
+                      <template x-for="s in currentScreeningResult?.stages || []" :key="s.id">
+                        <div class="flex items-center gap-2">
+                          <span class="font-mono w-8 text-xs text-slate-500" x-text="s.id"></span>
+                          <span class="w-40 text-xs" x-text="s.label"></span>
+                          <div class="flex-1 h-5 bg-slate-100 rounded relative overflow-hidden">
+                            <div class="absolute inset-y-0 left-0 bg-blue-500"
+                                 :style="'width:' + Math.max(2, 100 * s.passCount / (currentScreeningResult?.initialPoolCount || 1)) + '%'"></div>
+                          </div>
+                          <span class="w-16 text-xs text-right" x-text="s.passCount + '/' + s.inputCount"></span>
+                        </div>
+                      </template>
+                    </div>
+                  </div>
+                  <div class="bg-white rounded-lg shadow p-4">
+                    <div class="flex items-center justify-between mb-2">
+                      <h3 class="text-sm font-semibold">レンジ・プロット</h3>
+                      <span class="text-xs px-2 py-0.5 rounded font-mono" :class="resultsSummary.quartileMeta.badgeClass" x-text="resultsSummary.quartileMeta.label"></span>
+                    </div>
+                    <svg viewBox="0 0 600 100" width="100%" height="100">
+                      <template x-for="el in resultsRangePlotElements()" :key="el.key">
+                        <g>
+                          <template x-if="el.kind === 'axis'"><line :x1="el.x1" :y1="el.y" :x2="el.x2" :y2="el.y" stroke="#94a3b8"></line></template>
+                          <template x-if="el.kind === 'whisker'"><line :x1="el.x1" y1="40" :x2="el.x2" y2="40" stroke="#1e293b" stroke-width="2"></line></template>
+                          <template x-if="el.kind === 'box'"><rect :x="el.x" y="20" :width="el.w" height="40" fill="#bfdbfe" stroke="#2563eb"></rect></template>
+                          <template x-if="el.kind === 'median'"><line :x1="el.x" y1="20" :x2="el.x" y2="60" stroke="#059669" stroke-width="3"></line></template>
+                          <template x-if="el.kind === 'point'"><circle :cx="el.x" cy="40" r="3" :fill="el.color"></circle></template>
+                          <template x-if="el.kind === 'tp'"><g><circle :cx="el.x" cy="40" r="7" fill="#dc2626"></circle><text :x="el.x" y="80" text-anchor="middle" font-size="10" fill="#dc2626">TP</text></g></template>
+                          <template x-if="el.kind === 'tick'"><g><line :x1="el.x" y1="62" :x2="el.x" y2="66" stroke="#475569"></line><text :x="el.x" y="78" text-anchor="middle" font-size="10" fill="#475569" x-text="el.label"></text></g></template>
+                        </g>
+                      </template>
+                    </svg>
+                  </div>
+                </div>
+
+                <!-- Accepted companies -->
+                <div class="bg-white rounded-lg shadow">
+                  <div class="px-5 py-3 border-b flex items-center justify-between">
+                    <h3 class="font-semibold">採用企業 (<span x-text="resultsAccepted.rows.length"></span>)</h3>
+                    <div class="flex gap-2">
+                      <input class="px-2 py-1 border rounded text-xs" placeholder="絞り込み..." x-model="resultsFilters.accepted">
+                      <button class="px-3 py-1.5 text-xs border rounded" @click="exportAccepted()">Excel エクスポート</button>
+                      <button class="px-3 py-1.5 text-xs border rounded" @click="exportAcceptedCsv()">CSV</button>
+                    </div>
+                  </div>
+                  <div class="overflow-auto max-h-[28rem]">
+                    <table class="w-full text-xs">
+                      <thead class="bg-slate-100 sticky top-0">
+                        <tr>
+                          <th class="px-2 py-1 text-left cursor-pointer" @click="sortAccepted('name')">企業名</th>
+                          <th class="px-2 py-1">国</th>
+                          <th class="px-2 py-1">SIC</th>
+                          <th class="px-2 py-1 cursor-pointer" @click="sortAccepted('similarityTotal')">類似性</th>
+                          <template x-for="y in resultsAccepted.years" :key="y"><th class="px-2 py-1 text-right" x-text="y"></th></template>
+                          <th class="px-2 py-1 text-right cursor-pointer" @click="sortAccepted('pliValue')">加重平均</th>
+                          <th class="px-2 py-1 text-left">選定理由</th>
+                          <th></th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <template x-for="r in filteredAccepted" :key="r.companyId">
+                          <tr class="border-t hover:bg-slate-50">
+                            <td class="px-2 py-1" x-text="r.name"></td>
+                            <td class="px-2 py-1" x-text="r.country"></td>
+                            <td class="px-2 py-1 font-mono" x-text="r.sic"></td>
+                            <td class="px-2 py-1 text-right font-mono" x-text="r.similarityTotal != null ? r.similarityTotal.toFixed(1) : ''"></td>
+                            <template x-for="y in resultsAccepted.years" :key="y">
+                              <td class="px-2 py-1 text-right font-mono" x-text="fmtPct(r.pliByYear[y])"></td>
+                            </template>
+                            <td class="px-2 py-1 text-right font-mono font-semibold" x-text="fmtPct(r.pliValue)"></td>
+                            <td class="px-2 py-1 text-slate-600 max-w-md truncate" :title="r.rationale" x-text="r.rationale"></td>
+                            <td class="px-2 py-1"><button class="text-xs px-2 py-0.5 border rounded" @click="openAcceptedDetail(r)">詳細</button></td>
+                          </tr>
+                        </template>
+                      </tbody>
+                    </table>
+                  </div>
+                  <div class="px-5 py-2 text-[11px] text-amber-700 bg-amber-50 border-t">
+                    類似性スコアは参考表示。アームスレングス・レンジには一切影響しません (採用企業セット全体に対し等しく算定)。
+                  </div>
+                </div>
+
+                <!-- Rejected companies -->
+                <div class="bg-white rounded-lg shadow">
+                  <div class="px-5 py-3 border-b flex items-center justify-between">
+                    <h3 class="font-semibold">除外企業 (<span x-text="resultsRejected.rows.length"></span>)</h3>
+                    <div class="flex gap-2">
+                      <button class="px-3 py-1.5 text-xs border rounded" @click="exportRejected()">Excel エクスポート</button>
+                      <button class="px-3 py-1.5 text-xs border rounded" @click="exportRejectedCsv()">CSV</button>
+                    </div>
+                  </div>
+                  <div class="p-3 space-y-2">
+                    <template x-for="[stage, info] in Object.entries(resultsRejected.byStage)" :key="stage">
+                      <details class="border rounded">
+                        <summary class="px-3 py-2 cursor-pointer text-sm bg-slate-50 font-semibold">
+                          <span class="font-mono" x-text="stage"></span>
+                          <span class="ml-2 text-slate-500">(<span x-text="info.count"></span> 社)</span>
+                          <span class="ml-3 text-xs text-slate-500" x-text="Object.entries(info.reasons).map(([r, c]) => r + ': ' + c).join(' / ')"></span>
+                        </summary>
+                        <div class="overflow-auto max-h-72 border-t">
+                          <table class="w-full text-xs">
+                            <thead class="bg-slate-50"><tr><th class="px-2 py-1 text-left">企業</th><th>国</th><th>SIC</th><th>除外理由</th><th>CIQ Status</th><th></th></tr></thead>
+                            <tbody>
+                              <template x-for="r in resultsRejected.rows.filter(x => x.stage === stage)" :key="r.companyId">
+                                <tr class="border-t">
+                                  <td class="px-2 py-1" x-text="r.name"></td>
+                                  <td class="px-2 py-1" x-text="r.country"></td>
+                                  <td class="px-2 py-1 font-mono" x-text="r.sic"></td>
+                                  <td class="px-2 py-1" x-text="r.reason"></td>
+                                  <td class="px-2 py-1" :class="r.ciqStatus && r.ciqStatus.toLowerCase().includes('accept') ? 'text-amber-700 font-semibold' : ''" x-text="r.ciqStatus"></td>
+                                  <td class="px-2 py-1"><button class="text-xs px-2 py-0.5 border rounded" @click="openRejectedDetail(r)">詳細</button></td>
+                                </tr>
+                              </template>
+                            </tbody>
+                          </table>
+                        </div>
+                      </details>
+                    </template>
+                  </div>
+                </div>
+
+                <!-- Range Excel export with formula option -->
+                <div class="bg-white rounded-lg shadow p-5">
+                  <div class="flex items-center justify-between">
+                    <div>
+                      <h3 class="font-semibold mb-1">レンジ・サマリー エクスポート</h3>
+                      <p class="text-xs text-slate-600">
+                        四分位方式:
+                        <span class="font-mono text-xs px-2 py-0.5 rounded ml-1" :class="resultsSummary.quartileMeta.badgeClass" x-text="resultsSummary.quartileMeta.label"></span>
+                        — <span x-text="resultsSummary.quartileMeta.note"></span>
+                      </p>
+                    </div>
+                    <div class="flex items-center gap-2">
+                      <template x-if="resultsSummary.quartileMeta.excelReproducible">
+                        <label class="text-xs flex items-center gap-1"><input type="checkbox" x-model="rangeExportEmbedFormulas"> Excel数式を埋込む</label>
+                      </template>
+                      <button class="px-3 py-1.5 text-xs border rounded" @click="exportRange()">Excel エクスポート</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </template>
+
+            <!-- Multi-jurisdiction comparison -->
+            <template x-if="resultsActiveJ === '__COMPARE__'">
+              <div class="space-y-4">
+                <div class="bg-white rounded-lg shadow p-5">
+                  <div class="flex items-center justify-between mb-3">
+                    <h3 class="font-semibold">多法域結果比較</h3>
+                    <button class="px-3 py-1.5 text-xs border rounded" @click="exportComparison()">比較表 Excel</button>
+                  </div>
+                  <div class="overflow-auto">
+                    <table class="w-full text-xs">
+                      <thead class="bg-slate-100">
+                        <tr><th class="px-2 py-1 text-left">法域</th><th>PLI</th><th>方式</th><th>四分位法</th><th>採用社数</th><th>下限</th><th>中央値</th><th>上限</th><th>TP PLI</th><th>判定</th></tr>
+                      </thead>
+                      <tbody>
+                        <template x-for="row in comparisonRows" :key="row.j">
+                          <tr class="border-t">
+                            <td class="px-2 py-1 font-mono" x-text="row.j"></td>
+                            <td class="px-2 py-1" x-text="row.pli"></td>
+                            <td class="px-2 py-1" x-text="row.method"></td>
+                            <td class="px-2 py-1"><span class="font-mono text-xs px-2 py-0.5 rounded" :class="row.meta.badgeClass" x-text="row.meta.label"></span></td>
+                            <td class="px-2 py-1 text-right font-mono" x-text="row.count"></td>
+                            <td class="px-2 py-1 text-right font-mono" x-text="fmtPct(row.lower)"></td>
+                            <td class="px-2 py-1 text-right font-mono" x-text="fmtPct(row.median)"></td>
+                            <td class="px-2 py-1 text-right font-mono" x-text="fmtPct(row.upper)"></td>
+                            <td class="px-2 py-1 text-right font-mono" x-text="fmtPct(row.tp)"></td>
+                            <td class="px-2 py-1" :class="row.position === 'WITHIN' ? 'text-emerald-700' : 'text-amber-700'" x-text="{WITHIN:'内',BELOW:'下',ABOVE:'上'}[row.position]"></td>
+                          </tr>
+                        </template>
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            </template>
+          </div>
+        </template>
+
+        <!-- Accepted detail modal -->
+        <div x-show="acceptedDetail" class="fixed inset-0 z-40 bg-black/40 flex items-center justify-center p-4">
+          <div class="bg-white rounded-lg shadow-xl max-w-4xl w-full max-h-[90vh] overflow-auto">
+            <div class="px-5 py-3 border-b flex items-center justify-between sticky top-0 bg-white">
+              <h3 class="font-semibold" x-text="acceptedDetail?.name"></h3>
+              <button class="text-slate-500" @click="acceptedDetail = null">&times;</button>
+            </div>
+            <template x-if="acceptedDetail">
+              <div class="p-5 space-y-4 text-sm">
+                <div class="bg-emerald-50 border border-emerald-200 rounded p-3">
+                  <div class="font-semibold mb-1">選定理由</div>
+                  <div x-text="acceptedDetail.rationale"></div>
+                </div>
+                <div class="grid grid-cols-2 gap-3">
+                  <div><span class="text-xs text-slate-500">国 / SIC / NAICS</span><div><span x-text="acceptedDetail.country"></span> / <span class="font-mono" x-text="acceptedDetail.sic"></span> / <span class="font-mono" x-text="acceptedDetail.naics"></span></div></div>
+                  <div><span class="text-xs text-slate-500">類似性スコア (総合)</span><div class="font-mono font-semibold" x-text="(acceptedDetail.similarityTotal || 0).toFixed(2)"></div></div>
+                </div>
+                <div>
+                  <div class="font-semibold mb-1 text-xs">事業内容</div>
+                  <p class="text-slate-700 whitespace-pre-wrap" x-text="acceptedDetail.businessDescription || '(記載なし)'"></p>
+                </div>
+                <div>
+                  <div class="font-semibold mb-1 text-xs">PLI 内訳 (検算可能)</div>
+                  <table class="w-full text-xs border">
+                    <thead class="bg-slate-100"><tr><th class="px-2 py-1">年度</th><th>分子</th><th>分母</th><th>PLI</th></tr></thead>
+                    <tbody>
+                      <template x-for="b in acceptedDetail.pliBreakdown" :key="b.year">
+                        <tr class="border-t"><td class="px-2 py-1 font-mono text-center" x-text="b.year"></td><td class="px-2 py-1 text-right font-mono" x-text="b.numerator?.toLocaleString() || ''"></td><td class="px-2 py-1 text-right font-mono" x-text="b.denominator?.toLocaleString() || ''"></td><td class="px-2 py-1 text-right font-mono" x-text="fmtPct(b.ratio)"></td></tr>
+                      </template>
+                      <tr class="border-t bg-emerald-50 font-semibold"><td colspan="3" class="px-2 py-1 text-right">加重平均</td><td class="px-2 py-1 text-right font-mono" x-text="fmtPct(acceptedDetail.pliValue)"></td></tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div>
+                  <div class="font-semibold mb-1 text-xs">類似性スコア内訳</div>
+                  <table class="w-full text-xs border">
+                    <tbody>
+                      <template x-for="d in SIMILARITY_DIMS" :key="d.key">
+                        <tr class="border-t">
+                          <td class="px-2 py-1" x-text="d.label"></td>
+                          <td class="px-2 py-1 text-right font-mono w-24" x-text="(acceptedDetail.similarityBreakdown?.[d.key] || 0).toFixed(1)"></td>
+                          <td class="px-2 py-1 w-1/2"><div class="h-3 bg-slate-200 rounded"><div class="h-3 bg-blue-500 rounded" :style="'width:' + (acceptedDetail.similarityBreakdown?.[d.key] || 0) + '%'"></div></div></td>
+                        </tr>
+                      </template>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </template>
+          </div>
+        </div>
+
+        <!-- Rejected detail modal -->
+        <div x-show="rejectedDetail" class="fixed inset-0 z-40 bg-black/40 flex items-center justify-center p-4">
+          <div class="bg-white rounded-lg shadow-xl max-w-2xl w-full">
+            <div class="px-5 py-3 border-b flex items-center justify-between">
+              <h3 class="font-semibold" x-text="rejectedDetail?.name"></h3>
+              <button class="text-slate-500" @click="rejectedDetail = null">&times;</button>
+            </div>
+            <template x-if="rejectedDetail">
+              <div class="p-5 space-y-3 text-sm">
+                <div class="bg-rose-50 border border-rose-200 rounded p-3">
+                  <div class="text-xs font-semibold text-rose-700 mb-1">除外段階 / 理由</div>
+                  <div><span class="font-mono" x-text="rejectedDetail.stage"></span> · <span x-text="rejectedDetail.reason"></span></div>
+                </div>
+                <div>
+                  <div class="text-xs font-semibold mb-1">判定根拠</div>
+                  <pre class="text-xs font-mono bg-slate-50 p-2 rounded overflow-auto" x-text="JSON.stringify(rejectedDetail.detail, null, 2)"></pre>
+                </div>
+                <template x-if="rejectedDetail.ciqStatus">
+                  <div :class="(rejectedDetail.ciqStatus || '').toLowerCase().includes('accept') ? 'bg-amber-50 border-amber-300' : 'bg-slate-50 border-slate-200'" class="border rounded p-3">
+                    <div class="text-xs font-semibold mb-1">CIQ判定との差分</div>
+                    <div>CIQ Status: <span class="font-mono" x-text="rejectedDetail.ciqStatus"></span></div>
+                    <template x-if="rejectedDetail.ciqReason"><div>CIQ Reason: <span x-text="rejectedDetail.ciqReason"></span></div></template>
+                    <template x-if="(rejectedDetail.ciqStatus || '').toLowerCase().includes('accept')">
+                      <div class="text-amber-700 mt-1">⚠ アプリは「除外」、CIQは「採用」 — 差分あり</div>
+                    </template>
+                  </div>
+                </template>
+                <div>
+                  <div class="text-xs font-semibold mb-1">事業内容</div>
+                  <p class="text-slate-700 whitespace-pre-wrap" x-text="rejectedDetail.businessDescription || '(記載なし)'"></p>
+                </div>
+              </div>
+            </template>
+          </div>
         </div>
       </section>
 
