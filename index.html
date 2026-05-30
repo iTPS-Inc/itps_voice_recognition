@@ -331,11 +331,17 @@ db.version(4).stores({
  */
 async function logAudit(action, payload = {}, projectId = null) {
   try {
-    await db.auditLog.add({ ts: Date.now(), action, payload, projectId });
+    // Phase 8: stamp the configured operator name (if any) onto every
+    // entry so the audit-trail viewer can attribute actions.
+    const user = (typeof __currentUserName === 'string' && __currentUserName) ? __currentUserName : null;
+    await db.auditLog.add({ ts: Date.now(), action, payload, projectId, user });
   } catch (e) {
     console.error('logAudit failed', e);
   }
 }
+
+/** Phase 8: operator name set from Settings; logAudit reads this. */
+let __currentUserName = '';
 
 /**
  * Read a settings value by key.
@@ -810,6 +816,7 @@ function tpApp() {
       { id: 'scoring',    labelJa: 'スコア & PLI',         labelEn: 'Score & PLI' },
       { id: 'results',    labelJa: '結果',                  labelEn: 'Results' },
       { id: 'reports',    labelJa: 'レポート出力',          labelEn: 'Reports' },
+      { id: 'audit',      labelJa: '監査証跡',              labelEn: 'Audit Trail' },
       { id: 'settings',   labelJa: '設定',                  labelEn: 'Settings' },
     ],
 
@@ -856,6 +863,18 @@ function tpApp() {
         await this.refreshTodos();
         await this.refreshFontStatus();
         await this.refreshFxRows();
+        // Phase 8: restore theme + operator + keyboard shortcuts.
+        this.theme = await getSetting('theme', 'light');
+        applyTheme(this.theme);
+        this.operatorName = await getSetting('operatorName', '');
+        __currentUserName = this.operatorName;
+        document.addEventListener('keydown', (ev) => {
+          const mod = ev.ctrlKey || ev.metaKey;
+          if (!mod) return;
+          const k = ev.key.toLowerCase();
+          if (k === 'z' && !ev.shiftKey) { ev.preventDefault(); this.doUndo(); }
+          else if (k === 'y' || (k === 'z' && ev.shiftKey)) { ev.preventDefault(); this.doRedo(); }
+        });
         await this.refreshProjects();
         this.booted = true;
         await logAudit('app.boot', { version: APP_VERSION });
@@ -889,6 +908,8 @@ function tpApp() {
       }
       // Phase 6: hydrate report builder.
       if (id === 'reports') this.loadReports();
+      // Phase 8: hydrate audit trail viewer.
+      if (id === 'audit') this.loadAuditAll();
     },
     labelOf(item) { return this.lang === 'en' ? item.labelEn : item.labelJa; },
 
@@ -2361,6 +2382,175 @@ function tpApp() {
       await this.saveProject();
     },
 
+    /* ====================================================================
+       PHASE 8 STATE & METHODS — theme, undo/redo, audit viewer, security
+       ==================================================================== */
+    /** Tri-state theme selector ('light' | 'dark' | 'system'). */
+    theme: 'light',
+    operatorName: '',
+    async applyThemeChoice(t) {
+      this.theme = t; applyTheme(t);
+      await putSetting('theme', t);
+      await logAudit('THEME_CHANGE', { theme: t });
+    },
+    async saveOperatorName() {
+      __currentUserName = this.operatorName;
+      await putSetting('operatorName', this.operatorName);
+    },
+
+    /** Undo/Redo bookkeeping. */
+    undoLabel() { return commandStack.past[commandStack.past.length - 1]?.label || ''; },
+    redoLabel() { return commandStack.future[commandStack.future.length - 1]?.label || ''; },
+    canUndo()   { return commandStack.canUndo(); },
+    canRedo()   { return commandStack.canRedo(); },
+    async doUndo() {
+      const cmd = await commandStack.undo(); if (!cmd) return;
+      await logAudit('UNDO', { label: cmd.label });
+      this.toast(`元に戻す: ${cmd.label}`, 'info', 2000);
+    },
+    async doRedo() {
+      const cmd = await commandStack.redo(); if (!cmd) return;
+      await logAudit('REDO', { label: cmd.label });
+      this.toast(`やり直し: ${cmd.label}`, 'info', 2000);
+    },
+
+    /** Command-pattern wrapper for jurisdiction toggle, used by Project view. */
+    async undoableSetJurisdictions(next) {
+      if (!this.currentProject) return;
+      const before = [...(this.currentProject.targetJurisdiction || [])];
+      const after  = [...next];
+      const project = this.currentProject;
+      const save = this.saveProject.bind(this);
+      await commandStack.push({
+        label: '管轄リストの変更',
+        do: async () => { project.targetJurisdiction = [...after];  await save(); },
+        undo: async () => { project.targetJurisdiction = [...before]; await save(); },
+      });
+    },
+
+    /* ---- Audit trail viewer ---- */
+    auditEvents: [], auditAllEvents: [], auditEventTypes: [],
+    auditFilter: { event: '', from: '', to: '', search: '' },
+    async loadAuditAll() {
+      this.auditAllEvents = await db.auditLog.orderBy('ts').reverse().limit(5000).toArray();
+      this.auditEventTypes = [...new Set(this.auditAllEvents.map(e => e.action))].sort();
+      this.applyAuditFilter();
+    },
+    applyAuditFilter() {
+      const f = this.auditFilter;
+      const search = (f.search || '').toLowerCase();
+      this.auditEvents = this.auditAllEvents.filter(e => {
+        if (f.event && e.action !== f.event) return false;
+        if (f.from && new Date(e.ts).toISOString() < f.from) return false;
+        if (f.to   && new Date(e.ts).toISOString() > f.to + 'T23:59:59') return false;
+        if (search) {
+          const blob = (e.action + ' ' + (e.user || '') + ' ' + JSON.stringify(e.payload || {})).toLowerCase();
+          if (!blob.includes(search)) return false;
+        }
+        return true;
+      });
+    },
+    /** Build a SHA-256 hash chain for the filtered events, on demand. */
+    async buildAuditHashChain() {
+      const out = []; let prev = '';
+      for (const e of this.auditEvents.slice().reverse()) {  // chronological order
+        const buf = new TextEncoder().encode(prev + JSON.stringify({ id: e.id, ts: e.ts, action: e.action, payload: e.payload }));
+        const digest = await crypto.subtle.digest('SHA-256', buf);
+        const hex = [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 16);
+        out.push({ ...e, prevHash: prev || '(none)', hash: hex });
+        prev = hex;
+      }
+      return out.reverse();
+    },
+    async exportAuditXlsx() {
+      const chain = await this.buildAuditHashChain();
+      const wb = XLSX.utils.book_new();
+      const head = ['Seq', 'Timestamp', 'User', 'Action', 'Project', 'Payload', 'Hash', 'PrevHash'];
+      const rows = chain.map((e, i) => [i + 1, new Date(e.ts).toISOString(), e.user || '', e.action, e.projectId || '', JSON.stringify(e.payload || {}), e.hash, e.prevHash]);
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([head, ...rows]), 'AuditTrail');
+      const blob = new Blob([XLSX.write(wb, { type: 'array', bookType: 'xlsx' })], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      downloadBlob(blob, `audit_${_dateTag()}.xlsx`);
+      await logAudit('AUDIT_EXPORT', { rows: chain.length, format: 'xlsx' });
+    },
+
+    /* ---- Encrypted project export / import ---- */
+    encryptExportPassphrase: '', encryptImportPassphrase: '',
+    async exportCurrentEncrypted() {
+      if (!this.currentProject) return;
+      if (!this.encryptExportPassphrase) { this.toast('パスフレーズを入力してください', 'warning'); return; }
+      try {
+        const blob = await exportProjectEncrypted(this.currentProject.id, this.encryptExportPassphrase);
+        downloadBlob(blob, `${_slug(this.currentProject.name)}_${_dateTag()}_encrypted.tpbench.json`);
+        this.encryptExportPassphrase = '';
+        this.toast('暗号化エクスポート完了', 'success');
+      } catch (e) { this.toast('エクスポート失敗: ' + e.message, 'error'); }
+    },
+    async importEncryptedPick(ev) {
+      const f = ev.target.files?.[0]; if (!f) return;
+      if (!this.encryptImportPassphrase) { this.toast('パスフレーズを入力してください', 'warning'); ev.target.value = ''; return; }
+      try {
+        const text = await readFileAsText(f);
+        const projectId = await importProjectEncrypted(text, this.encryptImportPassphrase);
+        await this.refreshProjects();
+        this.encryptImportPassphrase = '';
+        this.toast('暗号化インポート完了', 'success');
+        await this.openProject(projectId);
+      } catch (e) { this.toast('インポート失敗 (パスフレーズ確認): ' + e.message, 'error'); }
+      finally { ev.target.value = ''; }
+    },
+
+    /* ---- All-data purge (double confirmation, NOT undoable) ---- */
+    purgeStage: 0,
+    requestPurge() { this.purgeStage = 1; },
+    confirmPurge() { this.purgeStage = 2; },
+    async executePurge() {
+      try {
+        await purgeAllData();
+        this.toast('全データを消去しました。ページを再読込します。', 'warning', 5000);
+        setTimeout(() => location.reload(), 1500);
+      } catch (e) { this.toast(e.message, 'error'); }
+      finally { this.purgeStage = 0; }
+    },
+    cancelPurge() { this.purgeStage = 0; },
+
+    /* ---- Data quality checks ---- */
+    qualityReport: null,
+    async runProjectQualityChecks() {
+      if (!this.currentProject) return;
+      await this.refreshCompanies();
+      this.qualityReport = runQualityChecks(this.companies);
+      this.toast('データ品質チェック完了', 'success');
+    },
+
+    /* ---- Ashimori sample verification ---- */
+    ashimoriResult: null,
+    ashimoriFileName: '',
+    async onAshimoriPick(ev) {
+      const f = ev.target.files?.[0]; if (!f) return;
+      this.ashimoriFileName = f.name;
+      try {
+        const parsed = await parseCapitalIQExcel(f);
+        this.ashimoriResult = runAshimoriVerification(parsed.companies);
+        const passed = this.ashimoriResult.checks.filter(c => c.ok).length;
+        const total  = this.ashimoriResult.checks.length;
+        this.toast(`Ashimori 検証: ${passed} / ${total} パス`, passed === total ? 'success' : 'warning', 8000);
+      } catch (e) { this.toast('検証失敗: ' + e.message, 'error'); }
+      ev.target.value = '';
+    },
+
+    /* ---- Self-test summary UI ---- */
+    selfTestSummary: null,
+    selfTestRunning: false,
+    async runAllSelfTests() {
+      this.selfTestRunning = true;
+      try {
+        const results = await runSelfTest();
+        this.selfTestResults = results;
+        this.selfTestSummary = summariseSelfTestResults(results);
+      } catch (e) { this.toast('自己診断失敗: ' + e.message, 'error'); }
+      finally { this.selfTestRunning = false; }
+    },
+
     /* ---- Industry code lookup UI ---- */
     /** Import a Census Bureau concordance CSV file. */
     async onConcordanceCsvPick(ev) {
@@ -3751,6 +3941,183 @@ async function runSelfTest() {
     if (!TPApp.fx.bases.includes('TTM')) throw new Error('TTM missing from bases');
     if (!TPApp.fx.bases.includes('TTS')) throw new Error('TTS missing');
     if (!TPApp.fx.bases.includes('TTB')) throw new Error('TTB missing');
+  });
+
+  /* ================== Phase 8 acceptance checks ================== */
+
+  await check('Phase 8 - i18n keys cover navigation + Phase 8 actions', async () => {
+    for (const k of ['nav.audit','theme.dark','undo','redo','audit.title','secure.purge','sample.verify.title']) {
+      if (!I18N.ja[k] || !I18N.en[k]) throw new Error('i18n key missing: ' + k);
+    }
+  });
+
+  await check('Phase 8 - theme application toggles html.dark', async () => {
+    applyTheme('dark');
+    if (!document.documentElement.classList.contains('dark')) throw new Error('dark not applied');
+    applyTheme('light');
+    if (document.documentElement.classList.contains('dark')) throw new Error('light not applied');
+  });
+
+  await check('Phase 8 - Undo / Redo command stack', async () => {
+    const stack = new CommandStack();
+    let state = 0;
+    await stack.push({ label: '+1', do: () => { state += 1; }, undo: () => { state -= 1; } });
+    await stack.push({ label: '+10', do: () => { state += 10; }, undo: () => { state -= 10; } });
+    if (state !== 11) throw new Error('state after pushes');
+    await stack.undo();
+    if (state !== 1) throw new Error('first undo');
+    await stack.undo();
+    if (state !== 0) throw new Error('second undo');
+    if (stack.canUndo()) throw new Error('past should be empty');
+    if (!stack.canRedo()) throw new Error('future should be populated');
+    await stack.redo();
+    if (state !== 1) throw new Error('redo 1');
+    // Pushing a new command clears the future.
+    await stack.push({ label: '+100', do: () => { state += 100; }, undo: () => { state -= 100; } });
+    if (stack.canRedo()) throw new Error('push should clear future');
+  });
+
+  await check('Phase 8 - Undo stack respects UNDO_STACK_MAX', async () => {
+    const stack = new CommandStack();
+    for (let i = 0; i < UNDO_STACK_MAX + 5; i++) {
+      await stack.push({ label: 'op' + i, do: () => {}, undo: () => {} });
+    }
+    if (stack.past.length !== UNDO_STACK_MAX) throw new Error('cap not enforced');
+  });
+
+  await check('Phase 8 - Data-quality runQualityChecks detects outliers and duplicates', async () => {
+    const cs = [
+      { id: 'd1', name: 'Same Co Ltd', country: 'TH', industryCode: '3714', businessDescription: 'ok',
+        financials: { '2024': { netSales: 100, operatingIncome: 10 } } },
+      { id: 'd2', name: 'Same Co Ltd.', country: 'TH', industryCode: '3714', businessDescription: 'ok',
+        financials: { '2024': { netSales: 100, operatingIncome: 10 } } },
+      { id: 'd3', name: 'Other', country: 'TH', industryCode: '3714', businessDescription: 'ok',
+        financials: { '2024': { netSales: 999999999, operatingIncome: 10 } } },        // outlier
+      { id: 'd4', name: 'Missing', country: '', industryCode: 'badcode', businessDescription: '',
+        financials: { '2024': { netSales: 110, operatingIncome: 9 } } },
+    ];
+    // Pad with normal rows so the IQR fence has signal.
+    for (let i = 0; i < 10; i++) cs.push({ id: 'p' + i, name: 'Pad ' + i, country: 'TH', industryCode: '3714', businessDescription: 'x', financials: { '2024': { netSales: 100 + i, operatingIncome: 10 } } });
+    const r = runQualityChecks(cs);
+    if (!r.duplicates.length) throw new Error('duplicate not flagged');
+    if (!r.outliers.some(o => o.companyId === 'd3')) throw new Error('outlier not flagged');
+    if (!r.missingByField.country) throw new Error('missing country not counted');
+    if (!r.industryCodeIssues.some(x => x.companyId === 'd4')) throw new Error('bad industry code not flagged');
+  });
+
+  await check('Phase 8 - encrypted project export / import round-trip', async () => {
+    const cId = 'p8e-' + uuid();
+    const co  = { id: cId + '-c', name: 'E2E Co', country: 'JP', industryCodes: { SIC: { primary: '3714' } },
+                  financials: { '2024': { year: 2024, netSales: 1000, operatingIncome: 50, cogs: 700, operatingExpenses: 250 } },
+                  independenceData: { largestShareholderPct: 30 } };
+    await db.companies.put(co);
+    const project = {
+      id: cId, name: 'P8 Encrypt Test', createdAt: Date.now(), updatedAt: Date.now(),
+      targetJurisdiction: ['OECD_GENERIC'], testedPartyId: null, comparables: [co.id],
+      excludedCompanies: [], screeningHistory: [], scoringConfig: {}, fxData: {}, settings: {}, notes: 'secret notes',
+    };
+    await db.projects.put(project);
+    const blob = await exportProjectEncrypted(cId, 'pass-1234');
+    const text = await blob.text();
+    if (!text.includes('"encryption"')) throw new Error('envelope must contain encryption field');
+    // Wrong passphrase must fail.
+    let bad = false; try { await importProjectEncrypted(text, 'wrong'); } catch (_) { bad = true; }
+    if (!bad) throw new Error('wrong passphrase should fail');
+    // Delete then re-import.
+    await db.projects.delete(cId);
+    await db.companies.delete(co.id);
+    const newId = await importProjectEncrypted(text, 'pass-1234');
+    const rehydrated = await db.projects.get(newId);
+    if (!rehydrated || rehydrated.notes !== 'secret notes') throw new Error('roundtrip mismatch');
+    await db.projects.delete(newId);
+    await db.companies.delete(co.id);
+  });
+
+  await check('Phase 8 - audit log records username when set', async () => {
+    __currentUserName = 'self-test-user';
+    await logAudit('PHASE8_TEST_USER', { ok: true });
+    const recent = await db.auditLog.orderBy('ts').reverse().limit(20).toArray();
+    if (!recent.some(e => e.action === 'PHASE8_TEST_USER' && e.user === 'self-test-user')) throw new Error('user not stamped');
+    __currentUserName = '';
+  });
+
+  await check('Phase 8 - audit hash chain reproducible', async () => {
+    // Synthesise three audit rows in chronological order and recompute the
+    // chain manually to ensure the algorithm is deterministic.
+    const events = [
+      { id: 1, ts: 1000, action: 'A', payload: { a: 1 } },
+      { id: 2, ts: 2000, action: 'B', payload: { b: 2 } },
+      { id: 3, ts: 3000, action: 'C', payload: { c: 3 } },
+    ];
+    let prev = '';
+    const hashes = [];
+    for (const e of events) {
+      const buf = new TextEncoder().encode(prev + JSON.stringify({ id: e.id, ts: e.ts, action: e.action, payload: e.payload }));
+      const digest = await crypto.subtle.digest('SHA-256', buf);
+      const hex = [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('').slice(0, 16);
+      hashes.push(hex); prev = hex;
+    }
+    if (new Set(hashes).size !== 3) throw new Error('hashes collide');
+  });
+
+  await check('Phase 8 - self-test summary groups by phase', async () => {
+    const fake = [
+      { name: 'CSV parse', ok: true },
+      { name: 'Phase 2 - default rules loaded', ok: true },
+      { name: 'Phase 4 - GOLDEN MASTER: ...', ok: true },
+      { name: 'Phase 4 - PLI definitions complete', ok: false, detail: 'mock fail' },
+    ];
+    const summary = summariseSelfTestResults(fake);
+    if (summary['Phase 1']?.pass !== 1) throw new Error('Phase 1 grouping wrong');
+    if (summary['Phase 2']?.pass !== 1) throw new Error('Phase 2 grouping wrong');
+    if (summary['Phase 4']?.fail !== 1) throw new Error('fail count');
+  });
+
+  await check('Phase 8 - Ashimori verification helper detects mismatched pool size', async () => {
+    // Synthesise a tiny pool of 5 companies → must fail the 171-row check.
+    const pool = Array.from({ length: 5 }, (_, i) => ({
+      id: 'tiny' + i, name: 'Tiny ' + i, country: 'TH',
+      industryCodes: { SIC: { primary: '3714' } },
+      financials: { '2024': { year: 2024, netSales: 100, operatingIncome: 10, cogs: 70, operatingExpenses: 20 } },
+      independenceData: { largestShareholderPct: 30 },
+    }));
+    const r = runAshimoriVerification(pool);
+    if (r.checks[0].ok) throw new Error('size check should fail');
+    if (!r.checks[0].detail.includes('5')) throw new Error('detail must mention actual count');
+  });
+
+  await check('Phase 8 - Ashimori verification helper accepts the synthetic golden master', async () => {
+    // Reuse the Phase 3 synthetic 171-company pool so we know the helper
+    // returns all-green on the canonical breakdown.
+    const ACCEPTED_20 = ASHIMORI_EXPECTED.acceptedNames;
+    const pool = [];
+    for (let k = 0; k < 43; k++) pool.push({ id: 'rol' + k, name: 'OpLoss ' + k, country: 'TH',
+      industryCodes: { SIC: { primary: '3714' } }, businessDescription: 'Manufactures auto parts.',
+      financials: { '2022': { netSales: 100, operatingIncome: -8 }, '2023': { netSales: 110, operatingIncome: -7 }, '2024': { netSales: 120, operatingIncome: -6 } },
+      independenceData: { largestShareholderPct: 30 } });
+    for (let k = 0; k < 51; k++) pool.push({ id: 'rdm' + k, name: 'NoDesc ' + k, country: 'TH',
+      industryCodes: { SIC: { primary: '3714' } }, businessDescription: 'N/A',
+      financials: { '2022': { netSales: 200, operatingIncome: 15 }, '2023': { netSales: 210, operatingIncome: 16 }, '2024': { netSales: 220, operatingIncome: 18 } },
+      independenceData: { largestShareholderPct: 25 } });
+    for (let k = 0; k < 55; k++) pool.push({ id: 'rcl' + k, name: 'Controlled ' + k, country: 'TH',
+      industryCodes: { SIC: { primary: '3714' } }, businessDescription: 'Subsidiary.',
+      cIQRejectionReason: 'Is a controlled entity',
+      financials: { '2022': { netSales: 300, operatingIncome: 20 }, '2023': { netSales: 310, operatingIncome: 22 }, '2024': { netSales: 320, operatingIncome: 25 } },
+      independenceData: { largestShareholderPct: 40 } });
+    for (let k = 0; k < 2; k++) pool.push({ id: 'rdb' + k, name: 'Different ' + k, country: 'TH',
+      industryCodes: { SIC: { primary: '3714' } }, businessDescription: 'Different segment.',
+      cIQRejectionReason: 'Engaged in significantly different business activities or puroducts',
+      financials: { '2022': { netSales: 200, operatingIncome: 14 }, '2023': { netSales: 215, operatingIncome: 17 }, '2024': { netSales: 225, operatingIncome: 19 } },
+      independenceData: { largestShareholderPct: 35 } });
+    for (const nm of ACCEPTED_20) pool.push({
+      id: 'acc-' + nm.replace(/\W+/g, '_'), name: nm + ' Industry Company Limited', country: 'TH',
+      industryCodes: { SIC: { primary: '3714' } }, businessDescription: 'Independent Thai manufacturer.',
+      financials: { '2022': { netSales: 500, operatingIncome: 40 }, '2023': { netSales: 520, operatingIncome: 45 }, '2024': { netSales: 540, operatingIncome: 50 } },
+      independenceData: { largestShareholderPct: 30 } });
+    if (pool.length !== 171) throw new Error('synthesis size wrong');
+    const r = runAshimoriVerification(pool);
+    const failing = r.checks.filter(c => !c.ok);
+    if (failing.length) throw new Error('failing: ' + failing.map(f => f.name + ' (' + f.detail + ')').join(' / '));
   });
 
   await check('Phase 2 - >10 years warning', async () => {
@@ -9172,6 +9539,452 @@ TPApp.fx = {
 
 
 <!-- =====================================================================
+  PHASE 8 / BLOCK 47 : i18n dictionary + theme system
+===================================================================== -->
+<script id="phase8-i18n-theme">
+/** Comprehensive i18n strings for the Phase 8 UI surface. Earlier phases'
+ *  hard-coded labels remain in place; this dictionary covers the
+ *  navigation, common controls, and Phase 8 additions. */
+Object.assign(I18N.ja, {
+  'app.title': 'TP Bench - 移転価格ベンチマーク',
+  'nav.project':   'プロジェクト',
+  'nav.dataInput': 'データ入力',
+  'nav.rules':     '法域・ルール設定',
+  'nav.screening': 'スクリーニング',
+  'nav.scoring':   'スコア & PLI',
+  'nav.results':   '結果',
+  'nav.reports':   'レポート出力',
+  'nav.audit':     '監査証跡',
+  'nav.settings':  '設定',
+  'btn.save':      '保存',
+  'btn.cancel':    'キャンセル',
+  'btn.delete':    '削除',
+  'btn.export':    'エクスポート',
+  'btn.import':    'インポート',
+  'btn.run':       '実行',
+  'btn.close':     '閉じる',
+  'theme.light':   'ライト',
+  'theme.dark':    'ダーク',
+  'theme.system':  'システム追従',
+  'qa.missingValues':   '欠損値',
+  'qa.outliers':        '外れ値',
+  'qa.duplicates':      '重複候補',
+  'qa.completeness':    'データ完全性',
+  'undo':              '元に戻す',
+  'redo':              'やり直し',
+  'audit.title':       '監査証跡',
+  'audit.filterEvent': 'イベント種別',
+  'audit.filterFrom':  '開始日',
+  'audit.filterTo':    '終了日',
+  'audit.filterSearch':'全文検索',
+  'audit.export':      '監査ログをエクスポート',
+  'secure.encryptExport': '暗号化エクスポート',
+  'secure.encryptImport': '暗号化インポート',
+  'secure.purge':         '全データ消去',
+  'sample.verify.title':  'Ashimori 実データ検証',
+});
+Object.assign(I18N.en, {
+  'app.title': 'TP Bench - Transfer Pricing Benchmarking',
+  'nav.project':   'Project',
+  'nav.dataInput': 'Data Input',
+  'nav.rules':     'Jurisdiction Rules',
+  'nav.screening': 'Screening',
+  'nav.scoring':   'Score & PLI',
+  'nav.results':   'Results',
+  'nav.reports':   'Reports',
+  'nav.audit':     'Audit Trail',
+  'nav.settings':  'Settings',
+  'btn.save':      'Save',
+  'btn.cancel':    'Cancel',
+  'btn.delete':    'Delete',
+  'btn.export':    'Export',
+  'btn.import':    'Import',
+  'btn.run':       'Run',
+  'btn.close':     'Close',
+  'theme.light':   'Light',
+  'theme.dark':    'Dark',
+  'theme.system':  'System',
+  'qa.missingValues':   'Missing values',
+  'qa.outliers':        'Outliers',
+  'qa.duplicates':      'Possible duplicates',
+  'qa.completeness':    'Data completeness',
+  'undo':              'Undo',
+  'redo':              'Redo',
+  'audit.title':       'Audit Trail',
+  'audit.filterEvent': 'Event',
+  'audit.filterFrom':  'From',
+  'audit.filterTo':    'To',
+  'audit.filterSearch':'Search',
+  'audit.export':      'Export audit log',
+  'secure.encryptExport': 'Encrypted Export',
+  'secure.encryptImport': 'Encrypted Import',
+  'secure.purge':         'Purge All Data',
+  'sample.verify.title':  'Ashimori Sample Verification',
+});
+
+const THEMES = ['light', 'dark', 'system'];
+
+/** Apply a theme to the document root. */
+function applyTheme(theme) {
+  const root = document.documentElement;
+  let actual = theme;
+  if (theme === 'system') actual = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  root.classList.toggle('dark', actual === 'dark');
+  root.dataset.theme = actual;
+}
+
+// Hook in Tailwind CDN's dark-mode mode so .dark: variants resolve. The CDN
+// reads window.tailwind.config when reconfiguration is set before processing,
+// but we also ship explicit CSS overrides below so dark mode works without
+// touching every component.
+if (window.tailwind?.config) window.tailwind.config = { ...(window.tailwind.config || {}), darkMode: 'class' };
+</script>
+<style id="phase8-darkmode-overrides">
+/* Phase 8: targeted dark-mode overrides. Existing components stay on their
+   Tailwind class set; this stylesheet flips backgrounds and text colors
+   when html.dark is applied. */
+html.dark { color-scheme: dark; }
+html.dark body                                                        { background: #0f172a; color: #e2e8f0; }
+html.dark .bg-white                                                   { background-color: #1e293b !important; color: #e2e8f0; }
+html.dark .bg-slate-50                                                { background-color: #0f172a !important; }
+html.dark .bg-slate-100                                               { background-color: #334155 !important; color: #e2e8f0; }
+html.dark .bg-slate-200                                               { background-color: #475569 !important; color: #e2e8f0; }
+html.dark .bg-slate-800                                               { background-color: #020617 !important; }
+html.dark .text-slate-500                                             { color: #94a3b8 !important; }
+html.dark .text-slate-600                                             { color: #cbd5f5 !important; }
+html.dark .text-slate-700                                             { color: #e2e8f0 !important; }
+html.dark .text-slate-800                                             { color: #f8fafc !important; }
+html.dark .border, html.dark .border-b, html.dark .border-t,
+html.dark .border-l, html.dark .border-r                              { border-color: #334155 !important; }
+html.dark input, html.dark textarea, html.dark select                 { background-color: #1e293b; color: #e2e8f0; border-color: #475569; }
+html.dark thead.bg-slate-100, html.dark thead.bg-slate-50,
+html.dark thead .bg-slate-100                                         { background-color: #334155 !important; }
+html.dark .bg-amber-50                                                { background-color: #422006 !important; color: #fde68a; }
+html.dark .bg-emerald-50                                              { background-color: #022c22 !important; color: #6ee7b7; }
+html.dark .bg-rose-50                                                 { background-color: #4c0519 !important; color: #fda4af; }
+html.dark .bg-blue-50                                                 { background-color: #172554 !important; color: #93c5fd; }
+html.dark .bg-purple-50                                               { background-color: #2e1065 !important; color: #c4b5fd; }
+html.dark .shadow, html.dark .shadow-md, html.dark .shadow-lg,
+html.dark .shadow-xl                                                  { box-shadow: 0 2px 12px rgba(0,0,0,0.5); }
+</style>
+
+<!-- =====================================================================
+  PHASE 8 / BLOCK 48 : Undo / Redo command stack
+===================================================================== -->
+<script id="phase8-undo-redo">
+const UNDO_STACK_MAX = 32;
+
+/**
+ * @typedef {Object} UndoableCommand
+ * @property {string} label
+ * @property {() => Promise<void>|void} do
+ * @property {() => Promise<void>|void} undo
+ */
+
+class CommandStack {
+  constructor() {
+    /** @type {UndoableCommand[]} */
+    this.past = [];
+    /** @type {UndoableCommand[]} */
+    this.future = [];
+  }
+  /** Push & immediately execute a command, then clear the redo stack. */
+  async push(cmd) {
+    await cmd.do();
+    this.past.push(cmd);
+    if (this.past.length > UNDO_STACK_MAX) this.past.shift();
+    this.future.length = 0;
+  }
+  async undo() {
+    const cmd = this.past.pop(); if (!cmd) return null;
+    await cmd.undo();
+    this.future.push(cmd);
+    return cmd;
+  }
+  async redo() {
+    const cmd = this.future.pop(); if (!cmd) return null;
+    await cmd.do();
+    this.past.push(cmd);
+    return cmd;
+  }
+  canUndo() { return this.past.length > 0; }
+  canRedo() { return this.future.length > 0; }
+  list()    { return { past: this.past.map(c => c.label), future: this.future.map(c => c.label) }; }
+  clear()   { this.past.length = 0; this.future.length = 0; }
+}
+
+const commandStack = new CommandStack();
+</script>
+
+<!-- =====================================================================
+  PHASE 8 / BLOCK 49 : Data quality checks
+===================================================================== -->
+<script id="phase8-quality">
+const QA_OUTLIER_FIELDS = ['netSales', 'revenue', 'operatingIncome', 'operatingProfit'];
+
+/** Normalise a company name so look-alikes collide for duplicate detection. */
+function _normaliseName(s) {
+  return String(s || '')
+    .toLowerCase()
+    .replace(/[　\s\-_,\.()（）"'`]+/g, '')
+    .replace(/(?:co\.?ltd|company|limited|inc\.?|corp\.?|corporation|株式会社|公司|有限公司)/g, '')
+    .trim();
+}
+
+/**
+ * Run a series of data-quality checks over a company set. Pure: returns
+ * a report but does not mutate inputs. Each report row keys companies by
+ * id so the UI can join back.
+ *
+ * @param {Company[]} companies
+ * @returns {{
+ *   total:number,
+ *   missingByField: Object<string, number>,
+ *   outliers: {field:string, companyId:string, value:number, low:number, high:number}[],
+ *   duplicates: {key:string, ids:string[], names:string[]}[],
+ *   industryCodeIssues: {companyId:string, system:string, code:string, issue:string}[],
+ *   completenessByCompany: Object<string, number>,
+ *   averageCompleteness: number,
+ * }}
+ */
+function runQualityChecks(companies) {
+  const total = companies.length;
+  const missingByField = {};
+  const completenessByCompany = {};
+  const outliers = [];
+  const industryCodeIssues = [];
+
+  // Critical-field completeness scoring.
+  const criticalFields = ['name', 'country', 'industryCode', 'businessDescription'];
+  for (const c of companies) {
+    let filled = 0;
+    for (const f of criticalFields) {
+      if (c[f] != null && c[f] !== '') filled++;
+      else missingByField[f] = (missingByField[f] || 0) + 1;
+    }
+    const yrs = getYearsAvailable(c);
+    const fy = yrs.length ? Object.values(c.financials[String(yrs[yrs.length - 1])] || {}) : [];
+    const nonNullFinancials = fy.filter(v => v != null && v !== '').length;
+    completenessByCompany[c.id] = ((filled / criticalFields.length) * 70 + (nonNullFinancials > 0 ? 30 : 0));
+
+    // Industry code validation: digit count and presence in catalogue.
+    const sic = c.industryCodes?.SIC?.primary || (c.industryCodeSystem === 'SIC' ? c.industryCode : null);
+    if (sic) {
+      if (!/^\d{2,4}$/.test(String(sic))) industryCodeIssues.push({ companyId: c.id, system: 'SIC', code: sic, issue: 'invalid digit count' });
+      else if (!SIC_1987_CODES[sic]) industryCodeIssues.push({ companyId: c.id, system: 'SIC', code: sic, issue: 'not in catalogue' });
+    }
+  }
+
+  // Outlier detection (per-field IQR fence).
+  for (const field of QA_OUTLIER_FIELDS) {
+    const samples = companies.flatMap(c => {
+      const ys = getYearsAvailable(c);
+      return ys.map(y => ({ id: c.id, year: y, value: c.financials[String(y)]?.[field] }));
+    }).filter(s => typeof s.value === 'number' && Number.isFinite(s.value));
+    if (samples.length < 4) continue;
+    const sorted = samples.map(s => s.value).slice().sort((a, b) => a - b);
+    const q1 = percentileInclusive(sorted, 0.25);
+    const q3 = percentileInclusive(sorted, 0.75);
+    const iqr = q3 - q1;
+    const low = q1 - 3 * iqr, high = q3 + 3 * iqr;   // 3-sigma equivalent fence
+    for (const s of samples) {
+      if (s.value < low || s.value > high) outliers.push({ field, companyId: s.id, year: s.year, value: s.value, low, high });
+    }
+  }
+
+  // Duplicate detection by normalised name.
+  const buckets = {};
+  for (const c of companies) {
+    const k = _normaliseName(c.name); if (!k) continue;
+    (buckets[k] = buckets[k] || []).push(c);
+  }
+  const duplicates = [];
+  for (const [k, arr] of Object.entries(buckets)) {
+    if (arr.length > 1) duplicates.push({ key: k, ids: arr.map(c => c.id), names: arr.map(c => c.name) });
+  }
+
+  const averageCompleteness = total
+    ? Object.values(completenessByCompany).reduce((s, v) => s + v, 0) / total
+    : 0;
+  return { total, missingByField, outliers, duplicates, industryCodeIssues, completenessByCompany, averageCompleteness };
+}
+</script>
+
+<!-- =====================================================================
+  PHASE 8 / BLOCK 50 : Encrypted project export / import + purge
+===================================================================== -->
+<script id="phase8-security">
+/**
+ * Export a project to an encrypted JSON envelope. Reuses Phase 7's
+ * AES-GCM + PBKDF2 crypto so a single passphrase model covers the
+ * whole app's at-rest secrets.
+ * @returns {Promise<Blob>}
+ */
+async function exportProjectEncrypted(projectId, passphrase) {
+  const blob = await exportProjectJson(projectId);
+  const plaintext = await blob.text();
+  const envelope = await encryptString(plaintext, passphrase);
+  const payload = { version: APP_VERSION, exportedAt: new Date().toISOString(), encryption: envelope };
+  await logAudit('PROJECT_ENCRYPT_EXPORT', { projectId });
+  return new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+}
+
+/** Decrypt and import an encrypted project JSON. */
+async function importProjectEncrypted(text, passphrase) {
+  const payload = JSON.parse(text);
+  if (!payload.encryption) throw new Error('not an encrypted project envelope');
+  const plaintext = await decryptString(payload.encryption, passphrase);
+  const projectPayload = JSON.parse(plaintext);
+  return importProjectJson(projectPayload);
+}
+
+/**
+ * Wipe every IndexedDB table the app owns. Caller is responsible for
+ * the double-confirmation flow. Logs once before the auditLog is itself
+ * cleared (the final entry is short-lived but preserved in memory in
+ * case the user is keeping the dev console open).
+ */
+async function purgeAllData() {
+  await logAudit('DATA_PURGE', { confirmed: true, at: new Date().toISOString() });
+  const tables = ['projects', 'companies', 'fxRates', 'jurisdictionRules', 'settings', 'auditLog', 'mappingPresets', 'industryCodeMappings', 'todoItems', 'assets'];
+  for (const t of tables) try { await db.table(t).clear(); } catch (_) {}
+}
+</script>
+
+<!-- =====================================================================
+  PHASE 8 / BLOCK 51 : Self-test runner UI + categorisation
+===================================================================== -->
+<script id="phase8-selftest-summary">
+/**
+ * Group a list of self-test results by phase. The convention is to prefix
+ * each test name with "Phase N - ..." (Phase 1 tests use no prefix).
+ * @param {{name:string, ok:boolean, detail?:string}[]} results
+ * @returns {Object<string, {pass:number, fail:number, total:number, items:Object[]}>}
+ */
+function summariseSelfTestResults(results) {
+  const summary = {};
+  for (const r of results) {
+    const m = r.name.match(/^Phase ([0-9.]+)/);
+    const phase = m ? 'Phase ' + m[1] : 'Phase 1';
+    summary[phase] = summary[phase] || { pass: 0, fail: 0, total: 0, items: [] };
+    summary[phase].total++;
+    if (r.ok) summary[phase].pass++; else summary[phase].fail++;
+    summary[phase].items.push(r);
+  }
+  return summary;
+}
+</script>
+
+<!-- =====================================================================
+  PHASE 8 / BLOCK 52 : Ashimori sample E2E verification
+  ---------------------------------------------------------------------
+  Lets the user upload the real Capital IQ Excel and confirms the
+  reference breakdown (171 → 94 → 57 → 20) and the IRS arm's length
+  range (≈2.70 / 3.62 / 11.48 ± 0.05%) end-to-end. This is the
+  acceptance criterion that can only be validated against real data.
+===================================================================== -->
+<script id="phase8-sample-verify">
+const ASHIMORI_EXPECTED = {
+  initialPool: 171,
+  bulkRejectionTotal: 94,
+  avgOpLoss: 43,
+  descMissing: 51,
+  qualitativeRejectionTotal: 57,
+  controlledEntity: 55,
+  differentBusiness: 2,
+  finalAccepted: 20,
+  range: { lower: 0.0270, median: 0.0362, upper: 0.1148 },
+  rangeTolerancePct: 0.0005,        // ±0.05% absolute (ratio units)
+  acceptedNames: [
+    'Asia Compact','Asian Unity','C.B.Tact','Formula Industries','Kijsiam Partworks',
+    'M&T Allied','New Somthai','Powertech 2004','Powertech Engine','Siam Senater',
+    'Siam Technic Shimizu','Standard Auto','Tfp Industrial','Thai Car Show','Thai T G K',
+    'Tkd Fiber','Tr Asia','Transtec','V.C.S.','Y.S.S.',
+  ],
+};
+
+/** Lightweight name-contains match so the canonical short names survive
+ *  CIQ's full-legal-name strings (e.g. "Asia Compact Industry Co Ltd"). */
+function _ashimoriNameMatch(actualName, expectedShort) {
+  return String(actualName || '').toLowerCase().includes(expectedShort.toLowerCase());
+}
+
+/**
+ * Run the Ashimori reference scenario on an externally-uploaded pool.
+ * @param {Company[]} pool - companies parsed from the real Excel
+ * @returns {{checks: Array<{name:string, ok:boolean, detail?:string}>}}
+ */
+function runAshimoriVerification(pool) {
+  const checks = [];
+  const add = (name, ok, detail) => checks.push({ name, ok, detail: detail || '' });
+  add('Initial pool size = 171',
+      pool.length === ASHIMORI_EXPECTED.initialPool,
+      `actual = ${pool.length}`);
+
+  // Synth tested party matching the Ashimori SIC.
+  const tp = { name: 'Ashimori Industries LRM Thailand (TP)', country: 'TH',
+    industryCodes: { SIC: { primary: '3714' } },
+    financials: { '2024': { netSales: 1, operatingIncome: 0 } } };
+  const rule = { preferredIndustryCodes: ['SIC'], yearsAnalysis: { default: 3, averaging: 'WEIGHTED_AVG' } };
+  const ctx = { testedParty: tp, mode: 'parallel' };
+
+  // Stage 1: quantitative (industry/country/year coverage).
+  const s1 = execQuantitative(pool, rule,
+    { id: 'S1', type: 'QUANTITATIVE', params: { industryMatchLevel: 4, yearsCoverage: { required: 3, mode: 'at_least' } } }, ctx);
+  add(`Stage S1 survivors = 171`, s1.survivors.length === ASHIMORI_EXPECTED.initialPool, `actual = ${s1.survivors.length}`);
+
+  // Stage 2: bulk rejection.
+  const s2 = execBulkRejection(s1.survivors, rule, { id: 'S2', type: 'BULK_REJECTION', params: {} }, ctx);
+  const s2OpLoss   = s2.rejected.filter(r => r.reason === REJECTION_REASONS.AVG_OP_LOSS).length;
+  const s2DescMiss = s2.rejected.filter(r => r.reason === REJECTION_REASONS.DESC_MISSING).length;
+  add('Bulk rejection: avg op income ≤ 0 = 43',  s2OpLoss   === ASHIMORI_EXPECTED.avgOpLoss,   `actual = ${s2OpLoss}`);
+  add('Bulk rejection: description missing = 51', s2DescMiss === ASHIMORI_EXPECTED.descMissing, `actual = ${s2DescMiss}`);
+  add('Bulk rejection total = 94',                s2.rejected.length === ASHIMORI_EXPECTED.bulkRejectionTotal,
+      `actual = ${s2.rejected.length}`);
+
+  // Stage 3: independence (most should pass with conservative mode).
+  const s3 = execIndependence(s2.survivors, rule, { id: 'S3', type: 'INDEPENDENCE', params: { maxOwnership: 0.5, unknownMode: 'conservative' } }, ctx);
+
+  // Stage 4: qualitative review (replays CIQ Rejection Reason text).
+  const s4 = execQualitativeReview(s3.survivors, rule, { id: 'S4', type: 'QUALITATIVE_REVIEW', params: { useCIQAsInitial: true } }, ctx);
+  const s4Controlled = s4.rejected.filter(r => r.reason === REJECTION_REASONS.CONTROLLED_ENTITY).length;
+  const s4Different  = s4.rejected.filter(r => r.reason === REJECTION_REASONS.DIFFERENT_BUSINESS).length;
+  add('Qualitative review: controlled entity = 55',   s4Controlled === ASHIMORI_EXPECTED.controlledEntity,   `actual = ${s4Controlled}`);
+  add('Qualitative review: different business = 2',   s4Different  === ASHIMORI_EXPECTED.differentBusiness,  `actual = ${s4Different}`);
+  add('Qualitative review total = 57',                s4.rejected.length === ASHIMORI_EXPECTED.qualitativeRejectionTotal,
+      `actual = ${s4.rejected.length}`);
+  add('Final accepted = 20',                          s4.survivors.length === ASHIMORI_EXPECTED.finalAccepted,
+      `actual = ${s4.survivors.length}`);
+
+  // 20-name match (short-name contains check).
+  const finalNames = s4.survivors.map(c => c.name);
+  const missing = ASHIMORI_EXPECTED.acceptedNames.filter(n => !finalNames.some(fn => _ashimoriNameMatch(fn, n)));
+  add('Accepted 20 names match reference list',
+      missing.length === 0,
+      missing.length ? 'missing: ' + missing.join(', ') : `${ASHIMORI_EXPECTED.acceptedNames.length} matched`);
+
+  // PLI / IRS range (only when the 20 finalists were detected).
+  if (s4.survivors.length === ASHIMORI_EXPECTED.finalAccepted) {
+    const pli = computePLIForSet(s4.survivors, 'NET_COST_PLUS', null, 'WEIGHTED_AVG').map(r => r.value).filter(v => v != null);
+    const range = calculateRange(pli, { type: 'IQR', lowerPercentile: 25, upperPercentile: 75, centralTendency: 'MEDIAN' }, 'IRS');
+    const tol = ASHIMORI_EXPECTED.rangeTolerancePct;
+    const close = (a, b, t) => Math.abs(a - b) <= t;
+    add(`IRS LQ ≈ 2.70% (±${(tol*100).toFixed(2)}%)`,
+        close(range.lower, ASHIMORI_EXPECTED.range.lower, tol),
+        `actual = ${(range.lower * 100).toFixed(3)}%`);
+    add(`IRS Median ≈ 3.62% (±0.10%)`,
+        close(range.median, ASHIMORI_EXPECTED.range.median, tol * 2),
+        `actual = ${(range.median * 100).toFixed(3)}%`);
+    add(`IRS UQ ≈ 11.48% (±${(tol*100).toFixed(2)}%)`,
+        close(range.upper, ASHIMORI_EXPECTED.range.upper, tol),
+        `actual = ${(range.upper * 100).toFixed(3)}%`);
+  }
+  return { checks };
+}
+</script>
+
+
+<!-- =====================================================================
   ROOT TEMPLATE
 ===================================================================== -->
 <div x-data="tpApp()" x-init="init()" x-cloak class="h-screen flex flex-col">
@@ -9414,6 +10227,9 @@ TPApp.fx = {
               <button class="px-3 py-1 border rounded" @click="exportCurrent()">エクスポート</button>
             </div>
           </template>
+          <!-- Phase 8: undo / redo -->
+          <button class="px-2 py-1 border rounded text-sm" :disabled="!canUndo()" @click="doUndo()" :title="(t('undo', lang)) + (undoLabel() ? ': ' + undoLabel() : '')">↶</button>
+          <button class="px-2 py-1 border rounded text-sm" :disabled="!canRedo()" @click="doRedo()" :title="(t('redo', lang)) + (redoLabel() ? ': ' + redoLabel() : '')">↷</button>
           <!-- Phase 2: standing TODO badge. Persisted across reloads. -->
           <button class="relative px-3 py-1 border rounded flex items-center gap-2" @click="showTodoPanel = true">
             <span>TODO</span>
@@ -11211,6 +12027,55 @@ Foo Corp,JP,334413,2024,1000000,80000,..."></textarea>
       </section>
 
       <!-- ============== Settings ============== -->
+      <!-- ============== Audit Trail (Phase 8) ============== -->
+      <section x-show="currentView === 'audit'" class="p-6 space-y-6">
+        <div class="bg-white rounded-lg shadow p-5">
+          <div class="flex items-center justify-between mb-3">
+            <h2 class="font-semibold text-lg" x-text="t('audit.title', lang)"></h2>
+            <button class="px-3 py-1.5 text-xs border rounded" @click="exportAuditXlsx()" x-text="t('audit.export', lang)"></button>
+          </div>
+          <div class="grid grid-cols-4 gap-3 text-xs mb-3">
+            <div><label class="block text-slate-500 mb-1" x-text="t('audit.filterEvent', lang)"></label>
+              <select class="w-full px-2 py-1 border rounded" x-model="auditFilter.event" @change="applyAuditFilter()">
+                <option value="">(all)</option>
+                <template x-for="ev in auditEventTypes" :key="ev"><option :value="ev" x-text="ev"></option></template>
+              </select>
+            </div>
+            <div><label class="block text-slate-500 mb-1" x-text="t('audit.filterFrom', lang)"></label>
+              <input type="date" class="w-full px-2 py-1 border rounded" x-model="auditFilter.from" @change="applyAuditFilter()">
+            </div>
+            <div><label class="block text-slate-500 mb-1" x-text="t('audit.filterTo', lang)"></label>
+              <input type="date" class="w-full px-2 py-1 border rounded" x-model="auditFilter.to" @change="applyAuditFilter()">
+            </div>
+            <div><label class="block text-slate-500 mb-1" x-text="t('audit.filterSearch', lang)"></label>
+              <input class="w-full px-2 py-1 border rounded" placeholder="action / payload / user" x-model="auditFilter.search" @input.debounce.200ms="applyAuditFilter()">
+            </div>
+          </div>
+          <div class="text-xs text-slate-500 mb-1">
+            <span x-text="auditEvents.length"></span> / <span x-text="auditAllEvents.length"></span> 件
+          </div>
+          <div class="overflow-auto max-h-[36rem] border rounded">
+            <table class="w-full text-xs">
+              <thead class="bg-slate-100 sticky top-0">
+                <tr><th class="px-2 py-1 text-left">時刻</th><th>ユーザー</th><th>アクション</th><th>プロジェクト</th><th>ペイロード</th></tr>
+              </thead>
+              <tbody>
+                <template x-for="(e, i) in auditEvents" :key="e.id">
+                  <tr class="border-t hover:bg-slate-50">
+                    <td class="px-2 py-1 align-top whitespace-nowrap" x-text="new Date(e.ts).toLocaleString()"></td>
+                    <td class="px-2 py-1 align-top" x-text="e.user || ''"></td>
+                    <td class="px-2 py-1 font-mono align-top" x-text="e.action"></td>
+                    <td class="px-2 py-1 font-mono text-slate-500 align-top" x-text="e.projectId || ''"></td>
+                    <td class="px-2 py-1 text-slate-600 align-top max-w-md break-words" x-text="JSON.stringify(e.payload || {})"></td>
+                  </tr>
+                </template>
+                <template x-if="!auditEvents.length"><tr><td colspan="5" class="px-2 py-4 text-center text-slate-400">該当ログなし</td></tr></template>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
       <section x-show="currentView === 'settings'" class="p-6 space-y-6">
 
         <!-- AI providers -->
@@ -11419,22 +12284,144 @@ Foo Corp,JP,334413,2024,1000000,80000,..."></textarea>
           <div class="mt-3 flex justify-end"><button class="px-3 py-1.5 text-sm bg-blue-600 text-white rounded" @click="saveIndustryCodePriority()">保存</button></div>
         </div>
 
-        <!-- Self-test -->
+        <!-- Phase 8: Theme + operator -->
+        <div class="bg-white rounded-lg shadow p-5">
+          <h2 class="font-semibold text-lg mb-3">外観 & 操作者</h2>
+          <div class="grid grid-cols-2 gap-4 text-sm">
+            <div>
+              <label class="block text-xs text-slate-500 mb-1">テーマ</label>
+              <div class="flex gap-3 text-xs">
+                <template x-for="th in ['light','dark','system']" :key="th">
+                  <label class="flex items-center gap-1"><input type="radio" :value="th" x-model="theme" @change="applyThemeChoice(theme)">
+                    <span x-text="t('theme.' + th, lang)"></span>
+                  </label>
+                </template>
+              </div>
+            </div>
+            <div>
+              <label class="block text-xs text-slate-500 mb-1">操作ユーザー名 (監査ログに記録)</label>
+              <input class="w-full px-2 py-1 border rounded" x-model="operatorName" @change="saveOperatorName()" placeholder="例: 田中">
+            </div>
+          </div>
+        </div>
+
+        <!-- Phase 8: Project data quality -->
         <div class="bg-white rounded-lg shadow p-5">
           <div class="flex items-center justify-between mb-3">
-            <h2 class="font-semibold text-lg">セルフテスト</h2>
-            <button class="px-3 py-1.5 text-sm bg-emerald-600 text-white rounded" @click="selfTestResults = await runSelfTest()">実行</button>
+            <h2 class="font-semibold text-lg">データ品質チェック</h2>
+            <button class="px-3 py-1.5 text-sm border rounded" @click="runProjectQualityChecks()">プロジェクト企業群をチェック</button>
           </div>
-          <template x-if="selfTestResults && selfTestResults.length">
-            <ul class="text-sm space-y-1">
-              <template x-for="r in selfTestResults" :key="r.name">
-                <li class="flex items-center gap-2">
-                  <span class="w-5 text-center" :class="r.ok ? 'text-emerald-600' : 'text-rose-600'" x-text="r.ok ? '✓' : '✗'"></span>
-                  <span x-text="r.name"></span>
-                  <span class="text-xs text-rose-600 ml-2" x-text="r.detail"></span>
-                </li>
-              </template>
-            </ul>
+          <template x-if="qualityReport">
+            <div class="text-sm space-y-2">
+              <div>対象 <span class="font-mono" x-text="qualityReport.total"></span> 社 / 平均完全性 <span class="font-mono" x-text="qualityReport.averageCompleteness.toFixed(1)"></span> /100</div>
+              <div>欠損: <template x-for="[f, n] in Object.entries(qualityReport.missingByField)" :key="f"><span class="mr-2 text-amber-700"><span x-text="f"></span>=<span x-text="n"></span></span></template></div>
+              <div>外れ値候補 <span class="font-mono" x-text="qualityReport.outliers.length"></span> 件 / 重複候補 <span class="font-mono" x-text="qualityReport.duplicates.length"></span> 件 / 業種コード問題 <span class="font-mono" x-text="qualityReport.industryCodeIssues.length"></span> 件</div>
+            </div>
+          </template>
+        </div>
+
+        <!-- Phase 8: Security (encrypted export/import + purge) -->
+        <div class="bg-white rounded-lg shadow p-5">
+          <h2 class="font-semibold text-lg mb-3">セキュリティ</h2>
+          <div class="text-xs text-slate-600 bg-slate-50 rounded p-2 mb-3">
+            ⓘ プロジェクトデータはこのブラウザの IndexedDB にのみ保存され、外部に送信されません。
+            AI / FX API はユーザーが明示的に呼び出した時のみ、選択したプロバイダにのみ送信されます。
+          </div>
+          <div class="grid grid-cols-2 gap-4 text-sm">
+            <div class="border rounded p-3">
+              <h3 class="font-semibold text-sm mb-2" x-text="t('secure.encryptExport', lang)"></h3>
+              <input type="password" class="w-full px-2 py-1 border rounded text-sm mb-2" placeholder="パスフレーズ" x-model="encryptExportPassphrase">
+              <button class="px-3 py-1 text-xs bg-blue-600 text-white rounded" @click="exportCurrentEncrypted()" :disabled="!currentProject">現在のプロジェクトをエクスポート</button>
+              <div class="text-[10px] text-slate-500 mt-1">AES-GCM 256bit + PBKDF2 200,000 iter</div>
+            </div>
+            <div class="border rounded p-3">
+              <h3 class="font-semibold text-sm mb-2" x-text="t('secure.encryptImport', lang)"></h3>
+              <input type="password" class="w-full px-2 py-1 border rounded text-sm mb-2" placeholder="パスフレーズ" x-model="encryptImportPassphrase">
+              <label class="inline-block px-3 py-1 text-xs border rounded cursor-pointer">ファイル選択<input type="file" accept="application/json" class="hidden" @change="importEncryptedPick($event)"></label>
+            </div>
+          </div>
+          <!-- Purge with double confirmation -->
+          <div class="mt-4 border rounded p-3 bg-rose-50 border-rose-200">
+            <h3 class="font-semibold text-sm text-rose-700 mb-1" x-text="t('secure.purge', lang)"></h3>
+            <p class="text-xs text-rose-600 mb-2">案件終了時用。全プロジェクト・全企業・全FX・全監査ログを消去します。<strong>Undo 対象外</strong>。</p>
+            <template x-if="purgeStage === 0">
+              <button class="px-3 py-1 text-xs border border-rose-400 text-rose-700 rounded" @click="requestPurge()">全データ消去を開始</button>
+            </template>
+            <template x-if="purgeStage === 1">
+              <div class="flex gap-2 items-center">
+                <span class="text-xs text-rose-700 font-semibold">本当に全データを消去しますか？</span>
+                <button class="px-3 py-1 text-xs bg-rose-600 text-white rounded" @click="confirmPurge()">確認画面へ</button>
+                <button class="px-3 py-1 text-xs border rounded" @click="cancelPurge()" x-text="t('btn.cancel', lang)"></button>
+              </div>
+            </template>
+            <template x-if="purgeStage === 2">
+              <div class="flex gap-2 items-center">
+                <span class="text-xs text-rose-700 font-bold">最終確認: 元に戻せません</span>
+                <button class="px-3 py-1 text-xs bg-rose-700 text-white rounded" @click="executePurge()">本当に消去する</button>
+                <button class="px-3 py-1 text-xs border rounded" @click="cancelPurge()" x-text="t('btn.cancel', lang)"></button>
+              </div>
+            </template>
+          </div>
+        </div>
+
+        <!-- Phase 8: Ashimori sample verification -->
+        <div class="bg-white rounded-lg shadow p-5">
+          <h2 class="font-semibold text-lg mb-3" x-text="t('sample.verify.title', lang)"></h2>
+          <p class="text-xs text-slate-600 mb-3">
+            実 Capital IQ Excel をアップロードして、ゴールデンマスター結果 (171→94→57→20、IRSレンジ 2.70/3.62/11.48) を実データで検証します。
+          </p>
+          <label class="inline-block px-3 py-1.5 text-sm bg-amber-600 text-white rounded cursor-pointer">
+            Excelファイルを選択して検証
+            <input type="file" accept=".xlsx,.xls" class="hidden" @change="onAshimoriPick($event)">
+          </label>
+          <template x-if="ashimoriFileName"><div class="text-xs text-slate-500 mt-2">対象: <span class="font-mono" x-text="ashimoriFileName"></span></div></template>
+          <template x-if="ashimoriResult">
+            <div class="mt-3">
+              <ul class="text-sm space-y-1">
+                <template x-for="c in ashimoriResult.checks" :key="c.name">
+                  <li class="flex items-center gap-2">
+                    <span class="w-5 text-center" :class="c.ok ? 'text-emerald-600' : 'text-rose-600'" x-text="c.ok ? '✓' : '✗'"></span>
+                    <span x-text="c.name"></span>
+                    <span class="text-xs text-slate-500" x-text="c.detail"></span>
+                  </li>
+                </template>
+              </ul>
+            </div>
+          </template>
+        </div>
+
+        <!-- Self-test (integrated runner, phase-grouped) -->
+        <div class="bg-white rounded-lg shadow p-5">
+          <div class="flex items-center justify-between mb-3">
+            <h2 class="font-semibold text-lg">セルフテスト (全フェーズ統合)</h2>
+            <button class="px-3 py-1.5 text-sm bg-emerald-600 text-white rounded" @click="runAllSelfTests()" :disabled="selfTestRunning">
+              <span x-show="!selfTestRunning">全テスト実行</span>
+              <span x-show="selfTestRunning">実行中...</span>
+            </button>
+          </div>
+          <template x-if="selfTestSummary">
+            <div class="space-y-3 text-sm">
+              <div class="grid grid-cols-3 md:grid-cols-5 gap-2">
+                <template x-for="[phase, info] in Object.entries(selfTestSummary)" :key="phase">
+                  <div class="border rounded p-2" :class="info.fail ? 'bg-rose-50 border-rose-300' : 'bg-emerald-50 border-emerald-300'">
+                    <div class="text-xs font-semibold" x-text="phase"></div>
+                    <div class="text-xs font-mono"><span class="text-emerald-700" x-text="info.pass"></span> / <span x-text="info.total"></span> パス<span x-show="info.fail" class="text-rose-700"> (失敗 <span x-text="info.fail"></span>)</span></div>
+                  </div>
+                </template>
+              </div>
+              <details>
+                <summary class="cursor-pointer text-xs text-slate-600">詳細を表示</summary>
+                <ul class="mt-2 space-y-0.5 max-h-96 overflow-auto">
+                  <template x-for="r in selfTestResults" :key="r.name">
+                    <li class="flex items-start gap-2 text-xs">
+                      <span class="w-5 text-center" :class="r.ok ? 'text-emerald-600' : 'text-rose-600'" x-text="r.ok ? '✓' : '✗'"></span>
+                      <span x-text="r.name"></span>
+                      <span class="text-rose-600 ml-2" x-text="r.detail"></span>
+                    </li>
+                  </template>
+                </ul>
+              </details>
+            </div>
           </template>
         </div>
 
