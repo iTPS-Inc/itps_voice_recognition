@@ -306,6 +306,12 @@ db.version(2).stores({
   });
 });
 
+// Phase 6.1: binary asset store (CJK fonts, logo blobs, etc.) so a
+// once-loaded font survives page reloads and works offline.
+db.version(3).stores({
+  assets: 'id, kind, name, addedAt',
+});
+
 /**
  * Persist a single audit entry. All user-visible mutations should call
  * this so the future Phase 7 report appendix can render a tamper-evident
@@ -836,8 +842,11 @@ function tpApp() {
         // Phase 2: bring up rules + TODO and refresh state derived from them.
         await rulesEngine.loadDefaults();
         await todoStore.ensureStandingTodos();
+        // Phase 6.1: register the font-subsetting reminder (idempotent).
+        if (typeof ensurePhase61Todos === 'function') await ensurePhase61Todos();
         this.allRules = await rulesEngine.list();
         await this.refreshTodos();
+        await this.refreshFontStatus();
         await this.refreshProjects();
         this.booted = true;
         await logAudit('app.boot', { version: APP_VERSION });
@@ -2066,7 +2075,35 @@ function tpApp() {
       jurisdictionId: '', template: 'BEPS_LOCAL_FILE', lang: 'ja',
       multiMode: 'individual', includeConfidentiality: false,
       includedSections: [...REPORT_SECTION_IDS],
+      pdfMethod: 'embedded',   // Phase 6.1: 'embedded' | 'print'
       meta: { title: '', subtitle: '', testedPartyName: '', period: '', author: '', date: new Date().toISOString().slice(0,10), confidentialityTag: '', logoDataUrl: null },
+    },
+    /* Phase 6.1: CJK font status / upload UI bindings. */
+    fontStatus: { loaded: false, name: null, format: null, size: 0, source: null, addedAt: null },
+    fontUrlInput: '',
+    async refreshFontStatus() { this.fontStatus = await fontStore.getStatus(); },
+    async onFontUpload(ev) {
+      const f = ev.target.files?.[0]; if (!f) return;
+      try {
+        const info = await fontStore.loadCJK({ type: 'upload', file: f });
+        await this.refreshFontStatus();
+        this.toast(`フォント "${info.name}" を読込みました (${info.format.toUpperCase()})`, 'success');
+      } catch (e) { this.toast(e.message, 'error', 8000); }
+      ev.target.value = '';
+    },
+    async loadFontFromUrl() {
+      if (!this.fontUrlInput) return;
+      try {
+        const info = await fontStore.loadCJK({ type: 'url', url: this.fontUrlInput });
+        await this.refreshFontStatus();
+        this.fontUrlInput = '';
+        this.toast(`フォント "${info.name}" を取得しました`, 'success');
+      } catch (e) { this.toast('取得失敗: ' + e.message, 'error', 8000); }
+    },
+    async clearFont() {
+      await fontStore.clear();
+      await this.refreshFontStatus();
+      this.toast('フォントを削除しました', 'success');
     },
     reportModel: null,
     reportSectionUI: [],
@@ -2119,11 +2156,37 @@ function tpApp() {
       this.reportGenerating = true;
       this.reportProgressMsg = `${format.toUpperCase()} を生成中...`;
       try {
-        const { blob } = await generateReport(this.currentProject.id, this.reportCfg.jurisdictionId, format, this.reportCfg.template, {
+        // Phase 6.1: when the user picked the print PDF method, branch into
+        // generatePdfPrint which triggers window.print() and does not return
+        // a downloadable blob — it relies on the browser's save-as-PDF flow.
+        if (format === 'pdf' && this.reportCfg.pdfMethod === 'print') {
+          const result = await TPApp.report.generatePdfPrint(
+            this.currentProject.id, this.reportCfg.jurisdictionId, this.reportCfg.template,
+            { lang: this.reportCfg.lang,
+              meta: { ...this.reportCfg.meta, confidentialityTag: this.reportCfg.includeConfidentiality ? this.reportCfg.meta.confidentialityTag : '' },
+              includeSections: this.reportCfg.includedSections },
+          );
+          this.toast('印刷ダイアログを開きました。「PDFとして保存」を選択してください。', 'info', 6000);
+          return;
+        }
+        // Phase 6.1: warn when embedded Japanese PDF is requested without a font.
+        if (format === 'pdf' && this.reportCfg.lang === 'ja' && this.reportCfg.pdfMethod === 'embedded' && !this.fontStatus.loaded) {
+          this.openModal({
+            title: 'CJK フォント未読込',
+            body: '日本語ナラティブのプログラム PDF には TTF / OTF の日本語フォントが必要です。\n' +
+                  '設定画面で「PDF 用 日本語フォント (CJK)」をアップロードしてください。\n\n' +
+                  '代替として「印刷PDF」方式を選択すると、ブラウザのシステムフォントで生成できます。',
+            kind: 'warning',
+          });
+          return;
+        }
+        const opts = {
           lang: this.reportCfg.lang,
           meta: { ...this.reportCfg.meta, confidentialityTag: this.reportCfg.includeConfidentiality ? this.reportCfg.meta.confidentialityTag : '' },
           includeSections: this.reportCfg.includedSections,
-        });
+          method: format === 'pdf' ? this.reportCfg.pdfMethod : undefined,
+        };
+        const { blob } = await generateReport(this.currentProject.id, this.reportCfg.jurisdictionId, format, this.reportCfg.template, opts);
         const filename = `${_slug(this.currentProject.name)}_${this.reportCfg.jurisdictionId}_${_dateTag()}.${REPORT_EXT[format]}`;
         downloadBlob(blob, filename);
         this.toast(`${format.toUpperCase()} レポートをダウンロードしました`, 'success');
@@ -3217,6 +3280,136 @@ async function runSelfTest() {
   await check('Phase 6 - TPApp.report facade exposed', async () => {
     for (const k of ['templates','sectionLabels','sectionInventory','getSections','buildModel','generate','chartToImage']) {
       if (TPApp.report[k] == null) throw new Error('missing TPApp.report.' + k);
+    }
+  });
+
+  /* ================== Phase 6.1 acceptance checks ================== */
+
+  await check('Phase 6.1 - font format sniffer rejects woff / woff2', async () => {
+    const ttf  = new Uint8Array([0x00, 0x01, 0x00, 0x00, 0, 0, 0, 0]);
+    const otf  = new Uint8Array([0x4F, 0x54, 0x54, 0x4F, 0, 0, 0, 0]); // "OTTO"
+    const woff = new Uint8Array([0x77, 0x4F, 0x46, 0x46]);             // "wOFF"
+    const wf2  = new Uint8Array([0x77, 0x4F, 0x46, 0x32]);             // "wOF2"
+    if (_sniffFontFormat(ttf)  !== 'ttf')   throw new Error('ttf miss');
+    if (_sniffFontFormat(otf)  !== 'otf')   throw new Error('otf miss');
+    if (_sniffFontFormat(woff) !== 'woff')  throw new Error('woff miss');
+    if (_sniffFontFormat(wf2)  !== 'woff2') throw new Error('woff2 miss');
+  });
+
+  await check('Phase 6.1 - woff upload is rejected with explicit error', async () => {
+    const woff = new File([new Uint8Array([0x77, 0x4F, 0x46, 0x46, 1, 2, 3, 4])], 'bad.woff');
+    let err = null;
+    try { await fontStore.loadCJK({ type: 'upload', file: woff }); } catch (e) { err = e; }
+    if (!err) throw new Error('should have thrown');
+    if (!/woff/i.test(err.message)) throw new Error('error must mention woff');
+  });
+
+  await check('Phase 6.1 - TTF upload caches into Dexie + base64 roundtrip', async () => {
+    // Minimal valid TTF magic so the sniffer accepts it. The content beyond
+    // the magic is irrelevant for the sniff / cache pathway.
+    const payload = new Uint8Array(1024); payload[0] = 0x00; payload[1] = 0x01; payload[2] = 0x00; payload[3] = 0x00;
+    for (let i = 4; i < payload.length; i++) payload[i] = i & 0xff;
+    const file = new File([payload], 'self-test-cjk.ttf', { type: 'font/ttf' });
+    const info = await fontStore.loadCJK({ type: 'upload', file, name: 'self-test-cjk.ttf' });
+    if (info.format !== 'ttf') throw new Error('format');
+    if (info.size  !== 1024)   throw new Error('size');
+    const row = await db.assets.get(ASSET_KIND_CJK_FONT);
+    if (!row?.base64) throw new Error('base64 not stored');
+    // Decode and verify the bytes survive a roundtrip.
+    const bin = atob(row.base64); const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    if (out.length !== 1024) throw new Error('decoded length mismatch');
+    if (out[0] !== 0 || out[1] !== 1 || out[2] !== 0 || out[3] !== 0) throw new Error('magic bytes corrupted');
+    // Confirm registration with a real jsPDF doc.
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF();
+    const family = await fontStore.applyToJsPdf(doc);
+    if (family !== 'cjk') throw new Error('apply family wrong');
+    await fontStore.clear();
+    if (await db.assets.get(ASSET_KIND_CJK_FONT)) throw new Error('clear did not remove');
+  });
+
+  await check('Phase 6.1 - canvas renderer accepts Japanese labels (PNG output)', async () => {
+    const url = renderFunnelImageDataUrl(
+      [{ id: 'S1', label: '初期検索', inputCount: 100, passCount: 70, rejectCount: 30 },
+       { id: 'S2', label: '一括除外', inputCount: 70,  passCount: 25, rejectCount: 45 }], 100,
+      { lang: 'ja' });
+    if (!url.startsWith('data:image/png;base64,')) throw new Error('not PNG');
+    if (url.length < 1000) throw new Error('image too small');
+    const r = renderRangePlotImageDataUrl({ min: 0.01, lower: 0.02, median: 0.03, upper: 0.04, max: 0.05 },
+      [0.02, 0.03, 0.04], 0.025, { lang: 'ja', title: 'アームスレングス・レンジ (IRS方式)' });
+    if (!r.startsWith('data:image/png;base64,')) throw new Error('range not PNG');
+  });
+
+  await check('Phase 6.1 - print HTML contains Japanese + quartile badge', async () => {
+    const f = await _setupReportFixture();
+    const model = await buildReportModel(f.projectId, 'JP', { template: 'JP_LOCAL', lang: 'ja' });
+    const html = buildPrintReportHtml(model, { lang: 'ja' });
+    if (!html.includes('@page')) throw new Error('print CSS missing @page');
+    if (!html.includes('page-break-before')) throw new Error('print CSS missing page-break-before');
+    if (!html.includes('display: table-header-group')) throw new Error('thead repeat missing');
+    if (!html.includes('検証対象企業')) throw new Error('Japanese label missing');
+    if (!html.includes('措置法')) throw new Error('JP legal reference missing');
+    if (!html.includes('IRS')) throw new Error('quartile badge missing');
+    if (!html.includes('class="badge badge-irs"')) throw new Error('badge class missing');
+    await f.cleanup();
+  });
+
+  await check('Phase 6.1 - generatePdfPrint htmlOnly returns HTML without printing', async () => {
+    const f = await _setupReportFixture();
+    const model = await buildReportModel(f.projectId, 'JP', { template: 'BEPS_LOCAL_FILE', lang: 'ja' });
+    const r = await generatePdfReportPrint(model, { lang: 'ja', htmlOnly: true });
+    if (r.triggered) throw new Error('htmlOnly should not trigger print');
+    if (!r.html || r.html.length < 1000) throw new Error('html missing');
+    await f.cleanup();
+  });
+
+  await check('Phase 6.1 - embedded PDF uses CJK font when requested + lang=ja', async () => {
+    // Re-load the synthetic TTF so the registration path runs.
+    const payload = new Uint8Array(2048);
+    payload[0] = 0x00; payload[1] = 0x01; payload[2] = 0x00; payload[3] = 0x00;
+    await fontStore.loadCJK({ type: 'upload', file: new File([payload], 'ttf.ttf'), name: 'ttf.ttf' });
+    const f = await _setupReportFixture();
+    const model = await buildReportModel(f.projectId, 'JP', { template: 'JP_LOCAL', lang: 'ja' });
+    const blob = await generatePdfReportEmbedded(model, { lang: 'ja' });
+    const head = await blob.slice(0, 5).text();
+    if (head !== '%PDF-') throw new Error('not PDF');
+    if (blob.size < 3000) throw new Error('pdf too small');
+    await fontStore.clear();
+    await f.cleanup();
+  });
+
+  await check('Phase 6.1 - embedded PDF falls back when no font + lang=en still works', async () => {
+    const f = await _setupReportFixture();
+    const model = await buildReportModel(f.projectId, 'JP', { template: 'BEPS_LOCAL_FILE', lang: 'en' });
+    const blob = await generatePdfReportEmbedded(model, { lang: 'en' });
+    if (blob.size < 2000) throw new Error('en pdf too small');
+    await f.cleanup();
+  });
+
+  await check('Phase 6.1 - PDF dispatcher routes embedded vs print', async () => {
+    const f = await _setupReportFixture();
+    const embedded = await generateReport(f.projectId, 'JP', 'pdf', 'BEPS_LOCAL_FILE', { lang: 'en', method: 'embedded' });
+    if (!(embedded.blob instanceof Blob)) throw new Error('embedded must return a Blob');
+    const printed = await generateReport(f.projectId, 'JP', 'pdf', 'BEPS_LOCAL_FILE', { lang: 'ja', method: 'print', htmlOnly: true });
+    // Print returns {method, triggered, html, model}, no blob.
+    if (printed.blob) throw new Error('print should not return a Blob');
+    if (!printed.html) throw new Error('print must return html');
+    await f.cleanup();
+  });
+
+  await check('Phase 6.1 - standing TODO for font subsetting is registered', async () => {
+    await ensurePhase61Todos();
+    const list = await todoStore.list();
+    if (!list.some(t => t.metadata?.standingKey === 'JA_PDF_FONT_SUBSET')) throw new Error('subset TODO missing');
+  });
+
+  await check('Phase 6.1 - TPApp.fonts surface exposed', async () => {
+    for (const k of ['loadCJK','getStatus','getActive','clear']) {
+      if (typeof TPApp.fonts[k] !== 'function') throw new Error('missing TPApp.fonts.' + k);
+    }
+    for (const k of ['generatePdfEmbedded','generatePdfPrint','buildPrintHtml']) {
+      if (typeof TPApp.report[k] !== 'function') throw new Error('missing TPApp.report.' + k);
     }
   });
 
@@ -6728,17 +6921,23 @@ function reportSectionInventory(model) {
  * @returns {string} data URL
  */
 function renderFunnelImageDataUrl(stages, initialPool, opts = {}) {
+  // Phase 6.1: canvas labels are now language-aware. System fonts handle
+  // CJK glyphs automatically, so no separate font registration is needed.
+  const lang = opts.lang || 'en';
+  const labels = lang === 'ja'
+    ? { title: 'スクリーニング・ファネル', pool: '初期プール', pass: '通過', reject: '却下' }
+    : { title: 'Screening Funnel',         pool: 'Pool',       pass: 'PASS',  reject: 'rejected' };
   const w = opts.width  || 1100;
   const h = opts.height || Math.max(220, 40 + 40 * stages.length);
   const cv = document.createElement('canvas');
   cv.width = w; cv.height = h;
   const ctx = cv.getContext('2d');
   ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, w, h);
-  ctx.font = '14px sans-serif'; ctx.fillStyle = '#1e293b';
-  ctx.fillText('Screening Funnel', 20, 24);
+  ctx.font = '14px "Hiragino Kaku Gothic ProN", "Yu Gothic", Meiryo, sans-serif'; ctx.fillStyle = '#1e293b';
+  ctx.fillText(labels.title, 20, 24);
   const labelX = 20, barX = 240, barMaxW = w - barX - 200;
-  ctx.font = '12px sans-serif';
-  ctx.fillText('Pool: ' + initialPool, labelX, 50);
+  ctx.font = '12px "Hiragino Kaku Gothic ProN", "Yu Gothic", Meiryo, sans-serif';
+  ctx.fillText(`${labels.pool}: ` + initialPool, labelX, 50);
   const total = Math.max(1, initialPool);
   let y = 60;
   for (const s of stages) {
@@ -6748,11 +6947,11 @@ function renderFunnelImageDataUrl(stages, initialPool, opts = {}) {
     ctx.fillStyle = '#3b82f6';
     ctx.fillRect(barX, y + 4, barW, 22);
     ctx.fillStyle = '#fff'; ctx.textBaseline = 'middle';
-    ctx.fillText(`PASS ${s.passCount}`, barX + 6, y + 15);
+    ctx.fillText(`${labels.pass} ${s.passCount}`, barX + 6, y + 15);
     ctx.textBaseline = 'alphabetic';
     if (s.rejectCount) {
       ctx.fillStyle = '#f43f5e';
-      ctx.fillText(`-${s.rejectCount} rejected`, barX + barW + 12, y + 20);
+      ctx.fillText(`-${s.rejectCount} ${labels.reject}`, barX + barW + 12, y + 20);
     }
     y += 36;
   }
@@ -6764,13 +6963,20 @@ function renderFunnelImageDataUrl(stages, initialPool, opts = {}) {
  * @returns {string} data URL
  */
 function renderRangePlotImageDataUrl(range, pliValues, testedPartyPli, opts = {}) {
+  const lang = opts.lang || 'en';
+  const tickLabels = lang === 'ja'
+    ? [['最小', range.min], ['下限', range.lower], ['中央', range.median], ['上限', range.upper], ['最大', range.max]]
+    : [['Min',  range.min], ['LQ',   range.lower], ['Median', range.median], ['UQ',   range.upper], ['Max',  range.max]];
+  const defaultTitle = lang === 'ja' ? 'アームスレングス・レンジ' : "Arm's Length Range";
+  const tpLabel = lang === 'ja' ? '検証対象' : 'TP';
   const w = opts.width || 1100, h = opts.height || 280;
   const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
   const ctx = cv.getContext('2d');
+  const cjkFontStack = '"Hiragino Kaku Gothic ProN", "Yu Gothic", Meiryo, "MS PGothic", "Noto Sans CJK JP", sans-serif';
   ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, w, h);
-  ctx.font = '16px sans-serif'; ctx.fillStyle = '#1e293b';
-  ctx.fillText(opts.title || 'Arm\'s Length Range', 20, 28);
-  if (opts.subtitle) { ctx.font = '12px sans-serif'; ctx.fillStyle = '#64748b'; ctx.fillText(opts.subtitle, 20, 50); }
+  ctx.font = `16px ${cjkFontStack}`; ctx.fillStyle = '#1e293b';
+  ctx.fillText(opts.title || defaultTitle, 20, 28);
+  if (opts.subtitle) { ctx.font = `12px ${cjkFontStack}`; ctx.fillStyle = '#64748b'; ctx.fillText(opts.subtitle, 20, 50); }
   const padX = 60, plotW = w - 2 * padX, midY = 160;
   const vals = [...pliValues];
   if (testedPartyPli != null) vals.push(testedPartyPli);
@@ -6798,11 +7004,11 @@ function renderRangePlotImageDataUrl(range, pliValues, testedPartyPli, opts = {}
   if (testedPartyPli != null) {
     ctx.fillStyle = '#dc2626';
     ctx.beginPath(); ctx.arc(x(testedPartyPli), midY, 8, 0, Math.PI * 2); ctx.fill();
-    ctx.font = 'bold 12px sans-serif'; ctx.fillText('TP', x(testedPartyPli) - 8, midY + 60);
+    ctx.font = `bold 12px ${cjkFontStack}`; ctx.fillText(tpLabel, x(testedPartyPli) - 14, midY + 60);
   }
   // ticks + labels
-  ctx.fillStyle = '#475569'; ctx.font = '11px sans-serif';
-  for (const [label, v] of [['Min', range.min], ['LQ', range.lower], ['Median', range.median], ['UQ', range.upper], ['Max', range.max]]) {
+  ctx.fillStyle = '#475569'; ctx.font = `11px ${cjkFontStack}`;
+  for (const [label, v] of tickLabels) {
     const tx = x(v);
     ctx.fillRect(tx - 0.5, midY + 30, 1, 4);
     ctx.fillText(label + ' ' + (v * 100).toFixed(2) + '%', tx - 30, midY + 50);
@@ -7385,7 +7591,14 @@ async function generatePptxReport(model) {
   PHASE 6 / BLOCK 37 : TPApp.report facade + orchestration
 ===================================================================== -->
 <script id="tp-app-phase6">
-const REPORT_GENERATORS = { docx: generateDocxReport, pdf: generatePdfReport, pptx: generatePptxReport };
+// Phase 6.1: replace the bare PDF generator with a dispatcher that picks
+// between the embedded (Japanese-aware) flow and the print flow based on
+// opts.method. Default = embedded for backwards compatibility.
+async function _pdfDispatch(model, opts = {}) {
+  if (opts.method === 'print') return generatePdfReportPrint(model, opts);
+  return generatePdfReportEmbedded(model, opts);
+}
+const REPORT_GENERATORS = { docx: generateDocxReport, pdf: _pdfDispatch, pptx: generatePptxReport };
 const REPORT_MIME       = { docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
                             pdf:  'application/pdf',
                             pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation' };
@@ -7421,7 +7634,605 @@ TPApp.report = {
   buildModel: buildReportModel,
   generate: generateReport,
   chartToImage,
+  /** Phase 6.1: embedded-font Japanese PDF. */
+  generatePdfEmbedded: async (projectId, jurisdictionId, template, options = {}) => {
+    const model = await buildReportModel(projectId, jurisdictionId, { ...options, template });
+    const blob  = await generatePdfReportEmbedded(model, { ...options, lang: options.lang || 'ja' });
+    return { blob, model };
+  },
+  /** Phase 6.1: browser-print PDF flow. */
+  generatePdfPrint: async (projectId, jurisdictionId, template, options = {}) => {
+    const model = await buildReportModel(projectId, jurisdictionId, { ...options, template });
+    const ret   = await generatePdfReportPrint(model, { ...options, lang: options.lang || 'ja' });
+    return { ...ret, model };
+  },
+  buildPrintHtml: buildPrintReportHtml,
 };
+TPApp.fonts = {
+  loadCJK:   (source) => fontStore.loadCJK(source),
+  getStatus: ()       => fontStore.getStatus(),
+  getActive: ()       => fontStore.getActive(),
+  clear:     ()       => fontStore.clear(),
+};
+</script>
+
+
+<!-- =====================================================================
+  PHASE 6.1 / BLOCK 38 : CJK font asset store
+  ---------------------------------------------------------------------
+  Loads, validates and caches a TTF/OTF font in the Dexie `assets`
+  table so the Japanese PDF flow works offline. Rejects woff/woff2
+  with an explicit message — jsPDF only consumes raw OpenType data.
+===================================================================== -->
+<script id="cjk-fonts">
+const ASSET_KIND_CJK_FONT = 'cjkFont';
+/** Magic-byte sniff. TTF starts with `00 01 00 00` or `true`, OTF with
+ *  `OTTO`, WOFF with `wOFF`, WOFF2 with `wOF2`. */
+function _sniffFontFormat(u8) {
+  if (!u8 || u8.length < 4) return null;
+  const sig4 = String.fromCharCode(u8[0], u8[1], u8[2], u8[3]);
+  if (sig4 === 'OTTO') return 'otf';
+  if (sig4 === 'wOFF') return 'woff';
+  if (sig4 === 'wOF2') return 'woff2';
+  if (sig4 === 'true' || sig4 === 'typ1') return 'ttf';
+  if (u8[0] === 0x00 && u8[1] === 0x01 && u8[2] === 0x00 && u8[3] === 0x00) return 'ttf';
+  return null;
+}
+
+/** Convert a Uint8Array into a base64 string without exceeding the JS
+ *  argument limit (btoa chokes on big strings via apply). */
+function _u8ToBase64(u8) {
+  let s = ''; const CHUNK = 0x8000;
+  for (let i = 0; i < u8.length; i += CHUNK) {
+    s += String.fromCharCode.apply(null, u8.subarray(i, i + CHUNK));
+  }
+  return btoa(s);
+}
+
+const fontStore = {
+  /**
+   * Load a CJK font from an upload or URL into the Dexie asset table.
+   * @param {{type:('upload'|'url'), file?:File, url?:string, name?:string}} source
+   * @returns {Promise<{name:string, format:string, size:number}>}
+   */
+  async loadCJK(source) {
+    if (!source) throw new Error('source required');
+    let u8, name = source.name || 'CJK Font';
+    if (source.type === 'upload') {
+      if (!source.file) throw new Error('file required');
+      name = source.name || source.file.name;
+      u8 = new Uint8Array(await source.file.arrayBuffer());
+    } else if (source.type === 'url') {
+      if (!source.url) throw new Error('url required');
+      const res = await fetch(source.url);
+      if (!res.ok) throw new Error('font fetch failed: HTTP ' + res.status);
+      u8 = new Uint8Array(await res.arrayBuffer());
+      name = source.name || source.url.split('/').pop() || 'CJK Font';
+    } else {
+      throw new Error('unknown source type: ' + source.type);
+    }
+    const format = _sniffFontFormat(u8);
+    if (!format) throw new Error('Unrecognised font format. TTF または OTF を選択してください。');
+    if (format === 'woff' || format === 'woff2') {
+      throw new Error('woff / woff2 は jsPDF で扱えません。TTF または OTF を選択してください。');
+    }
+    const base64 = _u8ToBase64(u8);
+    await db.assets.put({
+      id: ASSET_KIND_CJK_FONT,        // singleton row — one active CJK font at a time
+      kind: ASSET_KIND_CJK_FONT,
+      name, format, base64, size: u8.length,
+      addedAt: Date.now(),
+      sourceType: source.type, sourceUrl: source.type === 'url' ? source.url : null,
+    });
+    await logAudit('FONT_LOAD', { name, format, size: u8.length, source: source.type });
+    return { name, format, size: u8.length };
+  },
+
+  /** Return the currently loaded font row, or null. */
+  async getActive() {
+    return (await db.assets.get(ASSET_KIND_CJK_FONT)) || null;
+  },
+
+  /** Lightweight status object suitable for UI binding. */
+  async getStatus() {
+    const a = await this.getActive();
+    return a
+      ? { loaded: true,  name: a.name, format: a.format, size: a.size, source: a.sourceType, addedAt: a.addedAt }
+      : { loaded: false, name: null,    format: null,    size: 0,      source: null,        addedAt: null };
+  },
+
+  /** Remove the cached font. */
+  async clear() {
+    await db.assets.delete(ASSET_KIND_CJK_FONT);
+    await logAudit('FONT_LOAD', { cleared: true });
+  },
+
+  /**
+   * Register the cached font onto a jsPDF document so subsequent
+   * setFont(fontFamily) calls render Japanese glyphs.
+   * @param {Object} doc - jsPDF document
+   * @returns {Promise<string|null>} the family name to pass to setFont, or null if no font cached
+   */
+  async applyToJsPdf(doc) {
+    const a = await this.getActive();
+    if (!a) return null;
+    // jsPDF interns by filename; we use a deterministic VFS path so reloads
+    // don't double-register.
+    const vfsName = `cjk-${a.id}.${a.format}`;
+    const family  = 'cjk';
+    doc.addFileToVFS(vfsName, a.base64);
+    doc.addFont(vfsName, family, 'normal');
+    return family;
+  },
+};
+
+/**
+ * Register Phase 6.1 standing TODOs (idempotent). Called from the app
+ * boot so the reminder appears on first launch and survives reloads.
+ */
+async function ensurePhase61Todos() {
+  const all = await db.todoItems.toArray();
+  const hasKey = (key) => all.some(t => t.metadata?.standingKey === key);
+  if (!hasKey('JA_PDF_FONT_SUBSET')) {
+    await todoStore.add({
+      title: '日本語PDFのフォントサブセット化',
+      description: 'jsPDF はフォントを丸ごと埋込むため日本語 PDF が数MBになります。' +
+                   '使用文字だけを抽出するサブセット化を実装してファイルサイズを削減してください ' +
+                   '(NotoSansJP-Regular サブセット ≈ 数百kB が目安)。',
+      priority: 'low', source: 'phase6.1',
+      metadata: { standingKey: 'JA_PDF_FONT_SUBSET' },
+    });
+  }
+}
+</script>
+
+<!-- =====================================================================
+  PHASE 6.1 / BLOCK 39 : Japanese-aware embedded PDF generator
+  ---------------------------------------------------------------------
+  Replaces the Phase 6 PDF generator with a language-switching version.
+  When opts.lang === 'ja' (and a CJK font is available), the doc uses
+  Japanese headings and narratives + the registered CJK family.
+  Falls back to the original English flow otherwise.
+===================================================================== -->
+<script id="report-pdf-embedded">
+/** Section heading dictionary used by the PDF generator. */
+const PDF_SECTION_HEADINGS = {
+  ja: { exec: 'エグゼクティブサマリー', tested: '検証対象企業・FAR', dataSource: 'データソースと検索戦略',
+        screening: 'スクリーニング・プロセス', accepted: '採用比較対象企業', rejected: '却下サマリー',
+        pliReason: 'PLI 選定理由', wca: '比較可能性調整 (運転資本調整)', range: 'アームスレングス・レンジ',
+        conclusion: '結論', appendixA: '付録A: 却下企業 全件一覧', appendixB: '付録B: 採用企業 財務データ', appendixC: '付録C: 監査証跡' },
+  en: { exec: 'Executive Summary', tested: 'Tested Party & FAR', dataSource: 'Data Source & Search Strategy',
+        screening: 'Screening Process', accepted: 'Accepted Comparables', rejected: 'Rejection Summary',
+        pliReason: 'PLI Selection Rationale', wca: 'Comparability Adjustments (WCA)', range: "Arm's Length Range",
+        conclusion: 'Conclusion', appendixA: 'Appendix A: Rejected Companies', appendixB: 'Appendix B: Accepted Financials', appendixC: 'Appendix C: Audit Trail' },
+};
+const PDF_LABELS = {
+  ja: { toc: '目次', testedParty: '検証対象企業', period: '対象期間', template: 'テンプレート', date: '作成日', author: '作成者',
+        provider: 'データソース', legal: '適用法令', tpPli: '検証対象企業 PLI', range: 'アームスレングス・レンジ', median: '中央値',
+        classification: '判定', pli: 'PLI', method: '集計方法', quartile: '四分位計算方式', count: '採用社数',
+        within: 'レンジ内', below: 'レンジ下限未満', above: 'レンジ上限超', page: 'ページ',
+        japanesePdfNote: '※ 検索・選択可能な日本語PDF（フォント埋込）',
+        funnelInitial: '初期プール', funnelAccepted: '採用', pass: '通過', reject: '却下',
+        ar: '売掛金', ap: '買掛金', inv: '棚卸資産',
+        rate: '金利', metric: '指標', unadjusted: '調整前', adjusted: '調整後',
+        stage: '段階', reason: '理由', count2: '件数', timestamp: '時刻', action: 'アクション', payload: '内容',
+        name: '企業名', country: '国', selectionReason: '選定理由', similarity: '類似性' },
+  en: { toc: 'Table of Contents', testedParty: 'Tested Party', period: 'Period', template: 'Template', date: 'Date', author: 'Author',
+        provider: 'Provider', legal: 'Legal reference', tpPli: 'Tested party PLI', range: "Arm's-length range", median: 'median',
+        classification: 'Classification', pli: 'PLI', method: 'Aggregation', quartile: 'Quartile method', count: 'Comparable count',
+        within: 'WITHIN', below: 'BELOW', above: 'ABOVE', page: 'Page',
+        japanesePdfNote: 'Note: This PDF uses embedded CJK font.',
+        funnelInitial: 'Initial pool', funnelAccepted: 'Accepted', pass: 'PASS', reject: 'REJ',
+        ar: 'AR', ap: 'AP', inv: 'Inv',
+        rate: 'Rate', metric: 'Metric', unadjusted: 'Unadjusted', adjusted: 'Adjusted',
+        stage: 'Stage', reason: 'Reason', count2: 'Count', timestamp: 'Timestamp', action: 'Action', payload: 'Payload',
+        name: 'Name', country: 'Country', selectionReason: 'Rationale', similarity: 'Sim.' },
+};
+
+/**
+ * Generate a PDF report with optional CJK font embedding.
+ *
+ * @param {Object} model
+ * @param {Object} [opts]
+ * @param {('ja'|'en')} [opts.lang='en']
+ * @returns {Promise<Blob>}
+ */
+async function generatePdfReportEmbedded(model, opts = {}) {
+  const lang = opts.lang || model.lang || 'en';
+  const L  = PDF_LABELS[lang] || PDF_LABELS.en;
+  const SH = PDF_SECTION_HEADINGS[lang] || PDF_SECTION_HEADINGS.en;
+
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ unit: 'mm', format: 'a4' });
+  // Try to register a CJK font when emitting Japanese.
+  let cjkFamily = null;
+  if (lang === 'ja') cjkFamily = await fontStore.applyToJsPdf(doc);
+  const fontFamily = cjkFamily || 'helvetica';
+  const setFont = (style = 'normal') => {
+    // jsPDF treats the CJK font as a single style — fall back to helvetica
+    // for bold when no CJK bold variant has been registered.
+    if (cjkFamily) doc.setFont(cjkFamily, 'normal');
+    else doc.setFont('helvetica', style);
+  };
+  if (cjkFamily) doc.setFont(cjkFamily, 'normal'); else doc.setFont('helvetica', 'normal');
+
+  const margin = 15;
+  const pageW = doc.internal.pageSize.getWidth();
+  const pageH = doc.internal.pageSize.getHeight();
+  let y = margin;
+
+  const ensureSpace = (need) => { if (y + need > pageH - margin) { doc.addPage(); y = margin; } };
+  const heading = (text, level = 1) => {
+    ensureSpace(15);
+    setFont('bold');
+    doc.setFontSize(level === 1 ? 16 : 13);
+    doc.text(text, margin, y);
+    y += level === 1 ? 10 : 7;
+    setFont('normal'); doc.setFontSize(11);
+  };
+  const bodyText = (text) => {
+    if (text == null || text === '') return;
+    setFont('normal'); doc.setFontSize(10);
+    const lines = doc.splitTextToSize(String(text), pageW - 2 * margin);
+    for (const line of lines) { ensureSpace(6); doc.text(line, margin, y); y += 5; }
+    y += 2;
+  };
+  const imageBlock = (dataUrl, w, h) => { ensureSpace(h + 4); doc.addImage(dataUrl, 'PNG', margin, y, w, h); y += h + 4; };
+  const autoTable = (head, body, opt = {}) => {
+    doc.autoTable({
+      startY: y, head: [head], body,
+      styles: { fontSize: opt.fontSize || 9, font: cjkFamily || undefined },
+      headStyles: { fillColor: [226, 232, 240], textColor: 30, font: cjkFamily || undefined },
+      margin: { left: margin, right: margin },
+    });
+    y = doc.lastAutoTable.finalY + 6;
+  };
+
+  /* ---------------- title page ---------------- */
+  setFont('bold'); doc.setFontSize(20);
+  doc.text(model.meta.title, pageW / 2, 60, { align: 'center' });
+  setFont('normal'); doc.setFontSize(14);
+  if (model.meta.subtitle) doc.text(model.meta.subtitle, pageW / 2, 75, { align: 'center' });
+  doc.setFontSize(11);
+  doc.text(`${L.testedParty}: ` + model.meta.testedPartyName, pageW / 2, 95,  { align: 'center' });
+  doc.text(`${L.period}: `      + model.meta.period,          pageW / 2, 103, { align: 'center' });
+  doc.text(`${L.template}: `    + model.template,             pageW / 2, 111, { align: 'center' });
+  doc.text(`${L.date}: `        + model.meta.date,            pageW / 2, 119, { align: 'center' });
+  if (model.meta.confidentialityTag) {
+    doc.setTextColor(192, 57, 43); setFont('bold');
+    doc.text(model.meta.confidentialityTag, pageW / 2, 140, { align: 'center' });
+    doc.setTextColor(0); setFont('normal');
+  }
+  if (lang === 'ja') {
+    doc.setFontSize(9); doc.setTextColor(120);
+    doc.text(L.japanesePdfNote, pageW / 2, 250, { align: 'center' });
+    doc.setTextColor(0);
+  } else {
+    doc.setFontSize(9); doc.setTextColor(120);
+    doc.text('Note: For Japanese-rich content use the docx export or the print-PDF option.', pageW / 2, 250, { align: 'center' });
+    doc.setTextColor(0);
+  }
+  doc.addPage(); y = margin;
+
+  /* ---------------- TOC ---------------- */
+  heading(L.toc, 1);
+  for (const id of model.sectionsOrdered) bodyText('• ' + (SH[id] || REPORT_SECTION_LABELS[id]?.[lang] || id));
+  doc.addPage(); y = margin;
+
+  /* ---------------- Sections ---------------- */
+  const pct = (v) => v == null || !Number.isFinite(v) ? '—' : (v * 100).toFixed(2) + '%';
+  for (const id of model.sectionsOrdered) {
+    heading(SH[id] || id, 1);
+
+    if (id === 'exec' && model.exec) {
+      // Use the model's already-localised conclusion sentence so the badge
+      // label travels through unchanged.
+      bodyText(model.exec.conclusion);
+      bodyText(`${L.classification}: ` + ({ WITHIN: L.within, BELOW: L.below, ABOVE: L.above }[model.exec.classification] || L.within));
+    }
+    else if (id === 'tested' && model.tested) {
+      bodyText(`${L.country} / SIC: ` + model.tested.country + ' / ' + (model.tested.sic || '-'));
+      bodyText((lang === 'ja' ? '機能: ' : 'Functions: ') + (model.tested.functions || []).join(', '));
+      bodyText((lang === 'ja' ? '資産: ' : 'Assets: ')    + (model.tested.assets    || []).join(', '));
+      bodyText((lang === 'ja' ? 'リスク: ' : 'Risks: ')   + (model.tested.risks     || []).join(', '));
+      if (model.tested.businessDescription) bodyText(model.tested.businessDescription);
+    }
+    else if (id === 'dataSource') {
+      bodyText(`${L.provider}: ` + model.dataSource.provider);
+      bodyText(`${L.legal}: `    + (model.legal?.primary || ''));
+      if (model.legal?.note) bodyText(model.legal.note);
+      if (lang === 'ja' && model.dataSource.jpIntro) bodyText(model.dataSource.jpIntro);
+    }
+    else if (id === 'screening' && model.screening) {
+      bodyText(`${L.funnelInitial}: ` + model.screening.initialPoolCount);
+      const url = renderFunnelImageDataUrl(model.screening.stages, model.screening.initialPoolCount, { lang });
+      imageBlock(url, pageW - 2 * margin, 70);
+      autoTable([L.stage, lang === 'ja' ? 'ラベル' : 'Label', '入力 / Input', L.pass, L.reject],
+        model.screening.stages.map(s => [s.id, s.label, s.inputCount, s.passCount, s.rejectCount]));
+    }
+    else if (id === 'accepted') {
+      autoTable([L.name, L.country, 'SIC', L.similarity, L.pli + ' (Wgt)', L.selectionReason],
+        model.accepted.map(r => [r.name, r.country, r.sic, r.similarityTotal != null ? r.similarityTotal.toFixed(1) : '',
+                                  r.pliValue != null ? pct(r.pliValue) : '', (r.rationale || '').slice(0, 80)]),
+        { fontSize: 8 });
+    }
+    else if (id === 'rejected') {
+      const rows = [];
+      for (const [stage, info] of Object.entries(model.rejected.byStage)) {
+        for (const [reason, count] of Object.entries(info.reasons)) rows.push([stage, reason, count]);
+      }
+      autoTable([L.stage, L.reason, L.count2], rows);
+      bodyText(lang === 'ja' ? '全件は付録Aを参照。' : 'Full list in Appendix A.');
+    }
+    else if (id === 'pliReason' && model.pliReason) {
+      bodyText((lang === 'ja' ? '採用 PLI: ' : 'Selected PLI: ') + (model.pliReason.pliLabel || model.pliReason.pliType));
+      if (model.pliReason.jpNote && lang === 'ja') bodyText(model.pliReason.jpNote);
+      if (model.pliReason.docNote) bodyText(model.pliReason.docNote);
+    }
+    else if (id === 'wca' && model.wca) {
+      bodyText(`${L.rate}: ` + (model.wca.interestRate * 100).toFixed(2) + '%');
+      bodyText((lang === 'ja' ? '構成要素: ' : 'Components: ')
+        + (model.wca.components.includeReceivables ? L.ar + ' ' : '')
+        + (model.wca.components.includePayables    ? L.ap + ' ' : '')
+        + (model.wca.components.includeInventory   ? L.inv : ''));
+      const r = model.range.range, w = model.wca.adjRange;
+      autoTable([L.metric, L.unadjusted, L.adjusted], [
+        [lang === 'ja' ? '下限' : 'Lower',  pct(r.lower),  pct(w.lower)],
+        [lang === 'ja' ? '中央' : 'Median', pct(r.median), pct(w.median)],
+        [lang === 'ja' ? '上限' : 'Upper',  pct(r.upper),  pct(w.upper)],
+      ]);
+    }
+    else if (id === 'range' && model.range) {
+      bodyText(`${L.pli}: `    + (model.range.pliLabel || ''));
+      bodyText(`${L.method}: ` + model.range.method);
+      // CRITICAL: quartile-method identification badge in the narrative.
+      setFont('bold'); doc.setTextColor(37, 99, 235);
+      bodyText(`${L.quartile}: ` + model.range.quartileMeta.label);
+      doc.setTextColor(0); setFont('normal');
+      bodyText(model.range.quartileMeta.note);
+      const r = model.range.range;
+      autoTable([L.metric, lang === 'ja' ? '値' : 'Value'], [
+        ['Min', pct(r.min)], [`P${r.lowerP}`, pct(r.lower)], [L.median, pct(r.median)],
+        [`P${r.upperP}`, pct(r.upper)], ['Max', pct(r.max)], [L.count, r.count],
+      ]);
+      const url = renderRangePlotImageDataUrl(model.range.range, model.range.pliValuesSorted, model.range.testedPartyPli,
+        { lang, title: (lang === 'ja' ? 'アームスレングス・レンジ' : "Arm's Length Range") + ' (' + model.range.quartileMeta.label + ')' });
+      imageBlock(url, pageW - 2 * margin, 70);
+    }
+    else if (id === 'conclusion' && model.conclusion) {
+      bodyText(model.conclusion.sentence);
+      bodyText(`${L.classification}: ` + ({ WITHIN: L.within, BELOW: L.below, ABOVE: L.above }[model.conclusion.classification?.position] || L.within));
+      if (model.legal?.note) bodyText((lang === 'ja' ? '参照: ' : 'Reference: ') + model.legal.note);
+    }
+    else if (id === 'appendixA') {
+      autoTable([L.name, L.country, L.stage, L.reason],
+        model.appendixA.map(r => [r.name, r.country, r.stage, r.reason]),
+        { fontSize: 8 });
+    }
+    else if (id === 'appendixB') {
+      for (const c of model.appendixB) {
+        ensureSpace(20);
+        heading(c.name + ' (' + c.country + ')', 2);
+        autoTable([lang === 'ja' ? '年度' : 'Year', lang === 'ja' ? '分子' : 'Num', lang === 'ja' ? '分母' : 'Denom', 'PLI'],
+          (c.pliBreakdown || []).map(b => [b.year, b.numerator, b.denominator, b.ratio != null ? pct(b.ratio) : '']),
+          { fontSize: 8 });
+      }
+    }
+    else if (id === 'appendixC') {
+      autoTable([L.timestamp, L.action, L.payload],
+        model.appendixC.map(e => [e.ts, e.action, JSON.stringify(e.payload || {}).slice(0, 60)]),
+        { fontSize: 7 });
+    }
+  }
+
+  /* ---------------- Footer ---------------- */
+  const pageCount = doc.internal.getNumberOfPages();
+  for (let i = 1; i <= pageCount; i++) {
+    doc.setPage(i);
+    setFont('normal'); doc.setFontSize(9); doc.setTextColor(120);
+    doc.text(`${L.page} ${i} / ${pageCount}`, pageW / 2, pageH - 8, { align: 'center' });
+    if (model.meta.confidentialityTag) doc.text(model.meta.confidentialityTag, margin, pageH - 8);
+    doc.setTextColor(0);
+  }
+
+  await logAudit('PDF_GENERATE_EMBEDDED', { projectId: model.projectId, jurisdiction: model.jurisdictionId, lang, hasCjk: !!cjkFamily });
+  return doc.output('blob');
+}
+</script>
+
+<!-- =====================================================================
+  PHASE 6.1 / BLOCK 40 : Print-based PDF generator (browser fallback)
+  ---------------------------------------------------------------------
+  Builds an HTML report inside an off-screen iframe and triggers the
+  browser's native print dialog. Users save as PDF from there. Uses
+  system fonts so Japanese always renders correctly.
+===================================================================== -->
+<script id="report-pdf-print">
+/** Convert a row of accepted/rejected/appendix data into safe HTML cells. */
+function _escHtml(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  })[c]);
+}
+function _tdRows(rows, mapper) {
+  return rows.map(r => '<tr>' + mapper(r).map(c => `<td>${_escHtml(c)}</td>`).join('') + '</tr>').join('');
+}
+
+/**
+ * Build the standalone print-ready HTML document for one report model.
+ * The CSS pages the document at A4 with print-aware page breaks. All
+ * text uses system fonts so Japanese / Chinese / Korean glyphs work
+ * without any embedded font.
+ *
+ * @param {Object} model
+ * @param {Object} [opts]
+ * @returns {string}
+ */
+function buildPrintReportHtml(model, opts = {}) {
+  const lang = opts.lang || model.lang || 'ja';
+  const L  = PDF_LABELS[lang] || PDF_LABELS.ja;
+  const SH = PDF_SECTION_HEADINGS[lang] || PDF_SECTION_HEADINGS.ja;
+  const pct = v => v == null || !Number.isFinite(v) ? '—' : (v * 100).toFixed(2) + '%';
+  const meta = model.meta;
+  const sectionHtml = [];
+  let funnelUrl = '', rangeUrl = '';
+  if (model.screening) funnelUrl = renderFunnelImageDataUrl(model.screening.stages, model.screening.initialPoolCount, { lang });
+  if (model.range)     rangeUrl  = renderRangePlotImageDataUrl(model.range.range, model.range.pliValuesSorted, model.range.testedPartyPli, { lang, title: SH.range + ' (' + model.range.quartileMeta.label + ')' });
+
+  for (const id of model.sectionsOrdered) {
+    let body = '';
+    if      (id === 'exec'        && model.exec)      body = `<p>${_escHtml(model.exec.conclusion)}</p><p><strong>${L.classification}:</strong> ${{ WITHIN: L.within, BELOW: L.below, ABOVE: L.above }[model.exec.classification] || L.within}</p>`;
+    else if (id === 'tested'      && model.tested)    body = `<p>${L.country} / SIC: ${_escHtml(model.tested.country)} / ${_escHtml(model.tested.sic || '-')}</p>` +
+                                                              `<p>${lang === 'ja' ? '機能' : 'Functions'}: ${_escHtml((model.tested.functions || []).join(', '))}</p>` +
+                                                              `<p>${lang === 'ja' ? '事業内容' : 'Business'}: ${_escHtml(model.tested.businessDescription || '-')}</p>`;
+    else if (id === 'dataSource')                     body = `<p>${L.provider}: ${_escHtml(model.dataSource.provider)}</p>` +
+                                                              `<p><strong>${L.legal}:</strong> ${_escHtml(model.legal?.primary || '')}</p>` +
+                                                              (model.legal?.note ? `<p>${_escHtml(model.legal.note)}</p>` : '') +
+                                                              (lang === 'ja' && model.dataSource.jpIntro ? `<p>${_escHtml(model.dataSource.jpIntro)}</p>` : '');
+    else if (id === 'screening'   && model.screening) body = `<p><strong>${L.funnelInitial}: ${model.screening.initialPoolCount}</strong></p>` +
+                                                              `<img src="${funnelUrl}" class="report-chart" alt="funnel">` +
+                                                              `<table><thead><tr><th>${L.stage}</th><th>Label</th><th>Input</th><th>${L.pass}</th><th>${L.reject}</th></tr></thead><tbody>` +
+                                                              _tdRows(model.screening.stages, s => [s.id, s.label, s.inputCount, s.passCount, s.rejectCount]) +
+                                                              `</tbody></table>`;
+    else if (id === 'accepted')                       body = `<p>${model.accepted.length} ${lang === 'ja' ? '社' : 'companies'}</p>` +
+                                                              `<table><thead><tr><th>${L.name}</th><th>${L.country}</th><th>SIC</th><th>${L.similarity}</th><th>${L.pli}</th><th>${L.selectionReason}</th></tr></thead><tbody>` +
+                                                              _tdRows(model.accepted, r => [r.name, r.country, r.sic, r.similarityTotal != null ? r.similarityTotal.toFixed(1) : '', pct(r.pliValue), r.rationale || '']) +
+                                                              `</tbody></table>`;
+    else if (id === 'rejected')                       {
+      const rows = [];
+      for (const [stage, info] of Object.entries(model.rejected.byStage)) {
+        for (const [reason, count] of Object.entries(info.reasons)) rows.push([stage, reason, count]);
+      }
+      body = `<table><thead><tr><th>${L.stage}</th><th>${L.reason}</th><th>${L.count2}</th></tr></thead><tbody>` +
+             rows.map(r => `<tr><td>${_escHtml(r[0])}</td><td>${_escHtml(r[1])}</td><td>${_escHtml(r[2])}</td></tr>`).join('') +
+             `</tbody></table>`;
+    }
+    else if (id === 'pliReason'   && model.pliReason) body = `<p><strong>${lang === 'ja' ? '採用 PLI' : 'Selected PLI'}:</strong> ${_escHtml(model.pliReason.pliLabel || '')}</p>` +
+                                                              (model.pliReason.jpNote && lang === 'ja' ? `<p>${_escHtml(model.pliReason.jpNote)}</p>` : '') +
+                                                              (model.pliReason.docNote ? `<p>${_escHtml(model.pliReason.docNote)}</p>` : '');
+    else if (id === 'wca'         && model.wca)       body = `<p>${L.rate}: ${(model.wca.interestRate * 100).toFixed(2)}%</p>` +
+                                                              `<table><thead><tr><th>${L.metric}</th><th>${L.unadjusted}</th><th>${L.adjusted}</th></tr></thead><tbody>` +
+                                                              ['lower','median','upper'].map(k => `<tr><td>${k}</td><td>${pct(model.range.range[k])}</td><td>${pct(model.wca.adjRange[k])}</td></tr>`).join('') +
+                                                              `</tbody></table>`;
+    else if (id === 'range'       && model.range) {
+      const r = model.range.range;
+      body = `<p><strong>${L.quartile}:</strong> <span class="badge badge-${model.range.quartileMeta.family}">${_escHtml(model.range.quartileMeta.label)}</span></p>` +
+             `<p class="note">${_escHtml(model.range.quartileMeta.note)}</p>` +
+             `<img src="${rangeUrl}" class="report-chart" alt="range">` +
+             `<table><tbody>` +
+             `<tr><td>Min</td><td>${pct(r.min)}</td></tr>` +
+             `<tr><td>P${r.lowerP}</td><td>${pct(r.lower)}</td></tr>` +
+             `<tr><td>${L.median}</td><td>${pct(r.median)}</td></tr>` +
+             `<tr><td>P${r.upperP}</td><td>${pct(r.upper)}</td></tr>` +
+             `<tr><td>Max</td><td>${pct(r.max)}</td></tr>` +
+             `<tr><td>${L.count}</td><td>${r.count}</td></tr>` +
+             `</tbody></table>`;
+    }
+    else if (id === 'conclusion'  && model.conclusion) body = `<p>${_escHtml(model.conclusion.sentence)}</p>` +
+                                                                (model.legal?.note ? `<p class="note">${lang === 'ja' ? '参照' : 'Reference'}: ${_escHtml(model.legal.note)}</p>` : '');
+    else if (id === 'appendixA'   && model.appendixA)  body = `<table><thead><tr><th>${L.name}</th><th>${L.country}</th><th>${L.stage}</th><th>${L.reason}</th></tr></thead><tbody>` +
+                                                                _tdRows(model.appendixA, r => [r.name, r.country, r.stage, r.reason]) +
+                                                                `</tbody></table>`;
+    else if (id === 'appendixB'   && model.appendixB)  body = model.appendixB.map(c =>
+      `<h3>${_escHtml(c.name)} (${_escHtml(c.country)})</h3>` +
+      `<table><thead><tr><th>${lang === 'ja' ? '年度' : 'Year'}</th><th>${lang === 'ja' ? '分子' : 'Num'}</th><th>${lang === 'ja' ? '分母' : 'Denom'}</th><th>PLI</th></tr></thead><tbody>` +
+      _tdRows(c.pliBreakdown || [], b => [b.year, b.numerator, b.denominator, pct(b.ratio)]) +
+      `</tbody></table>`).join('');
+    else if (id === 'appendixC'   && model.appendixC)  body = `<table class="audit"><thead><tr><th>${L.timestamp}</th><th>${L.action}</th><th>${L.payload}</th></tr></thead><tbody>` +
+                                                                _tdRows(model.appendixC, e => [e.ts, e.action, JSON.stringify(e.payload || {}).slice(0, 120)]) +
+                                                                `</tbody></table>`;
+    sectionHtml.push(`<section class="report-section"><h2>${_escHtml(SH[id] || id)}</h2>${body}</section>`);
+  }
+
+  return `<!doctype html><html lang="${lang}"><head>
+<meta charset="utf-8"><title>${_escHtml(meta.title)}</title>
+<style>
+:root { color-scheme: light; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Hiragino Kaku Gothic ProN", "Yu Gothic", Meiryo, "MS PGothic", "Noto Sans CJK JP", "Noto Sans JP", system-ui, sans-serif; color: #1e293b; margin: 0; padding: 0; font-size: 11pt; }
+h1, h2, h3 { color: #0f172a; }
+h1 { font-size: 24pt; margin: 0 0 6pt; }
+h2 { font-size: 16pt; border-bottom: 2px solid #2563eb; padding-bottom: 4pt; margin-top: 22pt; }
+h3 { font-size: 13pt; margin-top: 12pt; }
+p  { line-height: 1.55; margin: 6pt 0; }
+.note { color: #64748b; font-size: 9pt; }
+table { width: 100%; border-collapse: collapse; margin: 6pt 0; font-size: 9.5pt; }
+th, td { border: 1px solid #cbd5f5; padding: 4pt 6pt; text-align: left; vertical-align: top; }
+thead th { background: #e2e8f0; }
+.report-chart { width: 100%; max-width: 175mm; margin: 8pt 0; }
+.cover { text-align: center; padding: 60pt 40pt; }
+.cover .title { font-size: 28pt; font-weight: bold; }
+.cover .subtitle { font-size: 16pt; color: #475569; margin-top: 12pt; }
+.cover .meta { margin-top: 32pt; font-size: 12pt; line-height: 1.8; }
+.cover .confidential { margin-top: 24pt; font-size: 14pt; color: #c0392b; font-weight: bold; }
+.report-section { page-break-inside: auto; }
+.badge { display: inline-block; padding: 1pt 6pt; border-radius: 4pt; font-size: 9pt; font-family: ui-monospace, SFMono-Regular, monospace; }
+.badge-irs   { background: #dbeafe; color: #1e40af; border: 1px solid #93c5fd; }
+.badge-excel { background: #d1fae5; color: #065f46; border: 1px solid #6ee7b7; }
+.badge-other { background: #e2e8f0; color: #1e293b; border: 1px solid #cbd5f5; }
+
+@page { size: A4; margin: 18mm 14mm 20mm 14mm; }
+@media print {
+  body { padding: 0; }
+  h1, h2, h3 { page-break-after: avoid; }
+  .report-section { page-break-before: always; }
+  table { page-break-inside: auto; }
+  thead { display: table-header-group; }
+  tr { page-break-inside: avoid; }
+}
+@media screen {
+  body { max-width: 210mm; margin: 0 auto; padding: 16pt; }
+}
+</style></head>
+<body>
+  <section class="cover">
+    <div class="title">${_escHtml(meta.title)}</div>
+    <div class="subtitle">${_escHtml(meta.subtitle || '')}</div>
+    <div class="meta">
+      <div>${L.testedParty}: ${_escHtml(meta.testedPartyName)}</div>
+      <div>${L.period}: ${_escHtml(meta.period)}</div>
+      <div>${L.template}: ${_escHtml(model.template)}</div>
+      <div>${L.legal}: ${_escHtml(model.legal?.primary || '')}</div>
+      <div>${L.date}: ${_escHtml(meta.date)}</div>
+      ${meta.author ? `<div>${L.author}: ${_escHtml(meta.author)}</div>` : ''}
+    </div>
+    ${meta.confidentialityTag ? `<div class="confidential">${_escHtml(meta.confidentialityTag)}</div>` : ''}
+  </section>
+  ${sectionHtml.join('')}
+</body></html>`;
+}
+
+/**
+ * Open the print dialog with the report HTML inside a hidden iframe.
+ * Returns metadata about the trigger so the UI can update progress.
+ * Pure rendering (the HTML) is testable; the print() call is side-effectful.
+ * @param {Object} model
+ * @param {Object} [opts]
+ * @returns {Promise<{method:string, triggered:boolean, html:string}>}
+ */
+async function generatePdfReportPrint(model, opts = {}) {
+  const html = buildPrintReportHtml(model, opts);
+  if (opts.htmlOnly) return { method: 'print', triggered: false, html };
+  const iframe = document.createElement('iframe');
+  iframe.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:0;visibility:hidden;';
+  iframe.setAttribute('aria-hidden', 'true');
+  document.body.appendChild(iframe);
+  await new Promise((resolve) => {
+    iframe.onload = () => resolve();
+    iframe.srcdoc = html;
+    // Some browsers fire onload before srcdoc; backstop with a timer.
+    setTimeout(resolve, 500);
+  });
+  // Give image data URIs a tick to decode.
+  await new Promise(r => setTimeout(r, 200));
+  try {
+    iframe.contentWindow?.focus();
+    iframe.contentWindow?.print();
+  } catch (e) { console.warn('print failed', e); }
+  // Keep the iframe alive for a while so the user can confirm the dialog.
+  setTimeout(() => iframe.remove(), 20000);
+  await logAudit('PDF_GENERATE_PRINT', { projectId: model.projectId, jurisdiction: model.jurisdictionId, lang: opts.lang });
+  return { method: 'print', triggered: true, html };
+}
 </script>
 
 
@@ -9384,15 +10195,38 @@ Foo Corp,JP,334413,2024,1000000,80000,..."></textarea>
               <template x-if="reportGenerating">
                 <div class="text-sm text-slate-600 mb-2"><span x-text="reportProgressMsg"></span></div>
               </template>
+              <!-- PDF method picker (Phase 6.1) -->
+              <div class="border rounded p-3 bg-slate-50 mb-3 text-xs">
+                <div class="flex flex-wrap items-center gap-3">
+                  <span class="font-semibold">PDF 出力方式:</span>
+                  <label class="flex items-center gap-1"><input type="radio" value="embedded" x-model="reportCfg.pdfMethod"> プログラムPDF (フォント埋込・検索可能)</label>
+                  <label class="flex items-center gap-1"><input type="radio" value="print" x-model="reportCfg.pdfMethod"> 印刷PDF (ブラウザ印刷・高忠実度)</label>
+                  <div class="flex-1"></div>
+                  <span>日本語フォント:
+                    <template x-if="fontStatus.loaded">
+                      <span class="text-emerald-700 font-mono" x-text="'✓ ' + fontStatus.name + ' (' + (fontStatus.format || '').toUpperCase() + ', ' + Math.round((fontStatus.size || 0)/1024) + 'kB)'"></span>
+                    </template>
+                    <template x-if="!fontStatus.loaded">
+                      <span class="text-amber-700">未読込 → 設定画面でアップロード</span>
+                    </template>
+                  </span>
+                </div>
+                <div class="mt-2 text-[11px] text-slate-500">
+                  <template x-if="reportCfg.pdfMethod === 'embedded' && !fontStatus.loaded && reportCfg.lang === 'ja'">
+                    <span class="text-amber-700">⚠ 日本語ナラティブのプログラムPDFには CJK フォント (TTF/OTF) が必要です。設定画面でアップロードしてください。</span>
+                  </template>
+                  <template x-if="reportCfg.pdfMethod === 'print'">
+                    <span>印刷PDF は <code>window.print()</code> を呼び出します。表示されたダイアログで「PDFとして保存」を選択してください。</span>
+                  </template>
+                </div>
+              </div>
+
               <div class="flex flex-wrap gap-3">
                 <button class="px-4 py-2 text-sm bg-blue-600 text-white rounded" :disabled="reportGenerating" @click="doGenerateReport('docx')">Word (.docx)</button>
                 <button class="px-4 py-2 text-sm bg-rose-600 text-white rounded" :disabled="reportGenerating" @click="doGenerateReport('pdf')">PDF</button>
                 <button class="px-4 py-2 text-sm bg-amber-600 text-white rounded" :disabled="reportGenerating" @click="doGenerateReport('pptx')">PowerPoint (.pptx)</button>
                 <div class="flex-1"></div>
                 <button class="px-4 py-2 text-sm border rounded" :disabled="reportGenerating" @click="doGenerateAllJurisdictions('docx')">全法域 Word 一括</button>
-              </div>
-              <div class="mt-3 text-[11px] text-slate-500">
-                ⓘ PDF は jsPDF の標準フォントの制約上、ナラティブ文は英語ベースで出力されます。日本語が中心のレポートは Word 形式を推奨します。
               </div>
             </div>
           </div>
@@ -9465,6 +10299,47 @@ Foo Corp,JP,334413,2024,1000000,80000,..."></textarea>
         </div>
 
         <!-- Language -->
+        <div class="bg-white rounded-lg shadow p-5">
+          <h2 class="font-semibold text-lg mb-3">PDF 用 日本語フォント (CJK)</h2>
+          <div class="text-xs text-slate-600 mb-3">
+            jsPDF で日本語を含む PDF を生成する場合、CJK フォント（TTF または OTF）をアップロードしてください。<br>
+            woff / woff2 は jsPDF が扱えないため非対応です。<br>
+            一度キャッシュすればオフラインでも再利用できます。
+          </div>
+          <div class="grid grid-cols-2 gap-3 text-sm">
+            <div>
+              <div class="text-xs text-slate-500 mb-1">現在の状態</div>
+              <template x-if="fontStatus.loaded">
+                <div class="border rounded p-2 bg-emerald-50 border-emerald-300">
+                  <div class="font-mono" x-text="fontStatus.name"></div>
+                  <div class="text-xs text-slate-500">
+                    <span x-text="(fontStatus.format || '').toUpperCase()"></span> ·
+                    <span x-text="Math.round((fontStatus.size || 0) / 1024) + ' kB'"></span> ·
+                    <span x-text="fontStatus.source"></span>
+                  </div>
+                  <button class="mt-2 px-2 py-0.5 text-xs border rounded text-rose-600" @click="clearFont()">削除</button>
+                </div>
+              </template>
+              <template x-if="!fontStatus.loaded">
+                <div class="border rounded p-2 bg-amber-50 border-amber-300 text-amber-800">未読込</div>
+              </template>
+            </div>
+            <div>
+              <label class="block text-xs text-slate-500 mb-1">アップロード (.ttf / .otf)</label>
+              <input type="file" accept=".ttf,.otf,font/ttf,font/otf" class="text-sm" @change="onFontUpload($event)">
+              <div class="mt-3">
+                <label class="block text-xs text-slate-500">URL から取得</label>
+                <div class="flex gap-2">
+                  <input type="text" class="flex-1 px-2 py-1 border rounded text-sm" placeholder="https://.../font.ttf" x-model="fontUrlInput">
+                  <button class="px-2 py-1 text-sm border rounded" @click="loadFontFromUrl()">取得</button>
+                </div>
+                <div class="text-[10px] text-slate-400 mt-1">CORS により取得失敗する場合は手動アップロードしてください。</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Language section continues -->
         <div class="bg-white rounded-lg shadow p-5">
           <h2 class="font-semibold text-lg mb-3">表示言語</h2>
           <div class="flex items-center gap-3 text-sm">
