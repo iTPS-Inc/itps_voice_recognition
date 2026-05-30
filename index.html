@@ -855,6 +855,8 @@ function tpApp() {
       }
       this.currentView = id;
       logAudit('nav.change', { view: id }, this.currentProject?.id);
+      // Phase 3: lazily hydrate screening UI state.
+      if (id === 'screening') this.loadScreeningContext();
     },
     labelOf(item) { return this.lang === 'en' ? item.labelEn : item.labelJa; },
 
@@ -1544,6 +1546,182 @@ function tpApp() {
         : '対応する NAICS 2017 マッピングが見つかりませんでした (TODO「SIC↔NAICS全件対応」を参照)';
       this.openModal({ title: `SIC ${code} → NAICS 2017`, body });
     },
+    /* ====================================================================
+       PHASE 3 STATE & METHODS — screening pipeline + UI
+       ==================================================================== */
+
+    /** Currently displayed result. */
+    activeScreeningJurisdiction: '',
+    currentScreeningResult: /** @type {JurisdictionScreeningResult|null} */ (null),
+    testedPartyCompany: null,
+    openTestedPartyPicker: false,
+    testedPartyQuery: '',
+    screeningRunning: false,
+    stepThroughStages: false,
+    rerunFromStageId: '',
+    screeningProgress: [],
+    ciqDiffSummary: null,
+    reviewRows: [],
+    acceptedRows: [],
+    /** Expose for templates that read REJECTION_REASONS.* directly. */
+    REJECTION_REASONS,
+
+    /** Refresh derived view state after entering the Screening view. */
+    async loadScreeningContext() {
+      if (!this.currentProject) return;
+      await this.refreshCompanies();
+      this.testedPartyCompany = this.currentProject.testedPartyId
+        ? await db.companies.get(this.currentProject.testedPartyId)
+        : null;
+      this.screeningJurisdictionsRefresh();
+      if (!this.activeScreeningJurisdiction && this.screeningJurisdictions.length) {
+        this.activeScreeningJurisdiction = this.screeningJurisdictions[0];
+      }
+      this.loadActiveResult();
+    },
+    /** Codes that currently have a stored result OR are bound to the project. */
+    get screeningJurisdictions() { return this._screeningJurisdictions || []; },
+    _screeningJurisdictions: [],
+    screeningJurisdictionsRefresh() {
+      const have = Object.keys(this.currentProject?.screeningResults || {});
+      const bound = this.currentProject?.targetJurisdiction?.length ? this.currentProject.targetJurisdiction : ['OECD_GENERIC'];
+      this._screeningJurisdictions = [...new Set([...bound, ...have])];
+    },
+    /** Populate the active result + reviewRows / acceptedRows tables. */
+    async loadActiveResult() {
+      const j = this.activeScreeningJurisdiction;
+      this.currentScreeningResult = this.currentProject?.screeningResults?.[j] || null;
+      this.ciqDiffSummary = this.currentScreeningResult?.ciqDiff || null;
+      if (!this.currentScreeningResult) { this.reviewRows = []; this.acceptedRows = []; return; }
+      const r = this.currentScreeningResult;
+      const ids = [...r.pendingReview, ...r.acceptedCompanies];
+      const companies = (await db.companies.bulkGet(ids)).filter(Boolean);
+      const byId = Object.fromEntries(companies.map(c => [c.id, c]));
+      this.reviewRows = r.pendingReview.map(id => {
+        const c = byId[id] || {};
+        return {
+          id, name: c.name || id, country: c.country || '',
+          industry: c.industryCodes?.SIC?.primary || c.industryCode || '',
+          businessDescription: c.businessDescription || '',
+          cIQRejectionReason: c.cIQRejectionReason || '',
+          _reason: '', _customReason: '',
+        };
+      });
+      this.acceptedRows = r.acceptedCompanies.map(id => {
+        const c = byId[id] || {};
+        return { id, name: c.name || id, country: c.country || '',
+                 industry: c.industryCodes?.SIC?.primary || c.industryCode || '' };
+      });
+    },
+    get reviewedCount() {
+      const r = this.currentScreeningResult; if (!r) return 0;
+      return Object.values(r.decisions || {}).filter(d => d.stageHistory?.some(h => h.stage === 'MANUAL')).length;
+    },
+
+    /** Set the tested party from the picker. */
+    async setTestedParty(id) {
+      if (!this.currentProject) return;
+      this.currentProject.testedPartyId = id;
+      this.testedPartyCompany = await db.companies.get(id);
+      await this.saveProject();
+      this.openTestedPartyPicker = false;
+    },
+
+    /** Run the pipeline. If a fromStageId is passed, resume from there. */
+    async executeScreening(fromStageId = null) {
+      if (!this.currentProject) return;
+      this.screeningRunning = true;
+      this.screeningProgress = [];
+      try {
+        const opts = {
+          onStage: (s) => { this.screeningProgress = [...this.screeningProgress, s]; },
+          mode: this.projectMergeMode,
+          fromStageId: fromStageId || undefined,
+        };
+        const all = await runAllJurisdictions(this.currentProject, opts);
+        this.currentProject = await db.projects.get(this.currentProject.id);
+        this.screeningJurisdictionsRefresh();
+        const first = Object.keys(all)[0];
+        this.activeScreeningJurisdiction = first || this.activeScreeningJurisdiction;
+        await this.loadActiveResult();
+        this.toast('スクリーニングを実行しました', 'success');
+      } catch (e) { console.error(e); this.toast(e.message, 'error'); }
+      finally { this.screeningRunning = false; }
+    },
+
+    /** Apply a manual reviewer decision from the review table. */
+    async reviewDecide(row, decision) {
+      let reason = row._reason;
+      if (reason === 'custom') reason = row._customReason;
+      if (decision === 'reject' && !reason) { this.toast('却下理由を選択してください', 'warning'); return; }
+      try {
+        await manualReview(this.currentProject.id, this.activeScreeningJurisdiction, row.id, decision, reason);
+        this.currentProject = await db.projects.get(this.currentProject.id);
+        await this.loadActiveResult();
+      } catch (e) { this.toast(e.message, 'error'); }
+    },
+
+    /** Refresh CIQ diff summary. */
+    async runCIQDiff() {
+      try {
+        this.ciqDiffSummary = await compareWithCIQ(this.currentProject.id, this.activeScreeningJurisdiction);
+      } catch (e) { this.toast(e.message, 'error'); }
+    },
+
+    /* ---- Visual helpers ---- */
+    funnelBarPct(stage) {
+      const total = this.currentScreeningResult?.initialPoolCount || 1;
+      return Math.max(2, Math.round(100 * stage.passCount / total));
+    },
+    sankeyWidth() {
+      return Math.max(640, (this.currentScreeningResult?.stages?.length || 0) * 130 + 160);
+    },
+    sankeyBoxes() {
+      const r = this.currentScreeningResult; if (!r) return [];
+      const total = r.initialPoolCount || 1;
+      const colW = 100, gap = 30, yMid = 110, hMax = 180;
+      const boxes = [];
+      // Pool column at left.
+      boxes.push({ x: 10, y: yMid - hMax/2, w: colW, h: hMax, fill: '#3b82f6', label: 'Pool ' + total });
+      let leftHeight = hMax;
+      for (let i = 0; i < r.stages.length; i++) {
+        const s = r.stages[i];
+        const passH = Math.max(8, hMax * (s.passCount / total));
+        const rejH  = Math.max(2, hMax * (s.rejectCount / total));
+        const x = 10 + (i + 1) * (colW + gap);
+        boxes.push({ x, y: yMid - passH/2, w: colW, h: passH, fill: '#10b981', label: 'PASS ' + s.passCount });
+        if (s.rejectCount) {
+          boxes.push({ x, y: yMid + passH/2 + 10, w: colW, h: rejH, fill: '#f43f5e', label: 'REJ ' + s.rejectCount });
+        }
+        leftHeight = passH;
+      }
+      return boxes;
+    },
+    sankeyPaths() {
+      const r = this.currentScreeningResult; if (!r) return [];
+      // Simple horizontal ribbons connecting consecutive pass-boxes.
+      const total = r.initialPoolCount || 1;
+      const colW = 100, gap = 30, yMid = 110, hMax = 180;
+      const paths = [];
+      let prevPassH = hMax, prevX = 10 + colW;
+      for (let i = 0; i < r.stages.length; i++) {
+        const s = r.stages[i];
+        const passH = Math.max(8, hMax * (s.passCount / total));
+        const x2 = 10 + (i + 1) * (colW + gap);
+        // Pass ribbon (left middle -> right middle).
+        const y1Top = yMid - prevPassH/2, y1Bot = yMid + prevPassH/2;
+        const y2Top = yMid - passH/2,     y2Bot = yMid + passH/2;
+        const cx1 = prevX + gap/2, cx2 = x2 - gap/2;
+        paths.push({
+          d: `M ${prevX} ${y1Top} C ${cx1} ${y1Top}, ${cx2} ${y2Top}, ${x2} ${y2Top} L ${x2} ${y2Bot} C ${cx2} ${y2Bot}, ${cx1} ${y1Bot}, ${prevX} ${y1Bot} Z`,
+          fill: '#10b981',
+        });
+        prevPassH = passH; prevX = x2 + colW;
+      }
+      return paths;
+    },
+
+    /* ---- Industry code lookup UI ---- */
     /** Import a Census Bureau concordance CSV file. */
     async onConcordanceCsvPick(ev) {
       const f = ev.target.files?.[0]; if (!f) return;
@@ -1879,6 +2057,223 @@ async function runSelfTest() {
     for (const j of after) if (!before.has(j)) await logAudit('PROJECT_RULE_BIND', { jurisdictionId: j, source: 'selftest' });
     const recent = await db.auditLog.orderBy('ts').reverse().limit(10).toArray();
     if (!recent.some(e => e.action === 'PROJECT_RULE_BIND' && e.payload?.jurisdictionId === 'US')) throw new Error('bind event missing');
+  });
+
+  /* ================== Phase 3 acceptance checks ================== */
+
+  await check('Phase 3 - executors are pure (no DB writes)', async () => {
+    const before = await db.companies.count();
+    const c = { id: 'p3a', name: 'A', country: 'TH', industryCodes: { SIC: { primary: '3714' } }, financials: { '2024': { netSales: 100, operatingIncome: 10 } }, businessDescription: 'foo' };
+    execBulkRejection([c], (await rulesEngine.getOECDTPG()), { id: 'S2', type: 'BULK_REJECTION', params: {} }, { testedParty: null, mode: 'parallel' });
+    const after = await db.companies.count();
+    if (before !== after) throw new Error('executor wrote to DB');
+  });
+
+  await check('Phase 3 - QUANTITATIVE industry match at 4-digit', async () => {
+    const tp = { country: 'TH', industryCodes: { SIC: { primary: '3714' } }, financials: { '2024': { netSales: 1000 } } };
+    const pool = [
+      { id: 'a', country: 'TH', industryCodes: { SIC: { primary: '3714' } }, financials: { '2024': { netSales: 800 } } },
+      { id: 'b', country: 'TH', industryCodes: { SIC: { primary: '3711' } }, financials: { '2024': { netSales: 800 } } },
+    ];
+    const rule = { preferredIndustryCodes: ['SIC'], yearsAnalysis: { default: 1 } };
+    const r = execQuantitative(pool, rule, { id: 'S1', type: 'QUANTITATIVE', params: { industryMatchLevel: 4, yearsCoverage: { required: 1, mode: 'at_least' } } }, { testedParty: tp, mode: 'parallel' });
+    if (r.survivors.length !== 1 || r.survivors[0].id !== 'a') throw new Error('4-digit match failed');
+    // Drop to 2-digit → both should survive.
+    const r2 = execQuantitative(pool, rule, { id: 'S1', type: 'QUANTITATIVE', params: { industryMatchLevel: 2, yearsCoverage: { required: 1, mode: 'at_least' } } }, { testedParty: tp, mode: 'parallel' });
+    if (r2.survivors.length !== 2) throw new Error('2-digit match failed');
+  });
+
+  await check('Phase 3 - QUANTITATIVE revenue range boundary', async () => {
+    const tp = { country: 'TH', industryCodes: { SIC: { primary: '3714' } }, financials: { '2024': { netSales: 1000 } } };
+    const make = (rev) => ({ id: 'c' + rev, country: 'TH', industryCodes: { SIC: { primary: '3714' } }, financials: { '2024': { netSales: rev } } });
+    const pool = [make(249), make(250), make(4000), make(4001)];
+    const rule = { preferredIndustryCodes: ['SIC'] };
+    const r = execQuantitative(pool, rule, { id: 'S1', type: 'QUANTITATIVE', params: { industryMatchLevel: 4, revenueRangeRatio: [0.25, 4.0], yearsCoverage: { required: 1, mode: 'at_least' } } }, { testedParty: tp, mode: 'parallel' });
+    const ids = r.survivors.map(s => s.id).sort();
+    if (JSON.stringify(ids) !== JSON.stringify(['c250', 'c4000'])) throw new Error('boundary failed: ' + ids.join(','));
+  });
+
+  await check('Phase 3 - BULK_REJECTION avg op income ≤ 0', async () => {
+    const pool = [
+      { id: 'good', businessDescription: 'ok', financials: { '2024': { netSales: 100, operatingIncome: 10 }, '2023': { netSales: 90, operatingIncome: 8 } } },
+      { id: 'bad',  businessDescription: 'ok', financials: { '2024': { netSales: 100, operatingIncome: -10 }, '2023': { netSales: 90, operatingIncome: -8 } } },
+      { id: 'na',   businessDescription: 'N/A', financials: { '2024': { netSales: 100, operatingIncome: 10 } } },
+    ];
+    const rule = { yearsAnalysis: { averaging: 'WEIGHTED_AVG' } };
+    const r = execBulkRejection(pool, rule, { id: 'S2', type: 'BULK_REJECTION', params: {} }, { testedParty: null, mode: 'parallel' });
+    const reasons = r.rejected.map(x => x.company.id + ':' + x.reason).sort();
+    if (!reasons.find(s => s.startsWith('bad:'))) throw new Error('bad should be rejected');
+    if (!reasons.find(s => s.startsWith('na:'))) throw new Error('na should be rejected for description');
+    if (r.survivors.length !== 1 || r.survivors[0].id !== 'good') throw new Error('good should survive');
+  });
+
+  await check('Phase 3 - INDEPENDENCE conservative vs strict', async () => {
+    const pool = [
+      { id: 'low',  independenceData: { largestShareholderPct: 30 } },
+      { id: 'high', independenceData: { largestShareholderPct: 60 } },
+      { id: 'unk',  independenceData: {} },
+    ];
+    const rule = {};
+    const cons = execIndependence(pool, rule, { id: 'S3', type: 'INDEPENDENCE', params: { maxOwnership: 0.5, unknownMode: 'conservative' } }, { testedParty: null });
+    if (cons.survivors.map(s => s.id).sort().join(',') !== 'low,unk') throw new Error('conservative failed');
+    const strict = execIndependence(pool, rule, { id: 'S3', type: 'INDEPENDENCE', params: { maxOwnership: 0.5, unknownMode: 'strict' } }, { testedParty: null });
+    if (strict.survivors.length !== 1) throw new Error('strict failed');
+  });
+
+  await check('Phase 3 - single-rejection invariant (first reason wins)', async () => {
+    // Build a company that would trigger multiple bulk-rejection categories.
+    const c = { id: 'multi', businessDescription: 'N/A', financials: { '2024': { netSales: 100, operatingIncome: -10 }, '2023': { netSales: 100, operatingIncome: -5 } } };
+    const rule = { yearsAnalysis: { averaging: 'WEIGHTED_AVG' } };
+    const r = execBulkRejection([c], rule, { id: 'S2', type: 'BULK_REJECTION', params: {} }, { testedParty: null });
+    // The first matched reason inside execBulkRejection is AVG_OP_LOSS, even
+    // though desc-missing also applies.
+    if (r.rejected[0].reason !== REJECTION_REASONS.AVG_OP_LOSS) throw new Error('first reason invariant broken: ' + r.rejected[0].reason);
+  });
+
+  await check('Phase 3 - mixed-year operating income evaluation', async () => {
+    const a = { id: 'a3', businessDescription: 'ok', financials: { '2022': { netSales: 100, operatingIncome: -5 }, '2023': { netSales: 110, operatingIncome: -3 }, '2024': { netSales: 120, operatingIncome: -2 } } };
+    const b = { id: 'b5', businessDescription: 'ok', financials: { '2020': { netSales: 80,  operatingIncome:  4 }, '2021': { netSales: 90,  operatingIncome: 5 }, '2022': { netSales: 100, operatingIncome: 6 }, '2023': { netSales: 110, operatingIncome: 7 }, '2024': { netSales: 120, operatingIncome: 8 } } };
+    const r = execBulkRejection([a, b], { yearsAnalysis: { averaging: 'WEIGHTED_AVG' } }, { id: 'S2', type: 'BULK_REJECTION', params: {} }, {});
+    if (r.rejected.find(x => x.company.id === 'a3') == null) throw new Error('a3 (3y losses) should be rejected');
+    if (r.survivors.find(s => s.id === 'b5') == null) throw new Error('b5 (5y positive) should survive');
+  });
+
+  await check('Phase 3 - golden master: Ashimori Thailand 171 → 20 (synthetic)', async () => {
+    // Build a synthetic 171-company pool that matches the expected breakdown
+    // of the Ashimori Industries (LRM Thailand) reference case. Then run the
+    // pipeline with a Capital IQ-style rule and assert the breakdowns.
+    const ACCEPTED_20 = ['Asia Compact','Asian Unity','C.B.Tact','Formula Industries','Kijsiam Partworks','M&T Allied','New Somthai','Powertech 2004','Powertech Engine','Siam Senater','Siam Technic Shimizu','Standard Auto','Tfp Industrial','Thai Car Show','Thai T G K','Tkd Fiber','Tr Asia','Transtec','V.C.S.','Y.S.S.'];
+    const pool = [];
+    let i = 0;
+    // 43 companies: avg operating income ≤ 0 (weighted)
+    for (let k = 0; k < 43; k++) {
+      pool.push({
+        id: 'reject-op-' + k, name: 'OpLoss ' + k, country: 'TH',
+        industryCodes: { SIC: { primary: '3714' } },
+        businessDescription: 'Manufactures auto parts.',
+        financials: { '2022': { netSales: 100, operatingIncome: -8 }, '2023': { netSales: 110, operatingIncome: -7 }, '2024': { netSales: 120, operatingIncome: -6 } },
+        independenceData: { largestShareholderPct: 30 },
+      });
+    }
+    // 51 companies: description missing
+    for (let k = 0; k < 51; k++) {
+      pool.push({
+        id: 'reject-desc-' + k, name: 'NoDesc ' + k, country: 'TH',
+        industryCodes: { SIC: { primary: '3714' } },
+        businessDescription: 'N/A',
+        financials: { '2022': { netSales: 200, operatingIncome: 15 }, '2023': { netSales: 210, operatingIncome: 16 }, '2024': { netSales: 220, operatingIncome: 18 } },
+        independenceData: { largestShareholderPct: 25 },
+      });
+    }
+    // 55 companies: controlled entity (CIQ-labelled)
+    for (let k = 0; k < 55; k++) {
+      pool.push({
+        id: 'reject-controlled-' + k, name: 'Controlled ' + k, country: 'TH',
+        industryCodes: { SIC: { primary: '3714' } },
+        businessDescription: 'Operating subsidiary of a multinational.',
+        cIQRejectionReason: 'Is a controlled entity',
+        financials: { '2022': { netSales: 300, operatingIncome: 20 }, '2023': { netSales: 310, operatingIncome: 22 }, '2024': { netSales: 320, operatingIncome: 25 } },
+        independenceData: { largestShareholderPct: 40 },
+      });
+    }
+    // 2 companies: different business
+    for (let k = 0; k < 2; k++) {
+      pool.push({
+        id: 'reject-different-' + k, name: 'Different ' + k, country: 'TH',
+        industryCodes: { SIC: { primary: '3714' } },
+        businessDescription: 'Operates in a different segment.',
+        cIQRejectionReason: 'Engaged in significantly different business activities or products',
+        financials: { '2022': { netSales: 200, operatingIncome: 14 }, '2023': { netSales: 215, operatingIncome: 17 }, '2024': { netSales: 225, operatingIncome: 19 } },
+        independenceData: { largestShareholderPct: 35 },
+      });
+    }
+    // 20 final accepted
+    for (const nm of ACCEPTED_20) {
+      pool.push({
+        id: 'accept-' + nm.replace(/\W+/g, '_'), name: nm, country: 'TH',
+        industryCodes: { SIC: { primary: '3714' } },
+        businessDescription: 'Independent Thai manufacturer of automotive components.',
+        financials: { '2022': { netSales: 500, operatingIncome: 40 }, '2023': { netSales: 520, operatingIncome: 45 }, '2024': { netSales: 540, operatingIncome: 50 } },
+        independenceData: { largestShareholderPct: 30 },
+      });
+    }
+    if (pool.length !== 171) throw new Error('pool ≠ 171');
+
+    const tp = { id: 'tp', name: 'Ashimori Thailand', country: 'TH', industryCodes: { SIC: { primary: '3714' } }, financials: { '2024': { netSales: 500 } } };
+
+    // Stage 1: industry + country + ownership ≤ 50%
+    const rule = { preferredIndustryCodes: ['SIC'], yearsAnalysis: { default: 3, averaging: 'WEIGHTED_AVG' } };
+    const s1 = execQuantitative(pool, rule,
+      { id: 'S1', type: 'QUANTITATIVE', params: { industryMatchLevel: 4, yearsCoverage: { required: 3, mode: 'at_least' } } },
+      { testedParty: tp, mode: 'parallel' });
+    if (s1.survivors.length !== 171) throw new Error('S1 survivors ≠ 171: ' + s1.survivors.length);
+
+    // Stage 2: bulk rejection
+    const s2 = execBulkRejection(s1.survivors, rule, { id: 'S2', type: 'BULK_REJECTION', params: {} }, { testedParty: tp });
+    const opLoss = s2.rejected.filter(r => r.reason === REJECTION_REASONS.AVG_OP_LOSS).length;
+    const descMiss = s2.rejected.filter(r => r.reason === REJECTION_REASONS.DESC_MISSING).length;
+    if (opLoss !== 43)   throw new Error('Avg op loss count: expected 43, got ' + opLoss);
+    if (descMiss !== 51) throw new Error('Desc missing count: expected 51, got ' + descMiss);
+    if (s2.survivors.length !== 77) throw new Error('S2 survivors ≠ 77: ' + s2.survivors.length);
+
+    // Stage 3: independence (all should pass since ownership ≤ 40)
+    const s3 = execIndependence(s2.survivors, rule, { id: 'S3', type: 'INDEPENDENCE', params: { maxOwnership: 0.5, unknownMode: 'conservative' } }, { testedParty: tp });
+    if (s3.survivors.length !== 77) throw new Error('S3 survivors ≠ 77');
+
+    // Stage 4: qualitative review (CIQ-assisted)
+    const s4 = execQualitativeReview(s3.survivors, rule, { id: 'S4', type: 'QUALITATIVE_REVIEW', params: { useCIQAsInitial: true } }, { testedParty: tp });
+    const ctrl = s4.rejected.filter(r => r.reason === REJECTION_REASONS.CONTROLLED_ENTITY).length;
+    const diff = s4.rejected.filter(r => r.reason === REJECTION_REASONS.DIFFERENT_BUSINESS).length;
+    if (ctrl !== 55) throw new Error('Controlled count: expected 55, got ' + ctrl);
+    if (diff !== 2)  throw new Error('Different-business count: expected 2, got ' + diff);
+    if (s4.survivors.length !== 20) throw new Error('Final survivors ≠ 20: ' + s4.survivors.length);
+
+    // Verify the 20 names match.
+    const got = new Set(s4.survivors.map(s => s.name));
+    const missing = ACCEPTED_20.filter(n => !got.has(n));
+    if (missing.length) throw new Error('missing names: ' + missing.join(', '));
+  });
+
+  await check('Phase 3 - multi-jurisdiction parallel: results stored independently', async () => {
+    // Build a tiny project with two jurisdictions and verify
+    // screeningResults[jp] !== screeningResults[us].
+    const cId = 'p3-' + uuid();
+    const companies = [
+      { id: cId + '-a', name: 'A', country: 'TH', industryCodes: { SIC: { primary: '3714' } }, businessDescription: 'ok',
+        financials: { '2024': { netSales: 100, operatingIncome: 10 }, '2023': { netSales: 100, operatingIncome: 10 } },
+        independenceData: { largestShareholderPct: 30 } },
+    ];
+    await db.companies.bulkPut(companies);
+    const project = { id: cId, name: 'p3-multi', createdAt: Date.now(), updatedAt: Date.now(), targetJurisdiction: ['JP', 'OECD_GENERIC'], testedPartyId: null, comparables: companies.map(c => c.id), excludedCompanies: [], screeningHistory: [], scoringConfig: {}, fxData: {}, settings: {}, notes: '' };
+    await db.projects.put(project);
+    const all = await runAllJurisdictions(await db.projects.get(cId), { mode: 'parallel' });
+    if (!all.JP || !all.OECD_GENERIC) throw new Error('parallel results not generated');
+    // Cleanup.
+    await db.projects.delete(cId);
+    await db.companies.bulkDelete(companies.map(c => c.id));
+  });
+
+  await check('Phase 3 - manualReview accept/reject paths', async () => {
+    const cId = 'p3rev-' + uuid();
+    const co = { id: cId + '-x', name: 'X', country: 'TH', industryCodes: { SIC: { primary: '3714' } }, businessDescription: 'ok',
+      financials: { '2024': { netSales: 100, operatingIncome: 10 } },
+      independenceData: { largestShareholderPct: 30 } };
+    await db.companies.put(co);
+    const project = { id: cId, name: 'rev', createdAt: Date.now(), updatedAt: Date.now(), targetJurisdiction: ['OECD_GENERIC'], testedPartyId: null, comparables: [co.id], excludedCompanies: [], screeningHistory: [], scoringConfig: {}, fxData: {}, settings: {}, notes: '' };
+    await db.projects.put(project);
+    await runAllJurisdictions(await db.projects.get(cId), { mode: 'parallel' });
+    await manualReview(cId, 'OECD_GENERIC', co.id, 'accept', null);
+    const p = await db.projects.get(cId);
+    if (!p.screeningResults.OECD_GENERIC.acceptedCompanies.includes(co.id)) throw new Error('accept path failed');
+    // Cleanup.
+    await db.projects.delete(cId);
+    await db.companies.delete(co.id);
+  });
+
+  await check('Phase 3 - SCREENING_RUN audit event emitted', async () => {
+    const recent = await db.auditLog.orderBy('ts').reverse().limit(50).toArray();
+    if (!recent.some(e => e.action === 'SCREENING_RUN')) throw new Error('SCREENING_RUN missing');
+    if (!recent.some(e => e.action === 'SCREENING_STAGE_COMPLETE')) throw new Error('SCREENING_STAGE_COMPLETE missing');
   });
 
   await check('Phase 2 - >10 years warning', async () => {
@@ -3402,6 +3797,680 @@ window.TPApp = TPApp;
 
 
 <!-- =====================================================================
+  PHASE 3 / BLOCK 18 : Tested party + result schema (JSDoc)
+===================================================================== -->
+<script id="screening-schema">
+/**
+ * @typedef {Object} StageResult
+ * @property {string} id                 - Stage id from the rule definition.
+ * @property {string} label              - Human label at execution time.
+ * @property {string} type               - QUANTITATIVE / BULK_REJECTION / ...
+ * @property {number} inputCount
+ * @property {number} passCount
+ * @property {number} rejectCount
+ * @property {Object<string,number>} rejectionBreakdown - reason -> count
+ * @property {string} executedAt
+ */
+
+/**
+ * @typedef {Object} CompanyDecision
+ * @property {string} companyId
+ * @property {('ACCEPTED'|'REJECTED'|'PENDING_REVIEW'|'HELD')} finalStatus
+ * @property {string|null} rejectedAtStage
+ * @property {string|null} rejectionReason
+ * @property {Object} [rejectionDetail]
+ * @property {{stage:string, result:string, reason?:string, evaluatedAt:string}[]} stageHistory
+ * @property {string|null} [reviewer]
+ * @property {string|null} [manualNote]
+ */
+
+/**
+ * @typedef {Object} JurisdictionScreeningResult
+ * @property {string} testedPartyId
+ * @property {Object} ruleSnapshot       - Deep clone of the rule at execution.
+ * @property {string} executedAt
+ * @property {number} initialPoolCount
+ * @property {StageResult[]} stages
+ * @property {string[]} acceptedCompanies
+ * @property {{companyId:string, stage:string, reason:string}[]} rejectedCompanies
+ * @property {string[]} pendingReview
+ * @property {Object<string,CompanyDecision>} decisions  - companyId -> decision
+ * @property {Object} [ciqDiff]          - Optional CIQ vs app comparison summary.
+ */
+
+/** Standard Bulk Rejection reason labels. Edit-once, reused everywhere. */
+const REJECTION_REASONS = {
+  AVG_OP_LOSS:        'Avg operating income <= 0',
+  NET_SALES_MISSING:  'Net Sales missing for N or more years',
+  OP_INCOME_MISSING:  'Operating income missing for N or more years',
+  DESC_MISSING:       'Description missing',
+  LOW_RD_INTENSITY:   'R&D / Net Sales <= 0.03',
+  DIFFERENT_BUSINESS: 'Engaged in significantly different business activities or products',
+  CONTROLLED_ENTITY:  'Is a controlled entity',
+  INDUSTRY_MISMATCH:  'Industry code mismatch',
+  COUNTRY_MISMATCH:   'Country mismatch',
+  SIZE_OUT_OF_RANGE:  'Revenue out of tested-party range',
+  YEAR_COVERAGE:      'Insufficient year coverage',
+  OWNERSHIP_GT_50:    'Ownership > 50%',
+  CUSTOM:             'Custom rule rejection',
+};
+
+/** Default bulk-rejection toggle configuration; merged into stage params at run time. */
+const BULK_REJECTION_DEFAULTS = {
+  enableAvgOpLoss:        true,
+  enableNetSalesMissing:  true,
+  netSalesMissingThreshold: 2,
+  enableOpIncomeMissing:  true,
+  opIncomeMissingThreshold: 2,
+  enableDescMissing:      true,
+  enableLowRdIntensity:   false,
+  rdIntensityThreshold:   0.03,
+};
+</script>
+
+<!-- =====================================================================
+  PHASE 3 / BLOCK 19 : Stage executor library (pure functions)
+  ---------------------------------------------------------------------
+  Each executor follows the signature
+    (pool: Company[], rule: JurisdictionRuleV2, stage: ScreeningStageDef,
+     ctx: ScreeningContext) => StageExecutorResult
+  and is side-effect free, so unit tests can call them directly.
+===================================================================== -->
+<script id="screening-executors">
+/**
+ * @typedef {Object} ScreeningContext
+ * @property {Company|null} testedParty
+ * @property {{from:number, to:number}|null} [yearRange]
+ * @property {Object} [ciqStatuses]   - companyId -> 'accepted'|'rejected'
+ * @property {string} mode             - 'parallel' | 'strictest'
+ */
+
+/**
+ * @typedef {Object} StageExecutorResult
+ * @property {Company[]} survivors
+ * @property {{company:Company, reason:string, detail?:Object}[]} rejected
+ * @property {boolean} [requiresManualReview]
+ */
+
+/** Project the canonical PLI-ready numbers from any company.financials row.
+ *  Bridges the Phase 1 schema (revenue/operatingProfit) and the Phase 2/CIQ
+ *  schema (netSales/operatingIncome) so executors work on both. */
+function canonNumbers(yearRow) {
+  if (!yearRow) return { netSales: null, operatingIncome: null, rdExpense: null };
+  return {
+    netSales:        yearRow.netSales        ?? yearRow.revenue        ?? null,
+    operatingIncome: yearRow.operatingIncome ?? yearRow.operatingProfit ?? null,
+    rdExpense:       yearRow.rdExpense       ?? yearRow.rd              ?? null,
+  };
+}
+
+/**
+ * Resolve the canonical primary industry code for a company in the system
+ * preferred by the rule. Falls back through SIC -> NAICS variants.
+ * @param {Company} c
+ * @param {string[]} preferredSystems
+ * @returns {{system:string, code:string}|null}
+ */
+function pickIndustryCode(c, preferredSystems) {
+  const codes = c.industryCodes || {};
+  for (const sys of preferredSystems) {
+    const v = codes[sys]?.primary;
+    if (v) return { system: sys, code: String(v) };
+  }
+  if (c.industryCode) return { system: c.industryCodeSystem || 'SIC', code: String(c.industryCode) };
+  return null;
+}
+
+/**
+ * QUANTITATIVE stage: industry match, country, revenue range, year coverage.
+ * @returns {StageExecutorResult}
+ */
+function execQuantitative(pool, rule, stage, ctx) {
+  const params = stage.params || {};
+  const survivors = []; const rejected = [];
+  const preferredSystems = rule.preferredIndustryCodes || ['SIC', 'NAICS_2017'];
+  const matchLevel = params.industryMatchLevel ?? 4;
+  const countryFilter = params.countryFilter || ctx.testedParty?.country || null;
+  const includeSecondary = !!params.includeSecondaryIndustry;
+  const ranges = params.revenueRangeRatio || rule.params?.revenueRangeRatio || null;
+  const yearCov = params.yearsCoverage || { required: rule.yearsAnalysis?.default || YEARS_ANALYSIS_DEFAULT, mode: 'at_least' };
+
+  // tested party revenue baseline (used only when a ratio range is configured)
+  let baselineRevenue = null;
+  if (ctx.testedParty && ranges) {
+    const tpYears = getYearsAvailable(ctx.testedParty);
+    if (tpYears.length) {
+      const latestRow = ctx.testedParty.financials[String(tpYears[tpYears.length - 1])];
+      baselineRevenue = canonNumbers(latestRow).netSales;
+    }
+  }
+
+  const tpIndustry = ctx.testedParty ? pickIndustryCode(ctx.testedParty, preferredSystems) : null;
+
+  for (const c of pool) {
+    // 1. Year coverage
+    const ys = getYearsAvailable(c);
+    if (yearCov.required && ((yearCov.mode === 'exactly' && ys.length !== yearCov.required) ||
+                              (yearCov.mode !== 'exactly' && ys.length < yearCov.required))) {
+      rejected.push({ company: c, reason: REJECTION_REASONS.YEAR_COVERAGE,
+                      detail: { have: ys.length, required: yearCov.required, mode: yearCov.mode } });
+      continue;
+    }
+    // 2. Country
+    if (countryFilter && c.country && c.country !== countryFilter) {
+      rejected.push({ company: c, reason: REJECTION_REASONS.COUNTRY_MISMATCH, detail: { expected: countryFilter, got: c.country } });
+      continue;
+    }
+    // 3. Industry code match at the configured digit level
+    if (tpIndustry) {
+      const candIndustry = pickIndustryCode(c, preferredSystems);
+      const candidates = [candIndustry?.code].filter(Boolean);
+      if (includeSecondary) {
+        const codes = c.industryCodes || {};
+        for (const sys of preferredSystems) if (codes[sys]?.secondary) candidates.push(String(codes[sys].secondary));
+      }
+      const prefix = tpIndustry.code.slice(0, matchLevel);
+      const ok = candidates.some(code => String(code).slice(0, matchLevel) === prefix);
+      if (!ok) {
+        rejected.push({ company: c, reason: REJECTION_REASONS.INDUSTRY_MISMATCH,
+                        detail: { expectedPrefix: prefix, candidates } });
+        continue;
+      }
+    }
+    // 4. Revenue range (skipped if no tested-party baseline)
+    if (baselineRevenue && ranges) {
+      const candLatest = canonNumbers(c.financials[String(ys[ys.length - 1])] || {}).netSales;
+      if (candLatest != null) {
+        const lo = baselineRevenue * ranges[0];
+        const hi = baselineRevenue * ranges[1];
+        if (candLatest < lo || candLatest > hi) {
+          rejected.push({ company: c, reason: REJECTION_REASONS.SIZE_OUT_OF_RANGE,
+                          detail: { candidate: candLatest, baseline: baselineRevenue, range: ranges } });
+          continue;
+        }
+      }
+    }
+    survivors.push(c);
+  }
+  return { survivors, rejected };
+}
+
+/**
+ * BULK_REJECTION stage: applies the toggle-driven canonical Capital IQ
+ * bulk rejection categories. Custom condition trees stored on the stage
+ * are evaluated last (in order) so users can extend the list per rule.
+ */
+function execBulkRejection(pool, rule, stage, ctx) {
+  const params = { ...BULK_REJECTION_DEFAULTS, ...(stage.params || {}) };
+  const averaging = rule.yearsAnalysis?.averaging || 'WEIGHTED_AVG';
+  const survivors = []; const rejected = [];
+
+  for (const c of pool) {
+    const ys = getYearsAvailable(c);
+    const rows = ys.map(y => c.financials[String(y)] || {});
+    const nums = rows.map(canonNumbers);
+
+    // 1. Avg operating income ≤ 0 (single-rejection: stop on first match)
+    if (params.enableAvgOpLoss) {
+      let avgOp;
+      if (averaging === 'WEIGHTED_AVG') {
+        avgOp = weightedAverage(nums.map(n => ({ numerator: n.operatingIncome, denominator: n.netSales })));
+        // For absolute (not ratio) average opIncome we also check simple sum if WA is null.
+        if (avgOp == null) avgOp = simpleAverage(nums.map(n => n.operatingIncome));
+      } else if (averaging === 'SIMPLE_AVG') {
+        avgOp = simpleAverage(nums.map(n => n.operatingIncome));
+      } else {
+        avgOp = nums.length ? canonNumbers(rows[rows.length - 1]).operatingIncome : null;
+      }
+      if (avgOp != null && avgOp <= 0) {
+        rejected.push({ company: c, reason: REJECTION_REASONS.AVG_OP_LOSS, detail: { avgOp, years: ys.length } });
+        continue;
+      }
+    }
+
+    // 2. Net Sales missing for N or more years
+    if (params.enableNetSalesMissing) {
+      const missing = nums.filter(n => n.netSales == null).length;
+      if (missing >= params.netSalesMissingThreshold) {
+        rejected.push({ company: c, reason: REJECTION_REASONS.NET_SALES_MISSING, detail: { missing, threshold: params.netSalesMissingThreshold } });
+        continue;
+      }
+    }
+
+    // 3. Operating income missing for N or more years
+    if (params.enableOpIncomeMissing) {
+      const missing = nums.filter(n => n.operatingIncome == null).length;
+      if (missing >= params.opIncomeMissingThreshold) {
+        rejected.push({ company: c, reason: REJECTION_REASONS.OP_INCOME_MISSING, detail: { missing, threshold: params.opIncomeMissingThreshold } });
+        continue;
+      }
+    }
+
+    // 4. Business description missing
+    if (params.enableDescMissing) {
+      const d = (c.businessDescription || '').trim();
+      if (!d || /^n\/?a$/i.test(d)) {
+        rejected.push({ company: c, reason: REJECTION_REASONS.DESC_MISSING });
+        continue;
+      }
+    }
+
+    // 5. R&D / Net Sales ≤ threshold (weighted)
+    if (params.enableLowRdIntensity) {
+      const ratio = weightedAverage(nums.map(n => ({ numerator: n.rdExpense, denominator: n.netSales })));
+      if (ratio != null && ratio <= params.rdIntensityThreshold) {
+        rejected.push({ company: c, reason: REJECTION_REASONS.LOW_RD_INTENSITY, detail: { ratio, threshold: params.rdIntensityThreshold } });
+        continue;
+      }
+    }
+
+    // 6. Custom condition trees attached to the stage (e.g. user-added bulk rules)
+    const customRules = stage.customConditions || [];
+    let matched = null;
+    for (const cr of customRules) {
+      try {
+        if (evaluateConditionTree(cr.tree, c, ctx)) { matched = cr; break; }
+      } catch (_) { /* skip broken tree, validated separately */ }
+    }
+    if (matched) {
+      rejected.push({ company: c, reason: matched.reason || REJECTION_REASONS.CUSTOM, detail: { ruleId: matched.id } });
+      continue;
+    }
+
+    survivors.push(c);
+  }
+  return { survivors, rejected };
+}
+
+/**
+ * INDEPENDENCE stage: ownership ≤ threshold. Conservative mode keeps
+ * companies whose ownership is unknown; strict mode rejects them.
+ */
+function execIndependence(pool, rule, stage, ctx) {
+  const max = stage.params?.maxOwnership ?? 0.5;
+  const unknownMode = stage.params?.unknownMode || 'conservative';
+  const survivors = []; const rejected = [];
+  for (const c of pool) {
+    const own = c.independenceData?.largestShareholderPct;
+    const ownership = own == null ? null : (own > 1 ? own / 100 : own);
+    if (ownership == null) {
+      if (unknownMode === 'strict') {
+        rejected.push({ company: c, reason: REJECTION_REASONS.OWNERSHIP_GT_50, detail: { reason: 'unknown', mode: unknownMode } });
+      } else {
+        survivors.push(c);
+      }
+      continue;
+    }
+    if (ownership > max) {
+      rejected.push({ company: c, reason: REJECTION_REASONS.OWNERSHIP_GT_50, detail: { ownership, max } });
+    } else {
+      survivors.push(c);
+    }
+  }
+  return { survivors, rejected };
+}
+
+/**
+ * FAR stage: best-effort auto match using FAR profile tags. Real-world FAR
+ * analysis is qualitative; the executor surfaces candidates and flags any
+ * with no overlapping function tags.
+ */
+function execFar(pool, rule, stage, ctx) {
+  const survivors = []; const rejected = [];
+  const tpFns = new Set((ctx.testedParty?.farProfile?.functions || []).map(s => String(s).toLowerCase()));
+  for (const c of pool) {
+    const cf = new Set((c.farProfile?.functions || []).map(s => String(s).toLowerCase()));
+    if (tpFns.size && cf.size) {
+      const overlap = [...tpFns].some(f => cf.has(f));
+      if (!overlap) {
+        rejected.push({ company: c, reason: 'FAR mismatch', detail: { tpFunctions: [...tpFns], candidate: [...cf] } });
+        continue;
+      }
+    }
+    survivors.push(c);
+  }
+  return { survivors, rejected, requiresManualReview: true };
+}
+
+/**
+ * QUALITATIVE_REVIEW: this stage is fundamentally manual. The executor
+ * stages every survivor as `PENDING_REVIEW` so the UI can present the
+ * accept/reject decisions. The cIQ-status fast-path: when context has
+ * cIQ-derived statuses, pre-populate the matching decisions.
+ */
+function execQualitativeReview(pool, rule, stage, ctx) {
+  const survivors = []; const rejected = [];
+  const useCIQ = stage.params?.useCIQAsInitial !== false;
+  for (const c of pool) {
+    if (useCIQ && c.cIQRejectionReason) {
+      const text = String(c.cIQRejectionReason).toLowerCase();
+      if (text.includes('controlled')) {
+        rejected.push({ company: c, reason: REJECTION_REASONS.CONTROLLED_ENTITY, detail: { source: 'ciq' } });
+        continue;
+      }
+      if (text.includes('different business') || text.includes('significantly different')) {
+        rejected.push({ company: c, reason: REJECTION_REASONS.DIFFERENT_BUSINESS, detail: { source: 'ciq' } });
+        continue;
+      }
+    }
+    survivors.push(c);
+  }
+  return { survivors, rejected, requiresManualReview: true };
+}
+
+/**
+ * CUSTOM: evaluate the stage's condition tree.
+ * stage.params.mode === 'reject' (default) → matched companies are rejected.
+ * stage.params.mode === 'pass'             → only matched companies survive.
+ */
+function execCustom(pool, rule, stage, ctx) {
+  const tree = stage.conditionTree;
+  const mode = stage.params?.mode || 'reject';
+  const reasonLabel = stage.params?.reasonLabel || REJECTION_REASONS.CUSTOM;
+  const survivors = []; const rejected = [];
+  for (const c of pool) {
+    let match = false;
+    try { match = evaluateConditionTree(tree, c, ctx); } catch (_) { match = false; }
+    if (mode === 'pass') {
+      if (match) survivors.push(c);
+      else rejected.push({ company: c, reason: reasonLabel, detail: { mode } });
+    } else {
+      if (match) rejected.push({ company: c, reason: reasonLabel });
+      else survivors.push(c);
+    }
+  }
+  return { survivors, rejected };
+}
+
+/** Map stage type → executor function. */
+const STAGE_EXECUTORS = {
+  QUANTITATIVE:        execQuantitative,
+  BULK_REJECTION:      execBulkRejection,
+  INDEPENDENCE:        execIndependence,
+  FAR:                 execFar,
+  FINANCIAL:           execBulkRejection,    // alias: financial filters live here
+  QUALITATIVE_REVIEW:  execQualitativeReview,
+  CUSTOM:              execCustom,
+};
+</script>
+
+<!-- =====================================================================
+  PHASE 3 / BLOCK 20 : Pipeline runner + multi-jurisdiction orchestration
+  ---------------------------------------------------------------------
+  Single-rejection invariant: once a company is rejected it is locked
+  with `rejectedAtStage` + `rejectionReason` and not seen again by
+  downstream executors.
+===================================================================== -->
+<script id="screening-pipeline">
+/**
+ * Run the entire pipeline for a single jurisdiction.
+ * @param {Project} project
+ * @param {string}  jurisdictionId
+ * @param {Object}  opts
+ * @param {string}  [opts.fromStageId]    - resume from this stage forward
+ * @param {Function}[opts.onStage]        - progress callback (stageResult)
+ * @returns {Promise<JurisdictionScreeningResult>}
+ */
+async function runScreening(project, jurisdictionId, opts = {}) {
+  const rule = await rulesEngine.getActive(jurisdictionId);
+  if (!rule) throw new Error('No rule for ' + jurisdictionId);
+
+  // Gather pool (Phase 2 stored migrated financials but be defensive).
+  const ids = [...new Set(project.comparables || [])];
+  const pool = (await db.companies.bulkGet(ids))
+    .filter(Boolean)
+    .map(c => ({ ...c, financials: migrateFinancials(c.financials) }));
+  const testedParty = project.testedPartyId ? await db.companies.get(project.testedPartyId) : null;
+
+  /** @type {ScreeningContext} */
+  const ctx = {
+    testedParty: testedParty ? { ...testedParty, financials: migrateFinancials(testedParty.financials) } : null,
+    yearRange: project.analysisYearRange || null,
+    mode: 'parallel',
+  };
+
+  // Stages, sorted by order. customStages come last unless intermixed.
+  const stages = [...(rule.screeningStages || []), ...(rule.customStages || [])]
+    .filter(s => s.enabled !== false)
+    .sort((a, b) => a.order - b.order);
+
+  // Preserve the previous run if resuming partway through.
+  /** @type {JurisdictionScreeningResult} */
+  let result = (project.screeningResults && project.screeningResults[jurisdictionId]) ? JSON.parse(JSON.stringify(project.screeningResults[jurisdictionId])) : {
+    testedPartyId: project.testedPartyId || null,
+    ruleSnapshot: JSON.parse(JSON.stringify(rule)),
+    executedAt: new Date().toISOString(),
+    initialPoolCount: pool.length,
+    stages: [],
+    acceptedCompanies: [],
+    rejectedCompanies: [],
+    pendingReview: [],
+    decisions: {},
+  };
+
+  // Resume bookkeeping: build the survivor set from the last good stage when
+  // fromStageId is supplied.
+  let survivors = pool;
+  if (opts.fromStageId) {
+    const idx = stages.findIndex(s => s.id === opts.fromStageId);
+    if (idx > 0) {
+      const completedIds = new Set(stages.slice(0, idx).map(s => s.id));
+      // Survivors = pool minus everyone rejected in those stages.
+      const rejectedIds = new Set(
+        result.rejectedCompanies
+          .filter(r => completedIds.has(r.stage))
+          .map(r => r.companyId)
+      );
+      survivors = pool.filter(c => !rejectedIds.has(c.id));
+      result.stages = result.stages.filter(s => completedIds.has(s.id));
+      result.rejectedCompanies = result.rejectedCompanies.filter(r => completedIds.has(r.stage));
+    } else {
+      // From the very first stage: full reset.
+      result.stages = []; result.rejectedCompanies = []; result.pendingReview = []; result.acceptedCompanies = []; result.decisions = {};
+    }
+  } else {
+    result.stages = []; result.rejectedCompanies = []; result.pendingReview = []; result.acceptedCompanies = []; result.decisions = {};
+  }
+
+  // Run stages.
+  for (const stage of stages) {
+    if (opts.fromStageId && stages.findIndex(s => s.id === stage.id) < stages.findIndex(s => s.id === opts.fromStageId)) continue;
+    const exec = STAGE_EXECUTORS[stage.type];
+    if (!exec) { console.warn('Unknown stage type', stage.type); continue; }
+    const inputCount = survivors.length;
+    const out = exec(survivors, rule, stage, ctx);
+    const breakdown = {};
+    for (const r of out.rejected) {
+      breakdown[r.reason] = (breakdown[r.reason] || 0) + 1;
+      result.rejectedCompanies.push({ companyId: r.company.id, stage: stage.id, reason: r.reason, detail: r.detail });
+      result.decisions[r.company.id] = {
+        companyId: r.company.id,
+        finalStatus: 'REJECTED',
+        rejectedAtStage: stage.id,
+        rejectionReason: r.reason,
+        rejectionDetail: r.detail,
+        stageHistory: [...(result.decisions[r.company.id]?.stageHistory || []), { stage: stage.id, result: 'REJECT', reason: r.reason, evaluatedAt: new Date().toISOString() }],
+      };
+    }
+    for (const s of out.survivors) {
+      result.decisions[s.id] = result.decisions[s.id] || { companyId: s.id, finalStatus: 'PENDING_REVIEW', rejectedAtStage: null, rejectionReason: null, stageHistory: [] };
+      result.decisions[s.id].stageHistory.push({ stage: stage.id, result: 'PASS', evaluatedAt: new Date().toISOString() });
+    }
+    /** @type {StageResult} */
+    const stageResult = {
+      id: stage.id, label: stage.label, type: stage.type,
+      inputCount, passCount: out.survivors.length, rejectCount: out.rejected.length,
+      rejectionBreakdown: breakdown, executedAt: new Date().toISOString(),
+      requiresManualReview: !!out.requiresManualReview,
+    };
+    result.stages.push(stageResult);
+    survivors = out.survivors;
+    await logAudit('SCREENING_STAGE_COMPLETE', { projectId: project.id, jurisdictionId, stage: stage.id, passCount: stageResult.passCount, rejectCount: stageResult.rejectCount }, project.id);
+    if (opts.onStage) opts.onStage(stageResult);
+  }
+
+  // Finalise: any remaining survivor that has a pending-review terminal stage
+  // (FAR / QUALITATIVE_REVIEW) stays as PENDING_REVIEW unless a manual decision
+  // has already been recorded; everyone else becomes ACCEPTED.
+  const terminalStage = stages[stages.length - 1];
+  const terminalIsReview = terminalStage && (terminalStage.type === 'QUALITATIVE_REVIEW' || terminalStage.type === 'FAR');
+  result.acceptedCompanies = [];
+  result.pendingReview = [];
+  for (const s of survivors) {
+    const existing = result.decisions[s.id];
+    if (existing?.finalStatus === 'ACCEPTED' || existing?.finalStatus === 'HELD') {
+      result.acceptedCompanies.push(s.id);
+      continue;
+    }
+    if (terminalIsReview) {
+      result.decisions[s.id] = { ...existing, finalStatus: 'PENDING_REVIEW' };
+      result.pendingReview.push(s.id);
+    } else {
+      result.decisions[s.id] = { ...existing, finalStatus: 'ACCEPTED' };
+      result.acceptedCompanies.push(s.id);
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Persist a result onto the project. Stored on the project record under
+ * `screeningResults[jurisdictionId]` to keep export/import atomic.
+ */
+async function saveScreeningResult(projectId, jurisdictionId, result) {
+  const project = await db.projects.get(projectId);
+  if (!project) return;
+  project.screeningResults = project.screeningResults || {};
+  project.screeningResults[jurisdictionId] = result;
+  project.updatedAt = Date.now();
+  await db.projects.put(project);
+}
+
+/**
+ * Apply a manual reviewer decision to a stored result.
+ * @param {string} projectId
+ * @param {string} jurisdictionId
+ * @param {string} companyId
+ * @param {('accept'|'reject'|'hold')} decision
+ * @param {string} reason
+ */
+async function manualReview(projectId, jurisdictionId, companyId, decision, reason) {
+  const project = await db.projects.get(projectId);
+  const r = project?.screeningResults?.[jurisdictionId];
+  if (!r) throw new Error('No screening result for jurisdiction');
+  const dec = r.decisions[companyId] = r.decisions[companyId] || { companyId, stageHistory: [] };
+  const stamp = new Date().toISOString();
+  if (decision === 'accept') {
+    dec.finalStatus = 'ACCEPTED'; dec.rejectedAtStage = null; dec.rejectionReason = null;
+    dec.stageHistory.push({ stage: 'MANUAL', result: 'ACCEPT', evaluatedAt: stamp });
+    r.pendingReview = r.pendingReview.filter(id => id !== companyId);
+    if (!r.acceptedCompanies.includes(companyId)) r.acceptedCompanies.push(companyId);
+    r.rejectedCompanies = r.rejectedCompanies.filter(rc => rc.companyId !== companyId);
+    await logAudit('MANUAL_ACCEPT', { projectId, jurisdictionId, companyId, reason }, projectId);
+  } else if (decision === 'reject') {
+    if (!reason) throw new Error('reject 理由が必要です');
+    dec.finalStatus = 'REJECTED'; dec.rejectedAtStage = 'MANUAL'; dec.rejectionReason = reason;
+    dec.stageHistory.push({ stage: 'MANUAL', result: 'REJECT', reason, evaluatedAt: stamp });
+    r.pendingReview = r.pendingReview.filter(id => id !== companyId);
+    r.acceptedCompanies = r.acceptedCompanies.filter(id => id !== companyId);
+    if (!r.rejectedCompanies.find(rc => rc.companyId === companyId)) r.rejectedCompanies.push({ companyId, stage: 'MANUAL', reason });
+    await logAudit('MANUAL_REJECT', { projectId, jurisdictionId, companyId, reason }, projectId);
+  } else if (decision === 'hold') {
+    dec.finalStatus = 'HELD';
+    dec.stageHistory.push({ stage: 'MANUAL', result: 'HOLD', evaluatedAt: stamp });
+  }
+  await saveScreeningResult(projectId, jurisdictionId, r);
+  return dec;
+}
+
+/**
+ * Compare an existing screening result against the CIQ "Status" labels
+ * present on the companies. Returns a summary diff.
+ */
+async function compareWithCIQ(projectId, jurisdictionId) {
+  const project = await db.projects.get(projectId);
+  const r = project?.screeningResults?.[jurisdictionId];
+  if (!r) throw new Error('Run screening first');
+  const ids = Object.keys(r.decisions);
+  const companies = (await db.companies.bulkGet(ids)).filter(Boolean);
+  const byId = Object.fromEntries(companies.map(c => [c.id, c]));
+  let agree = 0, disagreeAcceptInApp = 0, disagreeRejectInApp = 0, noCIQ = 0;
+  const items = [];
+  for (const id of ids) {
+    const c = byId[id]; if (!c) continue;
+    const appStatus = r.decisions[id].finalStatus;
+    const ciq = String(c.cIQStatus || '').toLowerCase();
+    if (!ciq) { noCIQ++; continue; }
+    const ciqAccepted = ciq.includes('accept');
+    const ciqRejected = ciq.includes('reject');
+    const appAccepted = appStatus === 'ACCEPTED';
+    if ((ciqAccepted && appAccepted) || (ciqRejected && appStatus === 'REJECTED')) {
+      agree++;
+    } else if (appAccepted && ciqRejected) {
+      disagreeAcceptInApp++;
+      items.push({ companyId: id, name: c.name, app: appStatus, ciq: c.cIQStatus, ciqReason: c.cIQRejectionReason });
+    } else if (!appAccepted && ciqAccepted) {
+      disagreeRejectInApp++;
+      items.push({ companyId: id, name: c.name, app: appStatus, ciq: c.cIQStatus, appReason: r.decisions[id].rejectionReason });
+    }
+  }
+  return { agree, disagreeAcceptInApp, disagreeRejectInApp, noCIQ, items };
+}
+
+/**
+ * Orchestrate the run across all jurisdictions bound to the project,
+ * honouring the project's merge mode (parallel vs strictest).
+ */
+async function runAllJurisdictions(project, opts = {}) {
+  const codes = project.targetJurisdiction?.length ? [...project.targetJurisdiction] : ['OECD_GENERIC'];
+  const mode = opts.mode || 'parallel';
+  await logAudit('SCREENING_RUN', { projectId: project.id, jurisdictions: codes, mode }, project.id);
+  if (mode === 'strictest') {
+    const merged = await rulesEngine.mergeStrictest(codes);
+    // Persist the synthetic merged rule temporarily under its synthetic id.
+    await db.jurisdictionRules.put({ ...merged, id: merged.jurisdictionId });
+    const r = await runScreening(project, merged.jurisdictionId, opts);
+    await saveScreeningResult(project.id, merged.jurisdictionId, r);
+    return { [merged.jurisdictionId]: r };
+  }
+  /** @type {Object<string, JurisdictionScreeningResult>} */
+  const out = {};
+  for (const c of codes) {
+    out[c] = await runScreening(project, c, opts);
+    await saveScreeningResult(project.id, c, out[c]);
+  }
+  return out;
+}
+</script>
+
+<!-- =====================================================================
+  PHASE 3 / BLOCK 21 : Surface Phase 3 API on TPApp + extend audit list
+===================================================================== -->
+<script id="tp-app-screening">
+TPApp.screening = {
+  run:           (projectId, jurisdictionId, opts) => db.projects.get(projectId).then(p => runScreening(p, jurisdictionId, opts).then(r => saveScreeningResult(projectId, jurisdictionId, r).then(() => r))),
+  runAll:        async (projectId, opts) => {
+    const p = await db.projects.get(projectId); return runAllJurisdictions(p, opts);
+  },
+  getResult:     async (projectId, jurisdictionId) => {
+    const p = await db.projects.get(projectId); return p?.screeningResults?.[jurisdictionId] || null;
+  },
+  manualReview,
+  getAccepted:   async (projectId, jurisdictionId) => {
+    const r = await TPApp.screening.getResult(projectId, jurisdictionId); return r?.acceptedCompanies || [];
+  },
+  getRejected:   async (projectId, jurisdictionId) => {
+    const r = await TPApp.screening.getResult(projectId, jurisdictionId); return r?.rejectedCompanies || [];
+  },
+  compareWithCIQ,
+  /* Phase 3 expose executors so future phases can unit-test or chain. */
+  executors: { QUANTITATIVE: execQuantitative, BULK_REJECTION: execBulkRejection, INDEPENDENCE: execIndependence, FAR: execFar, QUALITATIVE_REVIEW: execQualitativeReview, CUSTOM: execCustom },
+};
+</script>
+
+
+<!-- =====================================================================
   ROOT TEMPLATE
 ===================================================================== -->
 <div x-data="tpApp()" x-init="init()" x-cloak class="h-screen flex flex-col">
@@ -4377,11 +5446,280 @@ Foo Corp,JP,334413,2024,1000000,80000,..."></textarea>
         </template>
       </section>
 
-      <!-- ============== Screening placeholder ============== -->
-      <section x-show="currentView === 'screening'" class="p-6">
-        <div class="bg-white rounded-lg shadow p-6">
-          <h2 class="font-semibold text-lg mb-3">スクリーニング <span class="text-xs text-amber-600 font-normal">(Phase 3 で実装)</span></h2>
-          <p class="text-sm text-slate-600">独立性、業種、定量、定性の各ステージを順次実行します。Phase 3 で実装予定です。</p>
+      <!-- ============== Screening (Phase 3) ============== -->
+      <section x-show="currentView === 'screening'" class="p-6 space-y-6">
+        <template x-if="!currentProject">
+          <div class="bg-white rounded-lg shadow p-6 text-sm text-slate-500">プロジェクトを選択してください。</div>
+        </template>
+
+        <template x-if="currentProject">
+          <div class="space-y-6">
+            <!-- Tested party panel -->
+            <div class="bg-white rounded-lg shadow p-5">
+              <h3 class="font-semibold mb-3">検証対象企業 (Tested Party)</h3>
+              <template x-if="testedPartyCompany">
+                <div class="grid grid-cols-3 gap-3 text-sm">
+                  <div><label class="text-xs text-slate-500">名称</label><div class="font-medium" x-text="testedPartyCompany.name"></div></div>
+                  <div><label class="text-xs text-slate-500">国</label><div x-text="testedPartyCompany.country"></div></div>
+                  <div><label class="text-xs text-slate-500">業種コード</label><div class="font-mono" x-text="(testedPartyCompany.industryCodes?.SIC?.primary || testedPartyCompany.industryCode || '-') + ' (' + (testedPartyCompany.industryCodes?.SIC?.primary ? 'SIC' : testedPartyCompany.industryCodeSystem || 'SIC') + ')'"></div></div>
+                  <div class="col-span-3 flex justify-end gap-2">
+                    <button class="text-xs px-2 py-1 border rounded" @click="openTestedPartyPicker = true">変更</button>
+                  </div>
+                </div>
+              </template>
+              <template x-if="!testedPartyCompany">
+                <div class="text-sm text-amber-700 bg-amber-50 p-3 rounded">
+                  検証対象企業が未設定です。規模ベース (revenue range) のフィルタはスキップされます。
+                  <button class="ml-3 px-2 py-1 text-xs border rounded bg-white" @click="openTestedPartyPicker = true">設定</button>
+                </div>
+              </template>
+            </div>
+
+            <!-- Execution panel -->
+            <div class="bg-white rounded-lg shadow p-5">
+              <div class="flex items-center justify-between mb-3">
+                <h3 class="font-semibold">実行</h3>
+                <div class="flex gap-2 items-center text-xs">
+                  <span class="text-slate-500">マージモード:</span>
+                  <select class="px-2 py-1 border rounded" x-model="projectMergeMode">
+                    <option value="parallel">並列</option><option value="strictest">最厳格マージ</option>
+                  </select>
+                </div>
+              </div>
+              <div class="text-xs text-slate-500 mb-2">
+                バインド済法域:
+                <template x-for="j in currentProject.targetJurisdiction" :key="j"><span class="px-1.5 py-0.5 bg-slate-100 rounded font-mono mr-1" x-text="j"></span></template>
+                <template x-if="!currentProject.targetJurisdiction?.length"><span class="italic">未指定 → OECD_GENERIC 自動適用</span></template>
+              </div>
+              <div class="flex flex-wrap gap-2">
+                <button class="px-3 py-1.5 bg-blue-600 text-white text-sm rounded" :disabled="screeningRunning" @click="executeScreening()">
+                  <span x-show="!screeningRunning">全段階を実行</span>
+                  <span x-show="screeningRunning">実行中...</span>
+                </button>
+                <select class="px-2 py-1 border rounded text-sm" x-model="rerunFromStageId">
+                  <option value="">特定段階から再実行...</option>
+                  <template x-for="s in (currentScreeningResult?.stages || [])" :key="s.id"><option :value="s.id" x-text="s.id + ' ' + s.label"></option></template>
+                </select>
+                <button class="px-3 py-1.5 border text-sm rounded" :disabled="!rerunFromStageId" @click="executeScreening(rerunFromStageId)">該当段階以降を再実行</button>
+                <label class="text-xs flex items-center gap-1 ml-3"><input type="checkbox" x-model="stepThroughStages"> 段階ごとに承認</label>
+              </div>
+              <!-- Progress per stage -->
+              <template x-if="screeningProgress.length">
+                <div class="mt-4 space-y-1 text-xs">
+                  <template x-for="p in screeningProgress" :key="p.id">
+                    <div class="flex items-center gap-3">
+                      <span class="font-mono w-10" x-text="p.id"></span>
+                      <span class="flex-1" x-text="p.label"></span>
+                      <span class="text-emerald-700" x-text="'通過 ' + p.passCount"></span>
+                      <span class="text-rose-700"   x-text="'却下 ' + p.rejectCount"></span>
+                    </div>
+                  </template>
+                </div>
+              </template>
+            </div>
+
+            <!-- Jurisdiction tabs -->
+            <template x-if="screeningJurisdictions.length">
+              <div class="bg-white rounded-lg shadow">
+                <div class="flex border-b px-5">
+                  <template x-for="j in screeningJurisdictions" :key="j">
+                    <button class="px-3 py-2 text-sm border-b-2 -mb-px"
+                            :class="activeScreeningJurisdiction === j ? 'border-blue-600 text-blue-700 font-semibold' : 'border-transparent text-slate-500'"
+                            @click="activeScreeningJurisdiction = j; loadActiveResult()">
+                      <span class="font-mono" x-text="j"></span>
+                      <span class="ml-1 text-xs" x-text="'(' + (currentProject.screeningResults?.[j]?.acceptedCompanies?.length || 0) + ' 採用)'"></span>
+                    </button>
+                  </template>
+                </div>
+                <div class="p-5 space-y-6" x-show="currentScreeningResult">
+
+                  <!-- Funnel chart -->
+                  <div>
+                    <h4 class="font-semibold mb-2 text-sm">ファネル (段階別 生存件数)</h4>
+                    <div class="space-y-1">
+                      <template x-for="(s, si) in currentScreeningResult.stages" :key="s.id">
+                        <div class="flex items-center gap-3">
+                          <span class="font-mono w-10 text-xs text-slate-500" x-text="s.id"></span>
+                          <span class="w-40 text-xs" x-text="s.label"></span>
+                          <div class="flex-1 h-6 bg-slate-100 rounded relative overflow-hidden">
+                            <div class="absolute inset-y-0 left-0 bg-blue-500"
+                                 :style="'width:' + funnelBarPct(s) + '%'"></div>
+                            <div class="absolute inset-0 flex items-center justify-end pr-2 text-xs font-mono"
+                                 :class="funnelBarPct(s) > 25 ? 'text-white' : 'text-slate-700'"
+                                 x-text="s.passCount + ' / ' + s.inputCount"></div>
+                          </div>
+                          <span class="w-16 text-xs text-rose-700 text-right" x-text="s.rejectCount > 0 ? '-' + s.rejectCount : ''"></span>
+                        </div>
+                      </template>
+                    </div>
+                    <div class="text-xs text-slate-500 mt-1">
+                      Total Pool: <span class="font-mono" x-text="currentScreeningResult.initialPoolCount"></span> →
+                      Accepted: <span class="font-mono text-emerald-700" x-text="currentScreeningResult.acceptedCompanies.length"></span> /
+                      Pending: <span class="font-mono text-amber-700"   x-text="currentScreeningResult.pendingReview.length"></span> /
+                      Rejected: <span class="font-mono text-rose-700"    x-text="currentScreeningResult.rejectedCompanies.length"></span>
+                    </div>
+                  </div>
+
+                  <!-- Sankey (SVG, single stage column per stage) -->
+                  <div>
+                    <h4 class="font-semibold mb-2 text-sm">フロー図 (Sankey 簡易)</h4>
+                    <div class="overflow-auto border rounded p-3 bg-slate-50">
+                      <svg :viewBox="'0 0 ' + sankeyWidth() + ' 220'" :width="sankeyWidth()" height="220">
+                        <template x-for="(b, bi) in sankeyBoxes()" :key="bi">
+                          <g>
+                            <rect :x="b.x" :y="b.y" :width="b.w" :height="b.h" :fill="b.fill" stroke="#1e293b" stroke-width="0.5"></rect>
+                            <text :x="b.x + b.w / 2" :y="b.y + b.h / 2" text-anchor="middle" dominant-baseline="middle"
+                                  font-size="11" :fill="b.textFill || '#fff'" x-text="b.label"></text>
+                          </g>
+                        </template>
+                        <template x-for="(p, pi) in sankeyPaths()" :key="pi">
+                          <path :d="p.d" :fill="p.fill" fill-opacity="0.45"></path>
+                        </template>
+                      </svg>
+                    </div>
+                  </div>
+
+                  <!-- Rejection breakdown -->
+                  <div>
+                    <h4 class="font-semibold mb-2 text-sm">却下理由の内訳</h4>
+                    <div class="grid grid-cols-2 gap-4">
+                      <template x-for="s in currentScreeningResult.stages" :key="s.id">
+                        <template x-if="Object.keys(s.rejectionBreakdown).length">
+                          <div class="border rounded p-3 bg-white">
+                            <div class="text-xs font-mono text-slate-500 mb-1" x-text="s.id + ' · ' + s.label"></div>
+                            <table class="w-full text-xs">
+                              <tbody>
+                                <template x-for="[reason, count] in Object.entries(s.rejectionBreakdown)" :key="reason">
+                                  <tr class="border-t">
+                                    <td class="py-1" x-text="reason"></td>
+                                    <td class="text-right font-mono" x-text="count"></td>
+                                  </tr>
+                                </template>
+                              </tbody>
+                            </table>
+                          </div>
+                        </template>
+                      </template>
+                    </div>
+                  </div>
+
+                  <!-- CIQ diff -->
+                  <div>
+                    <h4 class="font-semibold mb-2 text-sm">CIQ判定との差分</h4>
+                    <div class="flex gap-2 items-center mb-2">
+                      <button class="px-2 py-1 text-xs border rounded" @click="runCIQDiff()">差分を計算</button>
+                      <template x-if="ciqDiffSummary">
+                        <div class="text-xs">
+                          一致: <span class="font-mono" x-text="ciqDiffSummary.agree"></span> /
+                          App=Accept・CIQ=Reject: <span class="font-mono text-amber-700" x-text="ciqDiffSummary.disagreeAcceptInApp"></span> /
+                          App=Reject・CIQ=Accept: <span class="font-mono text-amber-700" x-text="ciqDiffSummary.disagreeRejectInApp"></span> /
+                          CIQ未記載: <span class="font-mono text-slate-500" x-text="ciqDiffSummary.noCIQ"></span>
+                        </div>
+                      </template>
+                    </div>
+                    <template x-if="ciqDiffSummary?.items?.length">
+                      <div class="border rounded max-h-48 overflow-auto">
+                        <table class="w-full text-xs">
+                          <thead class="bg-slate-100"><tr><th class="px-2 py-1 text-left">企業</th><th>App</th><th>CIQ</th><th>理由</th></tr></thead>
+                          <tbody>
+                            <template x-for="item in ciqDiffSummary.items.slice(0,50)" :key="item.companyId">
+                              <tr class="border-t">
+                                <td class="px-2 py-1" x-text="item.name"></td>
+                                <td x-text="item.app"></td>
+                                <td x-text="item.ciq"></td>
+                                <td class="text-slate-500" x-text="item.appReason || item.ciqReason || ''"></td>
+                              </tr>
+                            </template>
+                          </tbody>
+                        </table>
+                      </div>
+                    </template>
+                  </div>
+
+                  <!-- Pending manual review -->
+                  <div>
+                    <h4 class="font-semibold mb-2 text-sm">手動レビュー</h4>
+                    <div class="text-xs text-slate-500 mb-2">
+                      レビュー進捗:
+                      <span class="font-mono" x-text="reviewedCount + ' / ' + currentScreeningResult.pendingReview.length"></span>
+                    </div>
+                    <div class="border rounded max-h-72 overflow-auto">
+                      <table class="w-full text-xs">
+                        <thead class="bg-slate-100"><tr><th class="px-2 py-1 text-left">企業</th><th>国</th><th>業種</th><th>事業内容</th><th>CIQ理由</th><th class="w-64">判定</th></tr></thead>
+                        <tbody>
+                          <template x-for="row in reviewRows" :key="row.id">
+                            <tr class="border-t align-top">
+                              <td class="px-2 py-1" x-text="row.name"></td>
+                              <td x-text="row.country"></td>
+                              <td class="font-mono" x-text="row.industry"></td>
+                              <td class="text-slate-600 max-w-xs truncate" :title="row.businessDescription" x-text="row.businessDescription || ''"></td>
+                              <td class="text-rose-700" x-text="row.cIQRejectionReason || ''"></td>
+                              <td>
+                                <select class="px-1 py-0.5 border rounded text-xs mr-1" x-model="row._reason">
+                                  <option value="">却下理由...</option>
+                                  <option :value="REJECTION_REASONS.CONTROLLED_ENTITY">controlled entity</option>
+                                  <option :value="REJECTION_REASONS.DIFFERENT_BUSINESS">different business</option>
+                                  <option value="custom">カスタム...</option>
+                                </select>
+                                <input class="px-1 py-0.5 border rounded text-xs w-32" placeholder="カスタム理由" x-show="row._reason === 'custom'" x-model="row._customReason">
+                                <button class="text-xs px-2 py-0.5 border rounded text-emerald-700" @click="reviewDecide(row, 'accept')">採用</button>
+                                <button class="text-xs px-2 py-0.5 border rounded text-rose-700" @click="reviewDecide(row, 'reject')">却下</button>
+                                <button class="text-xs px-2 py-0.5 border rounded" @click="reviewDecide(row, 'hold')">保留</button>
+                              </td>
+                            </tr>
+                          </template>
+                          <template x-if="!reviewRows.length"><tr><td colspan="6" class="px-2 py-3 text-center text-slate-400">対象なし</td></tr></template>
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
+                  <!-- Accepted list -->
+                  <div>
+                    <h4 class="font-semibold mb-2 text-sm">採用企業 (Accepted)</h4>
+                    <div class="border rounded max-h-48 overflow-auto">
+                      <table class="w-full text-xs">
+                        <thead class="bg-slate-100"><tr><th class="px-2 py-1 text-left">企業</th><th>国</th><th>業種</th></tr></thead>
+                        <tbody>
+                          <template x-for="c in acceptedRows" :key="c.id">
+                            <tr class="border-t">
+                              <td class="px-2 py-1" x-text="c.name"></td>
+                              <td x-text="c.country"></td>
+                              <td class="font-mono" x-text="c.industry"></td>
+                            </tr>
+                          </template>
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </template>
+          </div>
+        </template>
+
+        <!-- Tested-party picker modal -->
+        <div x-show="openTestedPartyPicker" class="fixed inset-0 z-40 bg-black/40 flex items-center justify-center p-4">
+          <div class="bg-white rounded-lg shadow-xl max-w-2xl w-full">
+            <div class="px-5 py-3 border-b flex items-center justify-between">
+              <h3 class="font-semibold">検証対象企業の選択</h3>
+              <button class="text-slate-500" @click="openTestedPartyPicker = false">&times;</button>
+            </div>
+            <div class="p-4 max-h-96 overflow-auto">
+              <input class="w-full px-2 py-1 border rounded text-sm mb-2" placeholder="企業名で検索" x-model="testedPartyQuery">
+              <table class="w-full text-xs">
+                <tbody>
+                  <template x-for="c in companies.filter(c => !testedPartyQuery || c.name.toLowerCase().includes(testedPartyQuery.toLowerCase()))" :key="c.id">
+                    <tr class="border-t hover:bg-slate-50">
+                      <td class="px-2 py-1" x-text="c.name"></td>
+                      <td x-text="c.country"></td>
+                      <td><button class="px-2 py-0.5 border rounded text-xs" @click="setTestedParty(c.id)">選択</button></td>
+                    </tr>
+                  </template>
+                </tbody>
+              </table>
+            </div>
+          </div>
         </div>
       </section>
 
