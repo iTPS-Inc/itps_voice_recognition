@@ -316,7 +316,14 @@ db.version(3).stores({
 // Each rate row is uniquely identified by (base, quote, date, basis) so
 // TTM / TTS / TTB on the same date co-exist. `source` records the bank /
 // data provider that supplied the rate (mandatory for disclosure).
+//
+// Dexie does not allow changing a primary key in-place, so we drop the
+// v1 placeholder table in v4 (it was never populated by any prior phase)
+// and recreate it under the new compound key in v5.
 db.version(4).stores({
+  fxRates: null,
+});
+db.version(5).stores({
   fxRates: '[base+quote+date+basis], base, quote, date, basis, source, kind',
 });
 
