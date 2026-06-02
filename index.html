@@ -1369,6 +1369,13 @@ function tpApp() {
     showRuleList: true,
     /** Refresh `allRules` from Dexie; called after CRUD. */
     async refreshRules() { this.allRules = await rulesEngine.list(); },
+    /** JSON snapshot of the rule at last load / save, used to gate the
+     *  Save button so the user can only save when something is dirty. */
+    editingRuleSnapshot: '',
+    isRuleDirty() {
+      if (!this.editingRule) return false;
+      return this.editingRuleSnapshot !== JSON.stringify(this.editingRule);
+    },
     /** Import a rule pack JSON (single rule or `{rules: [...]}` shape). */
     async importRulesJson(ev) {
       const file = ev.target.files?.[0]; if (!file) return;
@@ -1398,6 +1405,7 @@ function tpApp() {
       const r = await rulesEngine.getActive(id);
       if (!r) return;
       this.editingRule = JSON.parse(JSON.stringify(r));
+      this.editingRuleSnapshot = JSON.stringify(this.editingRule);
       this.ruleEditTab = 'basic';
       this.showRuleList = false;
     },
@@ -1410,17 +1418,23 @@ function tpApp() {
         name: 'New custom rule', nameLocal: '',
         isOfficial: false, isGenericModel: false,
         parentId: base.jurisdictionId,
+        createdAt: new Date().toISOString(),
       };
+      // New draft is intentionally dirty so the Save button is active.
+      this.editingRuleSnapshot = '';
       this.ruleEditTab = 'basic';
       this.showRuleList = false;
     },
     async saveEditingRule() {
       if (!this.editingRule) return;
+      if (!this.isRuleDirty()) return;       // no-op when pristine
       try {
         const saved = await rulesEngine.save({ ...this.editingRule, id: this.editingRule.jurisdictionId });
         this.toast(`ルール "${saved.name}" を保存しました`, 'success');
         await this.refreshRules();
         this.editingRule = saved;
+        // Mark the editor pristine; further edits will re-enable Save.
+        this.editingRuleSnapshot = JSON.stringify(saved);
       } catch (e) { this.toast('保存失敗: ' + e.message, 'error'); }
     },
     cancelEditingRule() { this.editingRule = null; this.showRuleList = true; },
@@ -5120,15 +5134,34 @@ const rulesEngine = {
     // structured clone cannot serialise proxy wrappers (DataCloneError).
     const plain = JSON.parse(JSON.stringify(rule));
     delete plain._forceOverwrite;
+    const nowIso = new Date().toISOString();
+    const today = nowIso.slice(0, 10);
     const existing = await db.jurisdictionRules.get(plain.id || plain.jurisdictionId);
     if (existing && existing.isOfficial && !rule._forceOverwrite) {
-      const forked = { ...plain, id: plain.jurisdictionId + '_CUSTOM_' + Date.now(), parentId: existing.jurisdictionId, isOfficial: false, lastModified: new Date().toISOString().slice(0, 10) };
+      // Fork: count existing custom siblings of the same official parent
+      // so the new copy gets a stable "_01", "_02", … suffix on its name.
+      const all = await db.jurisdictionRules.toArray();
+      const siblings = all.filter(r => r.parentId === existing.jurisdictionId && !r.isOfficial);
+      const seq = String(siblings.length + 1).padStart(2, '0');
+      const baseName = (plain.name || existing.name || '').replace(/_\d{2,}$/, '');
+      const forked = {
+        ...plain,
+        id: plain.jurisdictionId + '_CUSTOM_' + Date.now(),
+        parentId: existing.jurisdictionId,
+        isOfficial: false,
+        name: baseName + '_' + seq,
+        createdAt: nowIso,
+        createdBy: plain.createdBy || (typeof __currentUserName === 'string' ? __currentUserName : ''),
+        lastModified: today,
+      };
       forked.jurisdictionId = forked.id;
       await db.jurisdictionRules.put(forked);
-      await logAudit('RULE_CREATE', { id: forked.id, forkedFrom: existing.jurisdictionId });
+      await logAudit('RULE_CREATE', { id: forked.id, forkedFrom: existing.jurisdictionId, name: forked.name });
       return forked;
     }
-    plain.lastModified = new Date().toISOString().slice(0, 10);
+    plain.lastModified = today;
+    if (!plain.createdAt) plain.createdAt = existing?.createdAt || nowIso;
+    if (!plain.createdBy && typeof __currentUserName === 'string') plain.createdBy = plain.createdBy || __currentUserName;
     const toStore = { ...plain, id: plain.id || plain.jurisdictionId };
     await db.jurisdictionRules.put(toStore);
     await logAudit(existing ? 'RULE_UPDATE' : 'RULE_CREATE', { id: toStore.id });
@@ -10689,6 +10722,10 @@ Foo Corp,JP,334413,2024,1000000,80000,..."></textarea>
                   <div>レンジ: <span x-text="r.rangeMethod.type + ' ' + r.rangeMethod.lowerPercentile + '-' + r.rangeMethod.upperPercentile"></span></div>
                   <div>分析年数: 規定<span x-text="r.yearsAnalysis.default"></span>年 / <span x-text="r.yearsAnalysis.averaging"></span></div>
                   <div>最小社数: <span x-text="r.minComparables"></span></div>
+                  <div class="text-[10px] text-slate-500">
+                    <span x-show="r.createdAt">作成 <span x-text="new Date(r.createdAt).toLocaleDateString()"></span></span>
+                    <span x-show="r.lastModified"> · 更新 <span x-text="r.lastModified"></span></span>
+                  </div>
                 </div>
               </div>
             </template>
@@ -10780,11 +10817,24 @@ Foo Corp,JP,334413,2024,1000000,80000,..."></textarea>
                   <span x-show="editingRule.isOfficial" class="text-blue-700"> · 公式</span>
                   <span x-show="editingRule.isGenericModel" class="text-purple-700"> · 汎用モデル</span>
                   <span x-show="editingRule.parentId"> · parent=<span x-text="editingRule.parentId" class="font-mono"></span></span>
+                  <span x-show="editingRule.version"> · v<span x-text="editingRule.version"></span></span>
+                  <span x-show="editingRule.createdAt">
+                    · 作成: <span x-text="new Date(editingRule.createdAt).toLocaleDateString()"></span>
+                    <template x-if="editingRule.createdBy">
+                      <span> (<span x-text="editingRule.createdBy"></span>)</span>
+                    </template>
+                  </span>
+                  <span x-show="editingRule.lastModified"> · 更新: <span x-text="editingRule.lastModified"></span></span>
                 </div>
               </div>
-              <div class="flex gap-2">
+              <div class="flex gap-2 items-center">
+                <span x-show="editingRule && !isRuleDirty()" class="text-xs text-emerald-600">保存済</span>
+                <span x-show="editingRule &&  isRuleDirty()" class="text-xs text-amber-600">未保存の変更あり</span>
                 <template x-if="!editingRule.isOfficial"><button class="px-3 py-1 text-sm border rounded text-rose-600" @click="deleteEditingRule()">削除</button></template>
-                <button class="px-3 py-1 text-sm bg-blue-600 text-white rounded" @click="saveEditingRule()">保存</button>
+                <button class="px-3 py-1 text-sm bg-blue-600 text-white rounded disabled:opacity-40 disabled:cursor-not-allowed"
+                        :disabled="!isRuleDirty()"
+                        :title="isRuleDirty() ? '変更を保存' : '変更がありません'"
+                        @click="saveEditingRule()">保存</button>
               </div>
             </div>
 
