@@ -920,6 +920,28 @@ function tpApp() {
     },
     labelOf(item) { return this.lang === 'en' ? item.labelEn : item.labelJa; },
 
+    /* ---------------- workflow step navigation (Phase 8.1) ----------------
+       The linear analysis workflow. settings / audit sit outside it. The
+       footer bar walks the user forward/back through these in order. */
+    workflowSteps: ['project', 'dataInput', 'rules', 'screening', 'scoring', 'results', 'reports'],
+    isWorkflowStep(view) { return this.workflowSteps.includes(view); },
+    workflowLabel(stepId) {
+      const item = this.sidebarItems.find(s => s.id === stepId);
+      return item ? this.labelOf(item) : stepId;
+    },
+    /** The step before the current one, or null at the start. */
+    prevWorkflowStep() {
+      const i = this.workflowSteps.indexOf(this.currentView);
+      return i > 0 ? this.workflowSteps[i - 1] : null;
+    },
+    /** The step after the current one, or null at the end. */
+    nextWorkflowStep() {
+      const i = this.workflowSteps.indexOf(this.currentView);
+      return (i >= 0 && i < this.workflowSteps.length - 1) ? this.workflowSteps[i + 1] : null;
+    },
+    goPrevStep() { const p = this.prevWorkflowStep(); if (p) this.navigate(p); },
+    goNextStep() { const n = this.nextWorkflowStep(); if (n) this.navigate(n); },
+
     /* ---------------- splash actions ---------------- */
     newProjectDraft: { name: '', testedPartyName: '', jurisdictions: [] },
     showNewProjectForm: false,
@@ -10254,6 +10276,14 @@ function runAshimoriVerification(pool) {
       <section x-show="currentView === 'project'" class="p-6 space-y-6">
         <template x-if="currentProject">
           <div class="space-y-6">
+            <!-- Workflow guidance banner -->
+            <div class="bg-blue-50 border border-blue-200 rounded-lg p-4 flex items-start gap-3">
+              <span class="text-blue-600 text-lg">①</span>
+              <div class="text-sm">
+                <div class="font-semibold text-blue-900">ステップ 1 / 7 ： プロジェクト</div>
+                <div class="text-blue-800">税務管轄を確認し、画面下部の「次へ：データ入力」で比較対象企業を取り込みます。サンプルの場合は既に 60 社が登録済みなので、そのまま次へ進めます。</div>
+              </div>
+            </div>
             <div class="bg-white rounded-lg shadow p-5">
               <h2 class="font-semibold text-lg mb-3">プロジェクト概要</h2>
               <div class="grid grid-cols-2 gap-4 text-sm">
@@ -10315,6 +10345,13 @@ function runAshimoriVerification(pool) {
 
       <!-- ============== Data input view ============== -->
       <section x-show="currentView === 'dataInput'" class="p-6 space-y-6">
+        <div class="bg-blue-50 border border-blue-200 rounded-lg p-4 flex items-start gap-3">
+          <span class="text-blue-600 text-lg">②</span>
+          <div class="text-sm">
+            <div class="font-semibold text-blue-900">ステップ 2 / 7 ： データ入力</div>
+            <div class="text-blue-800">比較対象企業を Excel / CSV / Word から取り込みます（Capital IQ プリセット対応）。サンプルで試している場合はスキップして「次へ：法域・ルール設定」へ進めます。</div>
+          </div>
+        </div>
         <div class="flex gap-2 border-b">
           <button class="px-4 py-2 text-sm" :class="dataInputTab === 'file' ? 'border-b-2 border-blue-600 font-semibold' : 'text-slate-500'" @click="dataInputTab = 'file'">ファイルインポート</button>
           <button class="px-4 py-2 text-sm" :class="dataInputTab === 'api'  ? 'border-b-2 border-blue-600 font-semibold' : 'text-slate-500'" @click="dataInputTab = 'api'">企業DB API</button>
@@ -10613,6 +10650,13 @@ Foo Corp,JP,334413,2024,1000000,80000,..."></textarea>
 
       <!-- ============== Jurisdiction rules (Phase 2) ============== -->
       <section x-show="currentView === 'rules'" class="p-6 space-y-6">
+        <div class="bg-blue-50 border border-blue-200 rounded-lg p-4 flex items-start gap-3">
+          <span class="text-blue-600 text-lg">③</span>
+          <div class="text-sm">
+            <div class="font-semibold text-blue-900">ステップ 3 / 7 ： 法域・ルール設定</div>
+            <div class="text-blue-800">適用する法域ルール（レンジ方式・四分位法・スクリーニング段階）を確認します。既定の OECD / 日本 等のルールをそのまま使う場合は「次へ：スクリーニング」へ。</div>
+          </div>
+        </div>
         <!-- Rule list view -->
         <div x-show="showRuleList">
           <div class="flex items-center justify-between mb-4">
@@ -10985,6 +11029,13 @@ Foo Corp,JP,334413,2024,1000000,80000,..."></textarea>
 
       <!-- ============== Screening (Phase 3) ============== -->
       <section x-show="currentView === 'screening'" class="p-6 space-y-6">
+        <div class="bg-blue-50 border border-blue-200 rounded-lg p-4 flex items-start gap-3">
+          <span class="text-blue-600 text-lg">④</span>
+          <div class="text-sm">
+            <div class="font-semibold text-blue-900">ステップ 4 / 7 ： スクリーニング</div>
+            <div class="text-blue-800">「全段階を実行」で比較対象企業を絞り込みます。検証対象企業（Tested Party）が未設定なら先に設定してください。完了後「次へ：スコア & PLI」へ。</div>
+          </div>
+        </div>
         <template x-if="!currentProject">
           <div class="bg-white rounded-lg shadow p-6 text-sm text-slate-500">プロジェクトを選択してください。</div>
         </template>
@@ -11314,6 +11365,13 @@ Foo Corp,JP,334413,2024,1000000,80000,..."></textarea>
 
       <!-- ============== Scoring & PLI (Phase 4) ============== -->
       <section x-show="currentView === 'scoring'" class="p-6 space-y-6">
+        <div class="bg-blue-50 border border-blue-200 rounded-lg p-4 flex items-start gap-3">
+          <span class="text-blue-600 text-lg">⑤</span>
+          <div class="text-sm">
+            <div class="font-semibold text-blue-900">ステップ 5 / 7 ： スコア & PLI</div>
+            <div class="text-blue-800">PLI（利益水準指標）と四分位レンジを算定します。PLI 種別・集計方法・四分位法を選び「PLI / レンジを算定」を押してください。完了後「次へ：結果」へ。</div>
+          </div>
+        </div>
         <template x-if="!currentProject"><div class="bg-white rounded-lg shadow p-6 text-sm text-slate-500">プロジェクトを選択してください。</div></template>
         <template x-if="currentProject">
           <div class="space-y-6">
@@ -11506,6 +11564,13 @@ Foo Corp,JP,334413,2024,1000000,80000,..."></textarea>
 
       <!-- ============== Results (Phase 5) ============== -->
       <section x-show="currentView === 'results'" class="p-6 space-y-6">
+        <div class="bg-blue-50 border border-blue-200 rounded-lg p-4 flex items-start gap-3">
+          <span class="text-blue-600 text-lg">⑥</span>
+          <div class="text-sm">
+            <div class="font-semibold text-blue-900">ステップ 6 / 7 ： 結果</div>
+            <div class="text-blue-800">主要結論・採用企業・除外理由・レンジを確認し、Excel / CSV でエクスポートできます。最終文書を作るには「次へ：レポート出力」へ。</div>
+          </div>
+        </div>
         <template x-if="!currentProject"><div class="bg-white rounded-lg shadow p-6 text-sm text-slate-500">プロジェクトを選択してください。</div></template>
 
         <template x-if="currentProject">
@@ -11835,6 +11900,13 @@ Foo Corp,JP,334413,2024,1000000,80000,..."></textarea>
 
       <!-- ============== Report (Phase 6) ============== -->
       <section x-show="currentView === 'reports'" class="p-6 space-y-6">
+        <div class="bg-blue-50 border border-blue-200 rounded-lg p-4 flex items-start gap-3">
+          <span class="text-blue-600 text-lg">⑦</span>
+          <div class="text-sm">
+            <div class="font-semibold text-blue-900">ステップ 7 / 7 ： レポート出力</div>
+            <div class="text-blue-800">テンプレートを選んで Word / PDF / PowerPoint の移転価格文書を生成します。これで一連のワークフローは完了です。</div>
+          </div>
+        </div>
         <template x-if="!currentProject"><div class="bg-white rounded-lg shadow p-6 text-sm text-slate-500">プロジェクトを選択してください。</div></template>
         <template x-if="currentProject">
           <div class="space-y-6">
@@ -12436,6 +12508,37 @@ Foo Corp,JP,334413,2024,1000000,80000,..."></textarea>
         </div>
 
       </section>
+
+      <!-- ============== Workflow step navigation (Phase 8.1) ============== -->
+      <div x-show="isWorkflowStep(currentView)"
+           class="sticky bottom-0 bg-white/95 backdrop-blur border-t px-6 py-3 flex items-center justify-between z-20">
+        <button class="px-4 py-2 text-sm border rounded flex items-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed"
+                :disabled="!prevWorkflowStep()"
+                @click="goPrevStep()">
+          <span>←</span>
+          <span x-text="prevWorkflowStep() ? ('前へ: ' + workflowLabel(prevWorkflowStep())) : '最初のステップ'"></span>
+        </button>
+
+        <!-- step indicator -->
+        <div class="hidden md:flex items-center gap-1 text-xs">
+          <template x-for="(step, i) in workflowSteps" :key="step">
+            <div class="flex items-center gap-1">
+              <button class="px-2 py-1 rounded transition"
+                      :class="currentView === step ? 'bg-blue-600 text-white font-semibold' : 'text-slate-500 hover:bg-slate-100'"
+                      @click="navigate(step)"
+                      x-text="(i + 1) + '. ' + workflowLabel(step)"></button>
+              <span x-show="i < workflowSteps.length - 1" class="text-slate-300">›</span>
+            </div>
+          </template>
+        </div>
+
+        <button class="px-4 py-2 text-sm rounded flex items-center gap-2 bg-blue-600 text-white disabled:opacity-40 disabled:cursor-not-allowed"
+                :disabled="!nextWorkflowStep()"
+                @click="goNextStep()">
+          <span x-text="nextWorkflowStep() ? ('次へ: ' + workflowLabel(nextWorkflowStep())) : '最後のステップ'"></span>
+          <span>→</span>
+        </button>
+      </div>
 
     </main>
   </div>
