@@ -5115,18 +5115,24 @@ const rulesEngine = {
 
   /** Upsert. If the id collides with an official rule, fork into a new custom rule. */
   async save(rule) {
-    const existing = await db.jurisdictionRules.get(rule.id || rule.jurisdictionId);
+    // Deep-clone to strip Alpine reactivity proxies on nested objects
+    // (rangeMethod / yearsAnalysis / screeningStages …); IndexedDB's
+    // structured clone cannot serialise proxy wrappers (DataCloneError).
+    const plain = JSON.parse(JSON.stringify(rule));
+    delete plain._forceOverwrite;
+    const existing = await db.jurisdictionRules.get(plain.id || plain.jurisdictionId);
     if (existing && existing.isOfficial && !rule._forceOverwrite) {
-      const forked = { ...rule, id: rule.jurisdictionId + '_CUSTOM_' + Date.now(), parentId: existing.jurisdictionId, isOfficial: false, lastModified: new Date().toISOString().slice(0, 10) };
+      const forked = { ...plain, id: plain.jurisdictionId + '_CUSTOM_' + Date.now(), parentId: existing.jurisdictionId, isOfficial: false, lastModified: new Date().toISOString().slice(0, 10) };
       forked.jurisdictionId = forked.id;
       await db.jurisdictionRules.put(forked);
       await logAudit('RULE_CREATE', { id: forked.id, forkedFrom: existing.jurisdictionId });
       return forked;
     }
-    rule.lastModified = new Date().toISOString().slice(0, 10);
-    await db.jurisdictionRules.put({ ...rule, id: rule.id || rule.jurisdictionId });
-    await logAudit(existing ? 'RULE_UPDATE' : 'RULE_CREATE', { id: rule.id || rule.jurisdictionId });
-    return rule;
+    plain.lastModified = new Date().toISOString().slice(0, 10);
+    const toStore = { ...plain, id: plain.id || plain.jurisdictionId };
+    await db.jurisdictionRules.put(toStore);
+    await logAudit(existing ? 'RULE_UPDATE' : 'RULE_CREATE', { id: toStore.id });
+    return toStore;
   },
 
   /** Delete (forbidden for official rules). */
