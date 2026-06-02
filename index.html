@@ -952,7 +952,9 @@ function tpApp() {
           settings: { language: this.lang, industryCodePriority: this.industryCodePriority },
           notes: '',
         };
-        await db.projects.put(project);
+        // Strip Alpine reactivity proxies before handing to IndexedDB —
+        // structured clone trips over the proxy wrappers on some browsers.
+        await db.projects.put(JSON.parse(JSON.stringify(project)));
         await logAudit('project.create', { projectId: project.id }, project.id);
         this.currentProject = project;
         this.newProjectDraft = { name: '', testedPartyName: '', jurisdictions: [] };
@@ -1000,7 +1002,8 @@ function tpApp() {
           settings: { language: this.lang, industryCodePriority: this.industryCodePriority },
           notes: 'Auto-generated sample.',
         };
-        await db.projects.put(project);
+        // Strip Alpine reactivity proxies before put (DataCloneError otherwise).
+        await db.projects.put(JSON.parse(JSON.stringify(project)));
         this.currentProject = project;
         this.currentView = 'project';
         await logAudit('project.sample', { projectId: project.id, companyCount: companies.length }, project.id);
