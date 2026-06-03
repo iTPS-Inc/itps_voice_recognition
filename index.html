@@ -1454,6 +1454,12 @@ function tpApp() {
       if (rule.isOfficial)     return 'border-blue-500 bg-blue-50';
       return 'border-emerald-500 bg-emerald-50';
     },
+    /** Returns true when this rule's jurisdictionId is in the project's
+     *  targetJurisdiction set, so the card can show a red highlight ring. */
+    isRuleBound(rule) {
+      const bound = this.currentProject?.targetJurisdiction || [];
+      return rule && bound.includes(rule.jurisdictionId);
+    },
 
     /* ---- Screening-stage drag-drop ---- */
     draggedStageIdx: null,
@@ -1665,6 +1671,65 @@ function tpApp() {
     /** Expose for templates that read REJECTION_REASONS.* directly. */
     REJECTION_REASONS,
 
+    /* Phase 8.2: per-stage configuration shown on the screening view.
+     * Each row mirrors the merged stage definition (rule + project
+     * override) so the user can tweak knobs before running the pipeline. */
+    activeStages: [],
+    activeRule: null,
+    /** Pull rule + apply project stage overrides for display. */
+    async refreshActiveStages() {
+      const jur = this.activeScreeningJurisdiction;
+      if (!this.currentProject || !jur) { this.activeStages = []; this.activeRule = null; return; }
+      this.activeRule = await rulesEngine.getActive(jur);
+      if (!this.activeRule) { this.activeStages = []; return; }
+      const overrides = this.currentProject.stageOverrides?.[jur] || {};
+      const merged = [...(this.activeRule.screeningStages || []), ...(this.activeRule.customStages || [])]
+        .map(s => {
+          const ov = overrides[s.id] || {};
+          return {
+            ...s, ...ov,
+            params: { ...(s.params || {}), ...(ov.params || {}) },
+            _hasOverride: !!overrides[s.id],
+          };
+        })
+        .sort((a, b) => a.order - b.order);
+      this.activeStages = merged;
+    },
+    /** Persist an override for one stage onto the project. */
+    async updateStageOverride(stageId, patch) {
+      if (!this.currentProject || !this.activeScreeningJurisdiction) return;
+      this.currentProject.stageOverrides = this.currentProject.stageOverrides || {};
+      this.currentProject.stageOverrides[this.activeScreeningJurisdiction] = this.currentProject.stageOverrides[this.activeScreeningJurisdiction] || {};
+      const cur = this.currentProject.stageOverrides[this.activeScreeningJurisdiction][stageId] || {};
+      const next = { ...cur, ...patch };
+      if (patch.params) next.params = { ...(cur.params || {}), ...patch.params };
+      this.currentProject.stageOverrides[this.activeScreeningJurisdiction][stageId] = next;
+      await this.saveProject();
+      await this.refreshActiveStages();
+    },
+    /** Clear all overrides for the current jurisdiction (rule defaults). */
+    async resetStageOverrides() {
+      if (!this.currentProject || !this.activeScreeningJurisdiction) return;
+      if (this.currentProject.stageOverrides?.[this.activeScreeningJurisdiction]) {
+        delete this.currentProject.stageOverrides[this.activeScreeningJurisdiction];
+        await this.saveProject();
+      }
+      await this.refreshActiveStages();
+      this.toast('ステージ設定をルール標準にリセットしました', 'success');
+    },
+    /** Human label for an override-capable param. */
+    stageTypeLabel(t) {
+      return ({
+        QUANTITATIVE: '定量 (Database Search)',
+        BULK_REJECTION: '一括除外',
+        INDEPENDENCE: '独立性',
+        FAR: 'FAR',
+        FINANCIAL: '財務',
+        QUALITATIVE_REVIEW: '定性レビュー',
+        CUSTOM: 'カスタム',
+      })[t] || t;
+    },
+
     /** Refresh derived view state after entering the Screening view. */
     async loadScreeningContext() {
       if (!this.currentProject) return;
@@ -1676,6 +1741,7 @@ function tpApp() {
       if (!this.activeScreeningJurisdiction && this.screeningJurisdictions.length) {
         this.activeScreeningJurisdiction = this.screeningJurisdictions[0];
       }
+      await this.refreshActiveStages();
       this.loadActiveResult();
     },
     /** Codes that currently have a stored result OR are bound to the project. */
@@ -1691,6 +1757,8 @@ function tpApp() {
       const j = this.activeScreeningJurisdiction;
       this.currentScreeningResult = this.currentProject?.screeningResults?.[j] || null;
       this.ciqDiffSummary = this.currentScreeningResult?.ciqDiff || null;
+      // Phase 8.2: refresh the stage editor when the jurisdiction changes.
+      await this.refreshActiveStages();
       if (!this.currentScreeningResult) { this.reviewRows = []; this.acceptedRows = []; return; }
       const r = this.currentScreeningResult;
       const ids = [...r.pendingReview, ...r.acceptedCompanies];
@@ -1775,49 +1843,43 @@ function tpApp() {
     sankeyWidth() {
       return Math.max(640, (this.currentScreeningResult?.stages?.length || 0) * 130 + 160);
     },
-    sankeyBoxes() {
-      const r = this.currentScreeningResult; if (!r) return [];
+    /**
+     * Render the entire Sankey SVG as a string. Using x-html on a wrapper
+     * <div> bypasses the SVG namespace issues Alpine's <template x-for>
+     * occasionally hits inside <svg>.
+     */
+    sankeySvg() {
+      const r = this.currentScreeningResult; if (!r) return '';
       const total = r.initialPoolCount || 1;
       const colW = 100, gap = 30, yMid = 110, hMax = 180;
-      const boxes = [];
-      // Pool column at left.
-      boxes.push({ x: 10, y: yMid - hMax/2, w: colW, h: hMax, fill: '#3b82f6', label: 'Pool ' + total });
-      let leftHeight = hMax;
+      const w = this.sankeyWidth();
+      let paths = ''; let boxes = '';
+      // Initial pool column.
+      boxes += `<g><rect x="10" y="${yMid - hMax/2}" width="${colW}" height="${hMax}" fill="#3b82f6" stroke="#1e293b" stroke-width="0.5"/>`
+            +  `<text x="${10 + colW/2}" y="${yMid}" text-anchor="middle" dominant-baseline="middle" font-size="11" fill="#fff">Pool ${total}</text></g>`;
+      let prevPassH = hMax, prevX = 10 + colW;
       for (let i = 0; i < r.stages.length; i++) {
         const s = r.stages[i];
         const passH = Math.max(8, hMax * (s.passCount / total));
         const rejH  = Math.max(2, hMax * (s.rejectCount / total));
         const x = 10 + (i + 1) * (colW + gap);
-        boxes.push({ x, y: yMid - passH/2, w: colW, h: passH, fill: '#10b981', label: 'PASS ' + s.passCount });
-        if (s.rejectCount) {
-          boxes.push({ x, y: yMid + passH/2 + 10, w: colW, h: rejH, fill: '#f43f5e', label: 'REJ ' + s.rejectCount });
-        }
-        leftHeight = passH;
-      }
-      return boxes;
-    },
-    sankeyPaths() {
-      const r = this.currentScreeningResult; if (!r) return [];
-      // Simple horizontal ribbons connecting consecutive pass-boxes.
-      const total = r.initialPoolCount || 1;
-      const colW = 100, gap = 30, yMid = 110, hMax = 180;
-      const paths = [];
-      let prevPassH = hMax, prevX = 10 + colW;
-      for (let i = 0; i < r.stages.length; i++) {
-        const s = r.stages[i];
-        const passH = Math.max(8, hMax * (s.passCount / total));
-        const x2 = 10 + (i + 1) * (colW + gap);
-        // Pass ribbon (left middle -> right middle).
+        // Ribbon between previous pass column and the current one.
         const y1Top = yMid - prevPassH/2, y1Bot = yMid + prevPassH/2;
         const y2Top = yMid - passH/2,     y2Bot = yMid + passH/2;
-        const cx1 = prevX + gap/2, cx2 = x2 - gap/2;
-        paths.push({
-          d: `M ${prevX} ${y1Top} C ${cx1} ${y1Top}, ${cx2} ${y2Top}, ${x2} ${y2Top} L ${x2} ${y2Bot} C ${cx2} ${y2Bot}, ${cx1} ${y1Bot}, ${prevX} ${y1Bot} Z`,
-          fill: '#10b981',
-        });
-        prevPassH = passH; prevX = x2 + colW;
+        const cx1 = prevX + gap/2, cx2 = x - gap/2;
+        paths += `<path d="M ${prevX} ${y1Top} C ${cx1} ${y1Top}, ${cx2} ${y2Top}, ${x} ${y2Top} L ${x} ${y2Bot} C ${cx2} ${y2Bot}, ${cx1} ${y1Bot}, ${prevX} ${y1Bot} Z" fill="#10b981" fill-opacity="0.45"/>`;
+        // Pass box.
+        boxes += `<g><rect x="${x}" y="${yMid - passH/2}" width="${colW}" height="${passH}" fill="#10b981" stroke="#1e293b" stroke-width="0.5"/>`
+              +  `<text x="${x + colW/2}" y="${yMid}" text-anchor="middle" dominant-baseline="middle" font-size="11" fill="#fff">${s.id} PASS ${s.passCount}</text></g>`;
+        // Reject box (only when reject count > 0).
+        if (s.rejectCount) {
+          boxes += `<g><rect x="${x}" y="${yMid + passH/2 + 10}" width="${colW}" height="${rejH}" fill="#f43f5e" stroke="#1e293b" stroke-width="0.5"/>`
+                +  `<text x="${x + colW/2}" y="${yMid + passH/2 + 10 + rejH/2}" text-anchor="middle" dominant-baseline="middle" font-size="10" fill="#fff">REJ ${s.rejectCount}</text></g>`;
+        }
+        prevPassH = passH; prevX = x + colW;
       }
-      return paths;
+      // Paths first (behind), then boxes.
+      return `<svg viewBox="0 0 ${w} 220" width="${w}" height="220" xmlns="http://www.w3.org/2000/svg">${paths}${boxes}</svg>`;
     },
 
     /* ====================================================================
@@ -6145,7 +6207,16 @@ async function runScreening(project, jurisdictionId, opts = {}) {
   };
 
   // Stages, sorted by order. customStages come last unless intermixed.
+  // Project-level stage overrides (Phase 8.2) let the user toggle a stage
+  // off or tweak its params from the screening view without forking the
+  // rule. Overrides are merged shallowly except params (deep-merged).
+  const overrides = project.stageOverrides?.[jurisdictionId] || {};
   const stages = [...(rule.screeningStages || []), ...(rule.customStages || [])]
+    .map(s => {
+      const ov = overrides[s.id];
+      if (!ov) return s;
+      return { ...s, ...ov, params: { ...(s.params || {}), ...(ov.params || {}) } };
+    })
     .filter(s => s.enabled !== false)
     .sort((a, b) => a.order - b.order);
 
@@ -10290,9 +10361,11 @@ function runAshimoriVerification(pool) {
         <div class="flex items-center gap-3 text-sm">
           <template x-if="currentProject">
             <div class="flex items-center gap-2">
-              <span class="text-slate-500">管轄:</span>
-              <template x-for="j in currentProject.targetJurisdiction" :key="j">
-                <span class="px-2 py-0.5 bg-slate-200 rounded text-xs" x-text="j"></span>
+              <span class="text-slate-500">適用ルール:</span>
+              <template x-for="j in (currentProject.targetJurisdiction?.length ? currentProject.targetJurisdiction : ['OECD_GENERIC'])" :key="j">
+                <span class="px-2 py-0.5 rounded text-xs font-semibold border border-rose-500 bg-rose-50 text-rose-700"
+                      :title="jurisdictionLabel(j)"
+                      x-text="j + ' (' + jurisdictionLabel(j) + ')'"></span>
               </template>
               <button class="ml-2 px-3 py-1 border rounded" @click="saveProject()">保存</button>
               <button class="px-3 py-1 border rounded" @click="exportCurrent()">エクスポート</button>
@@ -10708,14 +10781,17 @@ Foo Corp,JP,334413,2024,1000000,80000,..."></textarea>
           </div>
           <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             <template x-for="r in allRules" :key="r.jurisdictionId">
-              <div class="border-l-4 rounded-lg shadow p-4 bg-white cursor-pointer hover:shadow-md transition"
-                   :class="ruleColorClass(r)"
+              <div class="border-l-4 rounded-lg shadow p-4 bg-white cursor-pointer hover:shadow-md transition relative"
+                   :class="[ruleColorClass(r), isRuleBound(r) ? 'ring-2 ring-rose-500 ring-offset-1' : '']"
                    @click="openRuleEditor(r.jurisdictionId)">
                 <div class="flex items-center justify-between mb-1">
                   <h3 class="font-semibold text-sm" x-text="r.name"></h3>
-                  <span class="text-[10px] px-1.5 py-0.5 rounded"
-                        :class="r.isGenericModel ? 'bg-purple-200 text-purple-800' : r.isOfficial ? 'bg-blue-200 text-blue-800' : 'bg-emerald-200 text-emerald-800'"
-                        x-text="r.isGenericModel ? 'GENERIC' : r.isOfficial ? 'OFFICIAL' : 'CUSTOM'"></span>
+                  <div class="flex items-center gap-1">
+                    <span x-show="isRuleBound(r)" class="text-[10px] px-1.5 py-0.5 rounded bg-rose-500 text-white font-semibold">適用中</span>
+                    <span class="text-[10px] px-1.5 py-0.5 rounded"
+                          :class="r.isGenericModel ? 'bg-purple-200 text-purple-800' : r.isOfficial ? 'bg-blue-200 text-blue-800' : 'bg-emerald-200 text-emerald-800'"
+                          x-text="r.isGenericModel ? 'GENERIC' : r.isOfficial ? 'OFFICIAL' : 'CUSTOM'"></span>
+                  </div>
                 </div>
                 <div class="text-xs text-slate-600 space-y-0.5">
                   <div><span class="font-mono" x-text="r.jurisdictionId"></span> / v<span x-text="r.version"></span></div>
@@ -11119,6 +11195,145 @@ Foo Corp,JP,334413,2024,1000000,80000,..."></textarea>
               </template>
             </div>
 
+            <!-- Phase 8.2: Per-stage configuration editor -->
+            <div class="bg-white rounded-lg shadow p-5">
+              <div class="flex items-center justify-between mb-3">
+                <div>
+                  <h3 class="font-semibold">ステージ別 スクリーニング条件</h3>
+                  <p class="text-[11px] text-slate-500">適用ルール
+                    <span class="font-mono px-1.5 py-0.5 bg-rose-50 border border-rose-300 text-rose-700 rounded ml-1"
+                          x-text="activeScreeningJurisdiction + (activeRule ? ' / ' + activeRule.name : '')"></span>
+                    のステージを上書きできます。ここでの変更はルール本体には影響せず、このプロジェクトでのみ有効です。
+                  </p>
+                </div>
+                <button class="px-3 py-1 text-xs border rounded" @click="resetStageOverrides()">ルール標準にリセット</button>
+              </div>
+              <div class="space-y-2 text-sm">
+                <template x-for="stage in activeStages" :key="stage.id">
+                  <div class="border rounded p-3"
+                       :class="stage._hasOverride ? 'border-amber-400 bg-amber-50' : 'border-slate-200 bg-white'">
+                    <div class="flex items-center gap-3 mb-2">
+                      <label class="flex items-center gap-2 text-xs">
+                        <input type="checkbox" :checked="stage.enabled !== false"
+                               @change="updateStageOverride(stage.id, { enabled: $event.target.checked })">
+                        <span class="font-mono font-semibold" x-text="stage.id"></span>
+                      </label>
+                      <span class="text-xs px-2 py-0.5 bg-slate-100 rounded" x-text="stageTypeLabel(stage.type)"></span>
+                      <span class="text-xs" x-text="stage.label"></span>
+                      <span x-show="stage._hasOverride" class="text-[10px] text-amber-700">(編集中)</span>
+                    </div>
+
+                    <!-- QUANTITATIVE -->
+                    <div x-show="stage.type === 'QUANTITATIVE'" class="grid grid-cols-3 gap-3 text-xs">
+                      <div>
+                        <label class="block text-slate-500 mb-1">業種コード一致桁数</label>
+                        <select class="w-full px-2 py-1 border rounded"
+                                :value="stage.params?.industryMatchLevel ?? 4"
+                                @change="updateStageOverride(stage.id, { params: { industryMatchLevel: Number($event.target.value) } })">
+                          <option value="2">2桁</option><option value="3">3桁</option><option value="4">4桁完全一致</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label class="block text-slate-500 mb-1">最低保有年数</label>
+                        <input type="number" min="1" max="10" class="w-full px-2 py-1 border rounded"
+                               :value="stage.params?.yearsCoverage?.required ?? 3"
+                               @change="updateStageOverride(stage.id, { params: { yearsCoverage: { required: Number($event.target.value), mode: stage.params?.yearsCoverage?.mode || 'at_least' } } })">
+                      </div>
+                      <div>
+                        <label class="block text-slate-500 mb-1">売上倍率レンジ (tested party 比)</label>
+                        <div class="flex gap-1 items-center">
+                          <input type="number" step="0.05" class="w-20 px-2 py-1 border rounded"
+                                 :value="stage.params?.revenueRangeRatio?.[0] ?? 0.25"
+                                 @change="updateStageOverride(stage.id, { params: { revenueRangeRatio: [Number($event.target.value), stage.params?.revenueRangeRatio?.[1] ?? 4.0] } })">
+                          <span>〜</span>
+                          <input type="number" step="0.05" class="w-20 px-2 py-1 border rounded"
+                                 :value="stage.params?.revenueRangeRatio?.[1] ?? 4.0"
+                                 @change="updateStageOverride(stage.id, { params: { revenueRangeRatio: [stage.params?.revenueRangeRatio?.[0] ?? 0.25, Number($event.target.value)] } })">
+                        </div>
+                      </div>
+                    </div>
+
+                    <!-- BULK_REJECTION -->
+                    <div x-show="stage.type === 'BULK_REJECTION' || stage.type === 'FINANCIAL'" class="grid grid-cols-2 gap-3 text-xs">
+                      <label class="flex items-center gap-2">
+                        <input type="checkbox" :checked="stage.params?.enableAvgOpLoss !== false"
+                               @change="updateStageOverride(stage.id, { params: { enableAvgOpLoss: $event.target.checked } })">
+                        平均営業利益 ≤ 0 を除外
+                      </label>
+                      <label class="flex items-center gap-2">
+                        <input type="checkbox" :checked="stage.params?.enableDescMissing !== false"
+                               @change="updateStageOverride(stage.id, { params: { enableDescMissing: $event.target.checked } })">
+                        事業概要欠損を除外
+                      </label>
+                      <label class="flex items-center gap-2">
+                        Net Sales 欠損が
+                        <input type="number" min="1" max="10" class="w-16 px-2 py-1 border rounded"
+                               :value="stage.params?.netSalesMissingThreshold ?? 2"
+                               @change="updateStageOverride(stage.id, { params: { netSalesMissingThreshold: Number($event.target.value), enableNetSalesMissing: true } })">
+                        年以上で除外
+                      </label>
+                      <label class="flex items-center gap-2">
+                        Op Income 欠損が
+                        <input type="number" min="1" max="10" class="w-16 px-2 py-1 border rounded"
+                               :value="stage.params?.opIncomeMissingThreshold ?? 2"
+                               @change="updateStageOverride(stage.id, { params: { opIncomeMissingThreshold: Number($event.target.value), enableOpIncomeMissing: true } })">
+                        年以上で除外
+                      </label>
+                      <label class="flex items-center gap-2 col-span-2">
+                        <input type="checkbox" :checked="!!stage.params?.enableLowRdIntensity"
+                               @change="updateStageOverride(stage.id, { params: { enableLowRdIntensity: $event.target.checked } })">
+                        R&D / Net Sales ≤
+                        <input type="number" step="0.01" class="w-20 px-2 py-1 border rounded"
+                               :value="stage.params?.rdIntensityThreshold ?? 0.03"
+                               @change="updateStageOverride(stage.id, { params: { rdIntensityThreshold: Number($event.target.value) } })">
+                        で除外
+                      </label>
+                    </div>
+
+                    <!-- INDEPENDENCE -->
+                    <div x-show="stage.type === 'INDEPENDENCE'" class="grid grid-cols-2 gap-3 text-xs">
+                      <div>
+                        <label class="block text-slate-500 mb-1">最大持株比率</label>
+                        <input type="number" step="0.05" min="0" max="1" class="w-full px-2 py-1 border rounded"
+                               :value="stage.params?.maxOwnership ?? 0.5"
+                               @change="updateStageOverride(stage.id, { params: { maxOwnership: Number($event.target.value) } })">
+                        <span class="text-[10px] text-slate-400">小数 (0.5 = 50%)</span>
+                      </div>
+                      <div>
+                        <label class="block text-slate-500 mb-1">情報不明時の扱い</label>
+                        <select class="w-full px-2 py-1 border rounded"
+                                :value="stage.params?.unknownMode || 'conservative'"
+                                @change="updateStageOverride(stage.id, { params: { unknownMode: $event.target.value } })">
+                          <option value="conservative">conservative (通過)</option>
+                          <option value="strict">strict (除外)</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    <!-- QUALITATIVE_REVIEW -->
+                    <div x-show="stage.type === 'QUALITATIVE_REVIEW'" class="text-xs">
+                      <label class="flex items-center gap-2">
+                        <input type="checkbox" :checked="stage.params?.useCIQAsInitial !== false"
+                               @change="updateStageOverride(stage.id, { params: { useCIQAsInitial: $event.target.checked } })">
+                        Capital IQ の Rejection Reason を初期判定として採用
+                      </label>
+                    </div>
+
+                    <!-- CUSTOM / FAR -->
+                    <div x-show="stage.type === 'CUSTOM'" class="text-xs text-slate-500">
+                      カスタム条件式の編集は「法域・ルール設定」画面でルールを編集してください。
+                    </div>
+                    <div x-show="stage.type === 'FAR'" class="text-xs text-slate-500">
+                      FAR ステージは Tested Party の機能タグとの重なりで自動判定（手動レビュー推奨）。
+                    </div>
+                  </div>
+                </template>
+                <template x-if="!activeStages.length">
+                  <div class="text-xs text-slate-400 text-center py-3">バインドされたルールがありません</div>
+                </template>
+              </div>
+            </div>
+
             <!-- Execution panel -->
             <div class="bg-white rounded-lg shadow p-5">
               <div class="flex items-center justify-between mb-3">
@@ -11207,20 +11422,7 @@ Foo Corp,JP,334413,2024,1000000,80000,..."></textarea>
                   <!-- Sankey (SVG, single stage column per stage) -->
                   <div>
                     <h4 class="font-semibold mb-2 text-sm">フロー図 (Sankey 簡易)</h4>
-                    <div class="overflow-auto border rounded p-3 bg-slate-50">
-                      <svg :viewBox="'0 0 ' + sankeyWidth() + ' 220'" :width="sankeyWidth()" height="220">
-                        <template x-for="(b, bi) in sankeyBoxes()" :key="bi">
-                          <g>
-                            <rect :x="b.x" :y="b.y" :width="b.w" :height="b.h" :fill="b.fill" stroke="#1e293b" stroke-width="0.5"></rect>
-                            <text :x="b.x + b.w / 2" :y="b.y + b.h / 2" text-anchor="middle" dominant-baseline="middle"
-                                  font-size="11" :fill="b.textFill || '#fff'" x-text="b.label"></text>
-                          </g>
-                        </template>
-                        <template x-for="(p, pi) in sankeyPaths()" :key="pi">
-                          <path :d="p.d" :fill="p.fill" fill-opacity="0.45"></path>
-                        </template>
-                      </svg>
-                    </div>
+                    <div class="overflow-auto border rounded p-3 bg-slate-50" x-html="sankeySvg()"></div>
                   </div>
 
                   <!-- Rejection breakdown -->
